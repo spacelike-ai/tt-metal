@@ -46,14 +46,24 @@ class TableTransformer(torch.nn.Module):
         self.tt_input_proj = Linear.from_torch(
             weight=self.input_proj.weight.squeeze(3).squeeze(2),
             bias=self.input_proj.bias,
+            dtype=ttnn.bfloat16,
             device=self._device,
         )
-        self.tt_class_embed = Linear.from_torch_model(self.class_embed, device=self._device)
+        self.tt_class_embed = Linear.from_torch_model(
+            self.class_embed,
+            dtype=ttnn.bfloat16,
+            device=self._device,
+        )
         self.tt_transformer = Transformer(self.transformer, device=self._device)
-        self.tt_bbox_embed = MultilayerPerceptron.from_torch_model(self.bbox_embed, device=self._device)
+        self.tt_bbox_embed = MultilayerPerceptron.from_torch_model(
+            self.bbox_embed,
+            dtype=ttnn.bfloat16,
+            device=self._device,
+        )
         self.tt_query_embed = ttnn.from_torch(
             self.query_embed.weight.unsqueeze(0),
             layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat8_b,
             device=self._device,
         )
 
@@ -75,6 +85,7 @@ class TableTransformer(torch.nn.Module):
         x = ttnn.from_torch(
             torch_x.permute(0, 2, 3, 1),
             layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat8_b,
             device=self._device,
         )
 
@@ -86,6 +97,7 @@ class TableTransformer(torch.nn.Module):
         pos = ttnn.from_torch(
             positional_encoding(mask),
             layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat16,
             device=self._device,
         )
 
@@ -103,6 +115,7 @@ class TableTransformer(torch.nn.Module):
                 fill_value=0.0,
             ),
             layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat16,
             device=self._device,
         )
 
@@ -137,24 +150,28 @@ class Attention:
         self._query = Linear.from_torch(
             weight=attention.in_proj_weight[:256],
             bias=attention.in_proj_bias[:256],
+            dtype=ttnn.bfloat16,
             device=device,
         )
 
         self._key = Linear.from_torch(
             weight=attention.in_proj_weight[256:512],
             bias=attention.in_proj_bias[256:512],
+            dtype=ttnn.bfloat16,
             device=device,
         )
 
         self._value = Linear.from_torch(
             weight=attention.in_proj_weight[512:],
             bias=attention.in_proj_bias[512:],
+            dtype=ttnn.bfloat16,
             device=device,
         )
 
         self._out = Linear.from_torch(
             weight=attention.out_proj.weight,
             bias=attention.out_proj.bias,
+            dtype=ttnn.bfloat16,
             device=device,
         )
 
@@ -235,9 +252,15 @@ class Linear:
         cls,
         model: torch.nn.Linear,
         *,
+        dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
     ) -> Linear:
-        return cls.from_torch(weight=model.weight, bias=model.bias, device=device)
+        return cls.from_torch(
+            weight=model.weight,
+            bias=model.bias,
+            dtype=dtype,
+            device=device,
+        )
 
     @classmethod
     def from_torch(
@@ -245,10 +268,25 @@ class Linear:
         *,
         weight: torch.Tensor,
         bias: torch.Tensor | None = None,
+        dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
     ) -> Linear:
-        tt_weight = ttnn.from_torch(weight.transpose(0, 1), layout=ttnn.TILE_LAYOUT, device=device)
-        tt_bias = None if bias is None else ttnn.from_torch(bias.unsqueeze(0), layout=ttnn.TILE_LAYOUT, device=device)
+        tt_weight = ttnn.from_torch(
+            weight.transpose(0, 1),
+            layout=ttnn.TILE_LAYOUT,
+            dtype=dtype,
+            device=device,
+        )
+        tt_bias = (
+            None
+            if bias is None
+            else ttnn.from_torch(
+                bias.unsqueeze(0),
+                layout=ttnn.TILE_LAYOUT,
+                dtype=dtype,
+                device=device,
+            )
+        )
 
         return cls(weight=tt_weight, bias=tt_bias)
 
@@ -282,12 +320,14 @@ class LayerNorm:
         cls,
         model: torch.nn.Linear,
         *,
+        dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
     ) -> LayerNorm:
         return cls.from_torch(
             weight=model.weight,
             bias=model.bias,
             epsilon=model.eps,
+            dtype=dtype,
             device=device,
         )
 
@@ -298,11 +338,22 @@ class LayerNorm:
         weight: torch.Tensor,
         bias: torch.Tensor,
         epsilon: float = 1e-05,
+        dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
     ) -> LayerNorm:
         return cls(
-            weight=ttnn.from_torch(weight, layout=ttnn.TILE_LAYOUT, device=device),
-            bias=ttnn.from_torch(bias, layout=ttnn.TILE_LAYOUT, device=device),
+            weight=ttnn.from_torch(
+                weight,
+                layout=ttnn.TILE_LAYOUT,
+                dtype=dtype,
+                device=device,
+            ),
+            bias=ttnn.from_torch(
+                bias,
+                layout=ttnn.TILE_LAYOUT,
+                dtype=dtype,
+                device=device,
+            ),
             epsilon=epsilon,
         )
 
@@ -422,9 +473,10 @@ class MultilayerPerceptron:
         cls,
         mlp: TorchMultilayerPerceptron,
         *,
+        dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
     ) -> MultilayerPerceptron:
-        layers = [Linear.from_torch_model(layer, device=device) for layer in mlp.layers]
+        layers = [Linear.from_torch_model(layer, dtype=dtype, device=device) for layer in mlp.layers]
 
         return cls(layers=layers)
 
@@ -487,14 +539,14 @@ def positional_encoding(mask: torch.Tensor) -> torch.Tensor:
 
     not_mask = ~mask
 
-    y_embed = not_mask.cumsum(1, dtype=torch.float32)
-    x_embed = not_mask.cumsum(2, dtype=torch.float32)
+    y_embed = not_mask.cumsum(1, dtype=torch.bfloat16)
+    x_embed = not_mask.cumsum(2, dtype=torch.bfloat16)
 
     eps = 1e-6
     y_embed = y_embed / (y_embed[:, -1:, :] + eps) * 2 * math.pi
     x_embed = x_embed / (x_embed[:, :, -1:] + eps) * 2 * math.pi
 
-    dim_t = torch.arange(num_pos_feats, dtype=torch.float32)
+    dim_t = torch.arange(num_pos_feats, dtype=torch.bfloat16)
     dim_t = temperature ** (2 * (dim_t // 2) / num_pos_feats)
 
     pos_x = x_embed[:, :, :, None] / dim_t
