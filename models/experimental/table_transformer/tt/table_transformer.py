@@ -5,8 +5,9 @@ import math
 import torch
 import torch.nn.functional as torch_functional
 import torchvision.models
-import ttnn
 from loguru import logger
+
+import ttnn
 
 
 class TableTransformer(torch.nn.Module):
@@ -46,18 +47,18 @@ class TableTransformer(torch.nn.Module):
         self.tt_input_proj = Linear.from_torch(
             weight=self.input_proj.weight.squeeze(3).squeeze(2),
             bias=self.input_proj.bias,
-            dtype=ttnn.bfloat16,
+            dtype=ttnn.bfloat8_b,
             device=self._device,
         )
         self.tt_class_embed = Linear.from_torch_model(
             self.class_embed,
-            dtype=ttnn.bfloat16,
+            dtype=ttnn.bfloat8_b,
             device=self._device,
         )
         self.tt_transformer = Transformer(self.transformer, device=self._device)
         self.tt_bbox_embed = MultilayerPerceptron.from_torch_model(
             self.bbox_embed,
-            dtype=ttnn.bfloat16,
+            dtype=ttnn.bfloat8_b,
             device=self._device,
         )
         self.tt_query_embed = ttnn.from_torch(
@@ -97,7 +98,7 @@ class TableTransformer(torch.nn.Module):
         pos = ttnn.from_torch(
             positional_encoding(mask),
             layout=ttnn.TILE_LAYOUT,
-            dtype=ttnn.bfloat16,
+            dtype=ttnn.bfloat8_b,
             device=self._device,
         )
 
@@ -105,6 +106,7 @@ class TableTransformer(torch.nn.Module):
         x = ttnn.from_torch(
             ttnn.to_torch(proj).flatten(start_dim=1, end_dim=2),
             layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat8_b,
             device=self._device,
         )
         ttnn.deallocate(proj)
@@ -115,13 +117,12 @@ class TableTransformer(torch.nn.Module):
                 fill_value=0.0,
             ),
             layout=ttnn.TILE_LAYOUT,
-            dtype=ttnn.bfloat16,
+            dtype=ttnn.bfloat8_b,
             device=self._device,
         )
 
         query_pos = ttnn.repeat(self.tt_query_embed, ttnn.Shape([batch_size, 1, 1]))
 
-        logger.debug("running transformer...")
         transformer_output = self.tt_transformer(
             encoder_input=x,
             decoder_input=zero_decoder_input,
@@ -150,28 +151,28 @@ class Attention:
         self._query = Linear.from_torch(
             weight=attention.in_proj_weight[:256],
             bias=attention.in_proj_bias[:256],
-            dtype=ttnn.bfloat16,
+            dtype=ttnn.bfloat8_b,
             device=device,
         )
 
         self._key = Linear.from_torch(
             weight=attention.in_proj_weight[256:512],
             bias=attention.in_proj_bias[256:512],
-            dtype=ttnn.bfloat16,
+            dtype=ttnn.bfloat8_b,
             device=device,
         )
 
         self._value = Linear.from_torch(
             weight=attention.in_proj_weight[512:],
             bias=attention.in_proj_bias[512:],
-            dtype=ttnn.bfloat16,
+            dtype=ttnn.bfloat8_b,
             device=device,
         )
 
         self._out = Linear.from_torch(
             weight=attention.out_proj.weight,
             bias=attention.out_proj.bias,
-            dtype=ttnn.bfloat16,
+            dtype=ttnn.bfloat8_b,
             device=device,
         )
 
@@ -194,7 +195,9 @@ class Attention:
         tile_padding = smallest_multiple(k_sequence_length, 32) - smallest_multiple(q_sequence_length, 32)
         unpadded_shape = list(q_proj.shape)
         unpadded_shape[1] = k_sequence_length
+        q_proj = ttnn.clone(q_proj, dtype=ttnn.bfloat16)
         padded_q_proj = ttnn.pad(q_proj, [(0, tile_padding), (0, 0)], 0)
+        padded_q_proj = ttnn.clone(padded_q_proj, dtype=ttnn.bfloat8_b)
         padded_q_proj = ttnn.reshape(
             padded_q_proj,
             ttnn.Shape(unpadded_shape, padded_q_proj.shape.with_tile_padding()),
@@ -239,6 +242,7 @@ class Attention:
         clean_output = ttnn.from_torch(
             ttnn.to_torch(output),
             layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat8_b,
             device=output.device(),
         )
         ttnn.deallocate(output)
@@ -385,10 +389,10 @@ class LayerNorm:
 class TransformerEncoderLayer:
     def __init__(self, layer: torch.nn.TransformerEncoderLayer, /, *, device: ttnn.Device) -> None:
         self._self_attention = Attention(layer.self_attn, device=device)
-        self._norm1 = LayerNorm.from_torch_model(layer.norm1, device=device)
-        self._norm2 = LayerNorm.from_torch_model(layer.norm2, device=device)
-        self._linear1 = Linear.from_torch_model(layer.linear1, device=device)
-        self._linear2 = Linear.from_torch_model(layer.linear2, device=device)
+        self._norm1 = LayerNorm.from_torch_model(layer.norm1, dtype=ttnn.bfloat16, device=device)
+        self._norm2 = LayerNorm.from_torch_model(layer.norm2, dtype=ttnn.bfloat16, device=device)
+        self._linear1 = Linear.from_torch_model(layer.linear1, dtype=ttnn.bfloat8_b, device=device)
+        self._linear2 = Linear.from_torch_model(layer.linear2, dtype=ttnn.bfloat8_b, device=device)
 
     def __call__(self, x: ttnn.Tensor, *, pos: ttnn.Tensor) -> ttnn.Tensor:
         nx = self._norm1(x)
@@ -407,11 +411,11 @@ class TransformerDecoderLayer:
         self._device = device
         self._self_attention = Attention(layer.self_attn, device=device)
         self._cross_attention = Attention(layer.multihead_attn, device=device)
-        self._norm1 = LayerNorm.from_torch_model(layer.norm1, device=device)
-        self._norm2 = LayerNorm.from_torch_model(layer.norm2, device=device)
-        self._norm3 = LayerNorm.from_torch_model(layer.norm3, device=device)
-        self._linear1 = Linear.from_torch_model(layer.linear1, device=device)
-        self._linear2 = Linear.from_torch_model(layer.linear2, device=device)
+        self._norm1 = LayerNorm.from_torch_model(layer.norm1, dtype=ttnn.bfloat16, device=device)
+        self._norm2 = LayerNorm.from_torch_model(layer.norm2, dtype=ttnn.bfloat16, device=device)
+        self._norm3 = LayerNorm.from_torch_model(layer.norm3, dtype=ttnn.bfloat16, device=device)
+        self._linear1 = Linear.from_torch_model(layer.linear1, dtype=ttnn.bfloat8_b, device=device)
+        self._linear2 = Linear.from_torch_model(layer.linear2, dtype=ttnn.bfloat8_b, device=device)
 
     def __call__(
         self,
@@ -438,8 +442,8 @@ class TransformerDecoderLayer:
 
 class Transformer:
     def __init__(self, transformer: torch.nn.Transformer, /, *, device: ttnn.Device) -> None:
-        self._encoder_norm = LayerNorm.from_torch_model(transformer.encoder.norm, device=device)
-        self._decoder_norm = LayerNorm.from_torch_model(transformer.decoder.norm, device=device)
+        self._encoder_norm = LayerNorm.from_torch_model(transformer.encoder.norm, dtype=ttnn.bfloat16, device=device)
+        self._decoder_norm = LayerNorm.from_torch_model(transformer.decoder.norm, dtype=ttnn.bfloat16, device=device)
 
         self._encoder_layers = [TransformerEncoderLayer(layer, device=device) for layer in transformer.encoder.layers]
         self._decoder_layers = [TransformerDecoderLayer(layer, device=device) for layer in transformer.decoder.layers]
