@@ -65,6 +65,7 @@ class TableTransformer(torch.nn.Module):
             self.query_embed.weight.unsqueeze(0),
             layout=ttnn.TILE_LAYOUT,
             dtype=ttnn.bfloat8_b,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
             device=self._device,
         )
 
@@ -87,6 +88,7 @@ class TableTransformer(torch.nn.Module):
             torch_x.permute(0, 2, 3, 1),
             layout=ttnn.TILE_LAYOUT,
             dtype=ttnn.bfloat8_b,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
             device=self._device,
         )
 
@@ -99,6 +101,7 @@ class TableTransformer(torch.nn.Module):
             positional_encoding(mask),
             layout=ttnn.TILE_LAYOUT,
             dtype=ttnn.bfloat8_b,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
             device=self._device,
         )
 
@@ -107,6 +110,7 @@ class TableTransformer(torch.nn.Module):
             ttnn.to_torch(proj).flatten(start_dim=1, end_dim=2),
             layout=ttnn.TILE_LAYOUT,
             dtype=ttnn.bfloat8_b,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
             device=self._device,
         )
         ttnn.deallocate(proj)
@@ -118,6 +122,7 @@ class TableTransformer(torch.nn.Module):
             ),
             layout=ttnn.TILE_LAYOUT,
             dtype=ttnn.bfloat8_b,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
             device=self._device,
         )
 
@@ -197,19 +202,31 @@ class Attention:
         unpadded_shape[1] = k_sequence_length
         q_proj = ttnn.clone(q_proj, dtype=ttnn.bfloat16)
         padded_q_proj = ttnn.pad(q_proj, [(0, tile_padding), (0, 0)], 0)
-        padded_q_proj = ttnn.clone(padded_q_proj, dtype=ttnn.bfloat8_b)
+        padded_q_proj = ttnn.clone(
+            padded_q_proj,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            dtype=ttnn.bfloat8_b,
+        )
         padded_q_proj = ttnn.reshape(
             padded_q_proj,
             ttnn.Shape(unpadded_shape, padded_q_proj.shape.with_tile_padding()),
         )
         ttnn.deallocate(q_proj)
 
-        qkv_proj = ttnn.concat([padded_q_proj, k_proj, v_proj], dim=2)
+        qkv_proj = ttnn.concat(
+            [padded_q_proj, k_proj, v_proj],
+            dim=2,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+        )
         ttnn.deallocate(padded_q_proj)
         ttnn.deallocate(k_proj)
         ttnn.deallocate(v_proj)
 
-        (q, k, v) = ttnn.transformer.split_query_key_value_and_split_heads(qkv_proj, num_heads=self._num_heads)
+        (q, k, v) = ttnn.transformer.split_query_key_value_and_split_heads(
+            qkv_proj,
+            num_heads=self._num_heads,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+        )
         ttnn.deallocate(qkv_proj)
 
         # revert padding of q
@@ -218,20 +235,34 @@ class Attention:
         unpadded_shape[2] = q_sequence_length
         q = ttnn.reshape(q, ttnn.Shape(unpadded_shape, padded_shape))
 
-        attention_scores = ttnn.matmul(q, k)
+        attention_scores = ttnn.matmul(
+            q,
+            k,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+        )
         ttnn.deallocate(q)
         ttnn.deallocate(k)
 
         attention_probs = ttnn.transformer.attention_softmax(
-            attention_scores, attention_mask=None, head_size=self._head_dim
+            attention_scores,
+            attention_mask=None,
+            head_size=self._head_dim,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
         )
         ttnn.deallocate(attention_scores)
 
-        pre_output = ttnn.matmul(attention_probs, v)
+        pre_output = ttnn.matmul(
+            attention_probs,
+            v,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+        )
         ttnn.deallocate(attention_probs)
         ttnn.deallocate(v)
 
-        concatenated_pre_output = ttnn.transformer.concatenate_heads(pre_output)
+        concatenated_pre_output = ttnn.transformer.concatenate_heads(
+            pre_output,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+        )
         ttnn.deallocate(pre_output)
 
         output = self._out(concatenated_pre_output)
@@ -243,6 +274,7 @@ class Attention:
             ttnn.to_torch(output),
             layout=ttnn.TILE_LAYOUT,
             dtype=ttnn.bfloat8_b,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
             device=output.device(),
         )
         ttnn.deallocate(output)
@@ -279,6 +311,7 @@ class Linear:
             weight.transpose(0, 1),
             layout=ttnn.TILE_LAYOUT,
             dtype=dtype,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
             device=device,
         )
         tt_bias = (
@@ -288,6 +321,7 @@ class Linear:
                 bias.unsqueeze(0),
                 layout=ttnn.TILE_LAYOUT,
                 dtype=dtype,
+                memory_config=ttnn.L1_MEMORY_CONFIG,
                 device=device,
             )
         )
@@ -315,6 +349,7 @@ class Linear:
             x,
             self._weight,
             bias=self._bias,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
         )
 
 
@@ -350,12 +385,14 @@ class LayerNorm:
                 weight,
                 layout=ttnn.TILE_LAYOUT,
                 dtype=dtype,
+                memory_config=ttnn.L1_MEMORY_CONFIG,
                 device=device,
             ),
             bias=ttnn.from_torch(
                 bias,
                 layout=ttnn.TILE_LAYOUT,
                 dtype=dtype,
+                memory_config=ttnn.L1_MEMORY_CONFIG,
                 device=device,
             ),
             epsilon=epsilon,
@@ -383,6 +420,7 @@ class LayerNorm:
             weight=self._weight,
             bias=self._bias,
             epsilon=self._epsilon,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
         )
 
 
