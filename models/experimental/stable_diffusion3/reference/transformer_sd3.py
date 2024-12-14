@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.loaders.single_file_model import FromOriginalModelMixin
@@ -47,9 +49,7 @@ class SD3Transformer2DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             embedding_dim=inner_dim,
             pooled_projection_dim=pooled_projection_dim,
         )
-        self.context_embedder = torch.nn.Linear(
-            joint_attention_dim, caption_projection_dim
-        )
+        self.context_embedder = torch.nn.Linear(joint_attention_dim, caption_projection_dim)
 
         self.transformer_blocks = torch.nn.ModuleList(
             [
@@ -66,9 +66,7 @@ class SD3Transformer2DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         )
 
         self.norm_out = AdaLayerNormContinuous(inner_dim, inner_dim)
-        self.proj_out = torch.nn.Linear(
-            inner_dim, patch_size * patch_size * self._out_channels
-        )
+        self.proj_out = torch.nn.Linear(inner_dim, patch_size * patch_size * self._out_channels)
 
     def forward(
         self,

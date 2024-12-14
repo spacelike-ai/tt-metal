@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 
 
@@ -23,9 +25,7 @@ class PatchEmbed(torch.nn.Module):
             stride=patch_size,
         )
 
-        self.register_buffer(
-            "pos_embed", torch.zeros((1, pos_embed_max_size**2, embed_dim))
-        )
+        self.register_buffer("pos_embed", torch.zeros((1, pos_embed_max_size**2, embed_dim)))
 
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
         height, width = latent.shape[-2:]
@@ -44,10 +44,6 @@ class PatchEmbed(torch.nn.Module):
         top = (self.pos_embed_max_size - height) // 2
         left = (self.pos_embed_max_size - width) // 2
 
-        spatial_pos_embed = self.pos_embed.reshape(
-            1, self.pos_embed_max_size, self.pos_embed_max_size, -1
-        )
-        spatial_pos_embed = spatial_pos_embed[
-            :, top : top + height, left : left + width, :
-        ]
+        spatial_pos_embed = self.pos_embed.reshape(1, self.pos_embed_max_size, self.pos_embed_max_size, -1)
+        spatial_pos_embed = spatial_pos_embed[:, top : top + height, left : left + width, :]
         return spatial_pos_embed.reshape(1, -1, spatial_pos_embed.shape[-1])

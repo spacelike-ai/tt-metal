@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 
 from .attention import Attention
@@ -44,9 +46,7 @@ class JointTransformerBlock(torch.nn.Module):
             self.ff_context = None
         else:
             self.norm1_context = AdaLayerNormZero(dim)
-            self.norm2_context = torch.nn.LayerNorm(
-                dim, elementwise_affine=False, eps=1e-6
-            )
+            self.norm2_context = torch.nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
             self.ff_context = FeedForward(dim=dim, dim_out=dim, approximate="tanh")
 
         if use_dual_attention:
@@ -69,9 +69,7 @@ class JointTransformerBlock(torch.nn.Module):
         temb: torch.FloatTensor,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         if self.attn2 is None:
-            norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(
-                hidden_states, emb=temb
-            )
+            norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
             norm_hidden_states2 = None
             gate_msa2 = None
         else:
@@ -117,9 +115,7 @@ class JointTransformerBlock(torch.nn.Module):
             hidden_states = hidden_states + attn_output2
 
         norm_hidden_states = self.norm2(hidden_states)
-        norm_hidden_states = (
-            norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
-        )
+        norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
         ff_output = self.ff(norm_hidden_states)
         ff_output = gate_mlp.unsqueeze(1) * ff_output
 
@@ -139,13 +135,8 @@ class JointTransformerBlock(torch.nn.Module):
         encoder_hidden_states = encoder_hidden_states + context_attn_output
 
         norm_encoder_hidden_states = self.norm2_context(encoder_hidden_states)
-        norm_encoder_hidden_states = (
-            norm_encoder_hidden_states * (1 + c_scale_mlp[:, None])
-            + c_shift_mlp[:, None]
-        )
+        norm_encoder_hidden_states = norm_encoder_hidden_states * (1 + c_scale_mlp[:, None]) + c_shift_mlp[:, None]
         context_ff_output = self.ff_context(norm_encoder_hidden_states)
-        encoder_hidden_states = (
-            encoder_hidden_states + c_gate_mlp.unsqueeze(1) * context_ff_output
-        )
+        encoder_hidden_states = encoder_hidden_states + c_gate_mlp.unsqueeze(1) * context_ff_output
 
         return encoder_hidden_states, hidden_states

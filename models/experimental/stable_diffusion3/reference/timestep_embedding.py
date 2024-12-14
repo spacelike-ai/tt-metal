@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import math
 
 import torch
@@ -8,21 +10,13 @@ class CombinedTimestepTextProjEmbeddings(torch.nn.Module):
     def __init__(self, *, embedding_dim: int, pooled_projection_dim: int) -> None:
         super().__init__()
 
-        self.timestep_embedder = _TimestepEmbedding(
-            in_channels=256, time_embed_dim=embedding_dim
-        )
-        self.text_embedder = _PixArtAlphaTextProjection(
-            in_features=pooled_projection_dim, hidden_size=embedding_dim
-        )
+        self.timestep_embedder = _TimestepEmbedding(in_channels=256, time_embed_dim=embedding_dim)
+        self.text_embedder = _PixArtAlphaTextProjection(in_features=pooled_projection_dim, hidden_size=embedding_dim)
 
-    def forward(
-        self, timestep: torch.Tensor, pooled_projection: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, timestep: torch.Tensor, pooled_projection: torch.Tensor) -> torch.Tensor:
         timesteps_proj = _time_proj(num_channels=256, timesteps=timestep)
 
-        timesteps_emb = self.timestep_embedder(
-            timesteps_proj.to(dtype=pooled_projection.dtype)
-        )
+        timesteps_emb = self.timestep_embedder(timesteps_proj.to(dtype=pooled_projection.dtype))
 
         return timesteps_emb + self.text_embedder(pooled_projection)
 
@@ -47,9 +41,7 @@ def _time_proj(num_channels: int, timesteps: torch.Tensor) -> torch.Tensor:
 
     max_period = 10000
 
-    exponent = -math.log(max_period) * torch.arange(
-        start=0, end=half_dim, dtype=torch.float32, device=timesteps.device
-    )
+    exponent = -math.log(max_period) * torch.arange(start=0, end=half_dim, dtype=torch.float32, device=timesteps.device)
     exponent = exponent / half_dim
 
     emb = torch.exp(exponent)
@@ -62,12 +54,8 @@ class _PixArtAlphaTextProjection(torch.nn.Module):
     def __init__(self, *, in_features: int, hidden_size: int) -> None:
         super().__init__()
 
-        self.linear_1 = torch.nn.Linear(
-            in_features=in_features, out_features=hidden_size
-        )
-        self.linear_2 = torch.nn.Linear(
-            in_features=hidden_size, out_features=hidden_size
-        )
+        self.linear_1 = torch.nn.Linear(in_features=in_features, out_features=hidden_size)
+        self.linear_2 = torch.nn.Linear(in_features=hidden_size, out_features=hidden_size)
         self.act_1 = torch.nn.SiLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 
 
@@ -38,8 +40,6 @@ class Gelu(torch.nn.Module):
         # This is not needed anymore, but let's keep it for now to obtain the
         # same results as `diffusers`.
         if x.device.type == "mps":
-            return torch.nn.functional.gelu(
-                x.to(dtype=torch.float32), approximate=self.approximate
-            ).to(dtype=x.dtype)
+            return torch.nn.functional.gelu(x.to(dtype=torch.float32), approximate=self.approximate).to(dtype=x.dtype)
 
         return torch.nn.functional.gelu(x, approximate=self.approximate)

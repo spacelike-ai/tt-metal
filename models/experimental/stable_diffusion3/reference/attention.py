@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 
 from .normalization import RmsNorm
@@ -91,13 +93,9 @@ class Attention(torch.nn.Module):
             ).transpose(1, 2)
 
             if self.norm_added_q is not None:
-                encoder_hidden_states_query_proj = self.norm_added_q(
-                    encoder_hidden_states_query_proj
-                )
+                encoder_hidden_states_query_proj = self.norm_added_q(encoder_hidden_states_query_proj)
             if self.norm_added_k is not None:
-                encoder_hidden_states_key_proj = self.norm_added_k(
-                    encoder_hidden_states_key_proj
-                )
+                encoder_hidden_states_key_proj = self.norm_added_k(encoder_hidden_states_key_proj)
 
             query = torch.cat([query, encoder_hidden_states_query_proj], dim=2)
             key = torch.cat([key, encoder_hidden_states_key_proj], dim=2)
@@ -106,9 +104,7 @@ class Attention(torch.nn.Module):
         hidden_states = torch.nn.functional.scaled_dot_product_attention(
             query, key, value, dropout_p=0.0, is_causal=False
         )
-        hidden_states = hidden_states.transpose(1, 2).reshape(
-            batch_size, -1, num_heads * head_dim
-        )
+        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, num_heads * head_dim)
         hidden_states = hidden_states.to(query.dtype)
 
         if encoder_hidden_states is not None:
