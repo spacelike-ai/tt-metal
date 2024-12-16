@@ -32,7 +32,7 @@ def test_attention(
     torch_model: Attention = parent_torch_model.transformer_blocks[block_index].attn
     torch_model.eval()
 
-    parameters = TtAttentionParameters.prepare(torch_state=torch_model.state_dict(), device=device)
+    parameters = TtAttentionParameters.from_torch(torch_state=torch_model.state_dict(), device=device)
     tt_model = TtAttention(parameters)
 
     torch_input_tensor = torch.randn((batch_size, input_dim, 64))

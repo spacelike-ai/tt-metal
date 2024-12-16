@@ -33,7 +33,7 @@ def test_feed_forward(
     torch_model: FeedForward = parent_torch_model.transformer_blocks[block_index].ff
     torch_model.eval()
 
-    parameters = TtFeedForwardParameters.prepare(torch_state=torch_model.state_dict(), device=device)
+    parameters = TtFeedForwardParameters.from_torch(torch_state=torch_model.state_dict(), device=device)
     tt_model = TtFeedForward(parameters)
 
     torch_input_tensor = torch.randn((batch_size, input_dim, 1536))

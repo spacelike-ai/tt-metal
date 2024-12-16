@@ -15,16 +15,16 @@ class TtRmsNormParameters:
     weight: ttnn.Tensor
 
     @classmethod
-    def prepare(
+    def from_torch(
         cls,
-        torch_state: dict[str, torch.Tensor],
+        state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
     ) -> TtRmsNormParameters:
         return cls(
             weight=ttnn.from_torch(
-                torch_state["weight"],
+                state["weight"],
                 dtype=dtype,
                 device=device,
             )

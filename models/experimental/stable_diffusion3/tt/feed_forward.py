@@ -16,16 +16,16 @@ class TtFeedForwardParameters:
     out_proj: TtLinearParameters
 
     @classmethod
-    def prepare(
+    def from_torch(
         cls,
-        torch_state: dict[str, torch.Tensor],
+        state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
     ) -> TtFeedForwardParameters:
         return cls(
-            in_proj=TtLinearParameters.prepare(substate(torch_state, "net.0.proj"), dtype=dtype, device=device),
-            out_proj=TtLinearParameters.prepare(substate(torch_state, "net.2"), dtype=dtype, device=device),
+            in_proj=TtLinearParameters.from_torch(substate(state, "net.0.proj"), dtype=dtype, device=device),
+            out_proj=TtLinearParameters.from_torch(substate(state, "net.2"), dtype=dtype, device=device),
         )
 
 

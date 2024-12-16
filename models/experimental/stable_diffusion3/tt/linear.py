@@ -13,15 +13,15 @@ class TtLinearParameters:
     bias: ttnn.Tensor | None
 
     @classmethod
-    def prepare(
+    def from_torch(
         cls,
-        torch_state: dict[str, torch.Tensor],
+        state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
     ) -> TtLinearParameters:
-        torch_weight = torch_state["weight"]
-        torch_bias = torch_state["bias"]
+        torch_weight = state["weight"]
+        torch_bias = state["bias"]
 
         return cls(
             weight=ttnn.from_torch(
