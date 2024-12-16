@@ -122,7 +122,7 @@ class TtAdaLayerNormContinuous(torch.nn.Module):
 
 
 class TtRmsNorm(torch.nn.Module):
-    def __init__(self, parameters=TtRmsNormParameters, *, eps: float) -> None:
+    def __init__(self, parameters: TtRmsNormParameters, *, eps: float) -> None:
         super().__init__()
 
         self._eps = eps
