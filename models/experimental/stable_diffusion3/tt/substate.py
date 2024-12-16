@@ -10,7 +10,7 @@ def substate(state: dict[str, Any], key: str) -> dict[str, Any]:
     return {k[prefix_len:]: v for k, v in state.items() if k.startswith(prefix)}
 
 
-def substate_exists(state: dict[str, Any], key: str) -> bool:
+def has_substate(state: dict[str, Any], key: str) -> bool:
     prefix = f"{key}."
 
     for k in state:

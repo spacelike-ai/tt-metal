@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import torch
@@ -9,7 +8,7 @@ import ttnn
 
 from .linear import TtLinear, TtLinearParameters
 from .normalization import TtRmsNorm, TtRmsNormParameters
-from .substate import substate, substate_exists
+from .substate import has_substate, substate
 
 
 @dataclass
@@ -52,7 +51,7 @@ class TtAttentionParameters:
                 norm_k=TtRmsNormParameters.from_torch(substate(state, "norm_added_k"), dtype=dtype, device=device),
                 out_proj=TtLinearParameters.from_torch(substate(state, "to_add_out"), dtype=dtype, device=device),
             )
-            if substate_exists(state, "add_q_proj")
+            if has_substate(state, "add_q_proj")
             else None,
         )
 
@@ -82,17 +81,17 @@ class TtAttention:
         self._part_b = TtAttentionPart(parameters.part_b) if parameters.part_b is not None else None
 
     def __call__(
-        self, hidden_states: ttnn.Tensor, encoder_hidden_states: ttnn.Tensor | None = None
+        self, spatial: ttnn.Tensor, prompt_embed: ttnn.Tensor | None = None
     ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
         """
-        hidden_states: N ⊗ S1 ⊗ (H1 * E1)
-        encoder_hidden_states: N ⊗ S2 ⊗ (H2 * E2)
+        spatial: N ⊗ S1 ⊗ (H1 * E1)
+        prompt_embed: N ⊗ S2 ⊗ (H2 * E2)
         """
-        batch_size = hidden_states.shape[0]
+        batch_size = spatial.shape[0]
 
-        q = self._part_a.q_proj(hidden_states)  # N ⊗ S1 ⊗ (H1 * Eq1)
-        k = self._part_a.k_proj(hidden_states)  # N ⊗ S1 ⊗ (H1 * Eq1)
-        v = self._part_a.v_proj(hidden_states)  # N ⊗ S1 ⊗ (H1 * Ev1)
+        q = self._part_a.q_proj(spatial)  # N ⊗ S1 ⊗ (H1 * Eq1)
+        k = self._part_a.k_proj(spatial)  # N ⊗ S1 ⊗ (H1 * Eq1)
+        v = self._part_a.v_proj(spatial)  # N ⊗ S1 ⊗ (H1 * Ev1)
 
         q = ttnn.to_torch(q)
         k = ttnn.to_torch(k)
@@ -102,34 +101,34 @@ class TtAttention:
         k = k.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H1 ⊗ Eq1 ⊗ S1
         v = v.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H1 ⊗ S1 ⊗ Ev1
 
-        q = ttnn.from_torch(q, device=hidden_states.device())
-        k = ttnn.from_torch(k, device=hidden_states.device())
-        v = ttnn.from_torch(v, device=hidden_states.device())
+        q = ttnn.from_torch(q, device=spatial.device())
+        k = ttnn.from_torch(k, device=spatial.device())
+        v = ttnn.from_torch(v, device=spatial.device())
 
         q = self._part_a.norm_q(q)
         k = self._part_a.norm_k(k)
 
         # if self._part_b is not None:
-        #     encoder_hidden_states_query_proj = self.q_proj_2(encoder_hidden_states)
-        #     encoder_hidden_states_key_proj = self.k_proj_2(encoder_hidden_states)
-        #     encoder_hidden_states_value_proj = self.v_proj_2(encoder_hidden_states)
+        #     prompt_embed_query_proj = self.q_proj_2(prompt_embed)
+        #     prompt_embed_key_proj = self.k_proj_2(prompt_embed)
+        #     prompt_embed_value_proj = self.v_proj_2(prompt_embed)
 
-        #     encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(
+        #     prompt_embed_query_proj = prompt_embed_query_proj.view(
         #         batch_size, -1, num_heads, head_dim
         #     ).transpose(1, 2)
-        #     encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(
+        #     prompt_embed_key_proj = prompt_embed_key_proj.view(
         #         batch_size, -1, num_heads, head_dim
         #     ).transpose(1, 2)
-        #     encoder_hidden_states_value_proj = encoder_hidden_states_value_proj.view(
+        #     prompt_embed_value_proj = prompt_embed_value_proj.view(
         #         batch_size, -1, num_heads, head_dim
         #     ).transpose(1, 2)
 
-        #     encoder_hidden_states_query_proj = self.norm_q_2(encoder_hidden_states_query_proj)
-        #     encoder_hidden_states_key_proj = self.norm_added_k(encoder_hidden_states_key_proj)
+        #     prompt_embed_query_proj = self.norm_q_2(prompt_embed_query_proj)
+        #     prompt_embed_key_proj = self.norm_added_k(prompt_embed_key_proj)
 
-        #     q = torch.cat([q, encoder_hidden_states_query_proj], dim=2)
-        #     k = torch.cat([k, encoder_hidden_states_key_proj], dim=2)
-        #     v = torch.cat([v, encoder_hidden_states_value_proj], dim=2)
+        #     q = torch.cat([q, prompt_embed_query_proj], dim=2)
+        #     k = torch.cat([k, prompt_embed_key_proj], dim=2)
+        #     v = torch.cat([v, prompt_embed_value_proj], dim=2)
 
         k = ttnn.transpose(k, 2, 3)
         k = ttnn.tilize(k)
@@ -152,15 +151,15 @@ class TtAttention:
         concatenated_attn = ttnn.transformer.concatenate_heads(attn)
         ttnn.deallocate(attn)
 
-        hidden_states = self._part_a.out_proj(concatenated_attn)
+        spatial = self._part_a.out_proj(concatenated_attn)
         ttnn.deallocate(concatenated_attn)
 
-        # if encoder_hidden_states is not None:
-        #     hidden_states, encoder_hidden_states = (
-        #         hidden_states[:, : residual.shape[1]],
-        #         hidden_states[:, residual.shape[1] :],
+        # if prompt_embed is not None:
+        #     spatial, prompt_embed = (
+        #         spatial[:, : residual.shape[1]],
+        #         spatial[:, residual.shape[1] :],
         #     )
         #     if not self.context_pre_only:
-        #         encoder_hidden_states = self.to_add_out(encoder_hidden_states)
+        #         prompt_embed = self.to_add_out(prompt_embed)
 
-        return hidden_states, encoder_hidden_states
+        return spatial, prompt_embed

@@ -8,7 +8,6 @@ import ttnn
 from models.experimental.stable_diffusion3.tt.linear import TtLinearParameters
 
 from .joint_transformer_block import TtJointTransformerBlock, TtJointTransformerBlockParameters
-from .normalization import TtAdaLayerNormContinuous, TtAdaLayerNormParameters
 from .patch_embedding import TtPatchEmbed, TtPatchEmbedParameters
 from .timestep_embedding import TtCombinedTimestepTextProjEmbeddings, TtCombinedTimestepTextProjEmbeddingsParameters
 
