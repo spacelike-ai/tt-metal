@@ -264,9 +264,7 @@ def run(*, device: str | torch.device, local_files_only: bool = True) -> None:  
     )
 
     prompt_embeds = torch.cat([clip_prompt_embeds, t5_prompt_embed], dim=-2)
-    pooled_prompt_embeds = torch.cat(
-        [pooled_prompt_embed, pooled_prompt_2_embed], dim=-1
-    )
+    pooled_prompt_embeds = torch.cat([pooled_prompt_embed, pooled_prompt_2_embed], dim=-1)
 
     if do_classifier_free_guidance:
         logger.info("negative prompt 1")
@@ -279,19 +277,15 @@ def run(*, device: str | torch.device, local_files_only: bool = True) -> None:  
             tokenizer_max_length=tokenizer_max_length,
         )
         logger.info("negative prompt 2")
-        negative_prompt_2_embed, negative_pooled_prompt_2_embed = (
-            _get_clip_prompt_embeds(
-                prompt=model_input["negative_prompt_2"],
-                device=device,
-                num_images_per_prompt=model_input["num_images_per_prompt"],
-                tokenizer=tokenizer_2,
-                text_encoder=text_encoder_2,
-                tokenizer_max_length=tokenizer_max_length,
-            )
+        negative_prompt_2_embed, negative_pooled_prompt_2_embed = _get_clip_prompt_embeds(
+            prompt=model_input["negative_prompt_2"],
+            device=device,
+            num_images_per_prompt=model_input["num_images_per_prompt"],
+            tokenizer=tokenizer_2,
+            text_encoder=text_encoder_2,
+            tokenizer_max_length=tokenizer_max_length,
         )
-        negative_clip_prompt_embeds = torch.cat(
-            [negative_prompt_embed, negative_prompt_2_embed], dim=-1
-        )
+        negative_clip_prompt_embeds = torch.cat([negative_prompt_embed, negative_prompt_2_embed], dim=-1)
 
         logger.info("negative prompt 3")
         t5_negative_prompt_embed = _get_t5_prompt_embeds(
@@ -307,22 +301,17 @@ def run(*, device: str | torch.device, local_files_only: bool = True) -> None:  
             negative_clip_prompt_embeds,
             (
                 0,
-                t5_negative_prompt_embed.shape[-1]
-                - negative_clip_prompt_embeds.shape[-1],
+                t5_negative_prompt_embed.shape[-1] - negative_clip_prompt_embeds.shape[-1],
             ),
         )
 
-        negative_prompt_embeds = torch.cat(
-            [negative_clip_prompt_embeds, t5_negative_prompt_embed], dim=-2
-        )
+        negative_prompt_embeds = torch.cat([negative_clip_prompt_embeds, t5_negative_prompt_embed], dim=-2)
         negative_pooled_prompt_embeds = torch.cat(
             [negative_pooled_prompt_embed, negative_pooled_prompt_2_embed], dim=-1
         )
 
         prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-        pooled_prompt_embeds = torch.cat(
-            [negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0
-        )
+        pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
 
     logger.info("prepare timesteps")
 
@@ -345,9 +334,7 @@ def run(*, device: str | torch.device, local_files_only: bool = True) -> None:  
     logger.info("denoising loop")
 
     for t in tqdm.tqdm(timesteps):
-        latent_model_input = (
-            torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-        )
+        latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
 
         timestep = t.expand(latent_model_input.shape[0])
 
@@ -360,9 +347,7 @@ def run(*, device: str | torch.device, local_files_only: bool = True) -> None:  
 
         if do_classifier_free_guidance:
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-            noise_pred = noise_pred_uncond + model_input["guidance_scale"] * (
-                noise_pred_text - noise_pred_uncond
-            )
+            noise_pred = noise_pred_uncond + model_input["guidance_scale"] * (noise_pred_text - noise_pred_uncond)
 
         latents = scheduler.step(
             noise_pred,  # type: ignore  # noqa: PGH003
@@ -468,9 +453,7 @@ def _get_clip_prompt_embeds(
     )
 
     text_input_ids = text_inputs.input_ids
-    untruncated_ids = tokenizer(
-        prompt, padding="longest", return_tensors="pt"
-    ).input_ids
+    untruncated_ids = tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
 
     if untruncated_ids.shape[-1] >= text_input_ids.shape[-1]:
         logger.warning("CLIP input text was truncated")
@@ -482,14 +465,10 @@ def _get_clip_prompt_embeds(
     _, seq_len, _ = prompt_embeds.shape
     # duplicate text embeddings for each generation per prompt, using mps friendly method
     prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-    prompt_embeds = prompt_embeds.view(
-        prompt_count * num_images_per_prompt, seq_len, -1
-    )
+    prompt_embeds = prompt_embeds.view(prompt_count * num_images_per_prompt, seq_len, -1)
 
     pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt, 1)
-    pooled_prompt_embeds = pooled_prompt_embeds.view(
-        prompt_count * num_images_per_prompt, -1
-    )
+    pooled_prompt_embeds = pooled_prompt_embeds.view(prompt_count * num_images_per_prompt, -1)
 
     return prompt_embeds, pooled_prompt_embeds
 
@@ -515,9 +494,7 @@ def _get_t5_prompt_embeds(
         return_tensors="pt",
     )
     text_input_ids = text_inputs.input_ids
-    untruncated_ids = tokenizer(
-        prompt, padding="longest", return_tensors="pt"
-    ).input_ids
+    untruncated_ids = tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
 
     if untruncated_ids.shape[-1] >= text_input_ids.shape[-1]:
         logger.warning("CLIP input text was truncated")
@@ -538,12 +515,9 @@ def main() -> None:
     logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
     torch.set_grad_enabled(False)
 
-    device = (
-        "cuda"
-        if torch.cuda.is_available()
-        else "mps"
-        if torch.backends.mps.is_available()
-        else "cpu"
-    )
+    device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
     run(device=device)
+
+
+main()
