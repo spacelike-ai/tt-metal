@@ -43,7 +43,7 @@ class TtAdaLayerNormParameters:
     norm: TtLayerNormParameters
 
 
-class TtSD35AdaLayerNormZeroX(torch.nn.Module):
+class TtSD35AdaLayerNormZeroX:
     def __init__(self, embedding_dim: int) -> None:
         super().__init__()
 
@@ -51,7 +51,7 @@ class TtSD35AdaLayerNormZeroX(torch.nn.Module):
         self.linear = torch.nn.Linear(embedding_dim, 9 * embedding_dim)
         self.norm = torch.nn.LayerNorm(embedding_dim, elementwise_affine=False, eps=1e-6)
 
-    def forward(
+    def __call__(
         self, hidden_states: torch.Tensor, *, emb: torch.Tensor
     ) -> tuple[
         torch.Tensor,
@@ -91,14 +91,14 @@ class TtSD35AdaLayerNormZeroX(torch.nn.Module):
         )
 
 
-class TtAdaLayerNormZero(torch.nn.Module):
+class TtAdaLayerNormZero:
     def __init__(self, embedding_dim: int) -> None:
         super().__init__()
         self.silu = torch.nn.SiLU()
         self.linear = torch.nn.Linear(embedding_dim, 6 * embedding_dim)
         self.norm = torch.nn.LayerNorm(embedding_dim, elementwise_affine=False, eps=1e-6)
 
-    def forward(
+    def __call__(
         self, x: torch.Tensor, *, emb: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         emb = self.linear(self.silu(emb))
@@ -107,7 +107,7 @@ class TtAdaLayerNormZero(torch.nn.Module):
         return x, gate_msa, shift_mlp, scale_mlp, gate_mlp
 
 
-class TtAdaLayerNormContinuous(torch.nn.Module):
+class TtAdaLayerNormContinuous:
     def __init__(self, embedding_dim: int, conditioning_embedding_dim: int) -> None:
         super().__init__()
 
@@ -115,20 +115,20 @@ class TtAdaLayerNormContinuous(torch.nn.Module):
         self.linear = torch.nn.Linear(conditioning_embedding_dim, embedding_dim * 2)
         self.norm = torch.nn.LayerNorm(embedding_dim, eps=1e-6, elementwise_affine=False)
 
-    def forward(self, x: torch.Tensor, conditioning_embedding: torch.Tensor) -> torch.Tensor:
+    def __call__(self, x: torch.Tensor, conditioning_embedding: torch.Tensor) -> torch.Tensor:
         emb = self.linear(self.silu(conditioning_embedding))
         scale, shift = torch.chunk(emb, 2, dim=1)
         return self.norm(x) * (1 + scale)[:, None, :] + shift[:, None, :]
 
 
-class TtRmsNorm(torch.nn.Module):
+class TtRmsNorm:
     def __init__(self, parameters: TtRmsNormParameters, *, eps: float) -> None:
         super().__init__()
 
         self._eps = eps
         self._weight = ttnn.to_torch(parameters.weight)
 
-    def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
+    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         torch_x = ttnn.to_torch(x)
 
         variance = torch_x.to(torch.float32).pow(2).mean(-1, keepdim=True)

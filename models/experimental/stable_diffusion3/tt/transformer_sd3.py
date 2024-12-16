@@ -80,7 +80,7 @@ class TtSD3Transformer2DModel:
         self.norm_out = TtAdaLayerNormContinuous(inner_dim, inner_dim)
         self.proj_out = torch.nn.Linear(inner_dim, patch_size * patch_size * self._out_channels)
 
-    def forward(
+    def __call__(
         self,
         hidden_states: ttnn.Tensor,
         encoder_hidden_states: ttnn.Tensor,

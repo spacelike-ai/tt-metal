@@ -28,7 +28,7 @@ class TtJointTransformerBlockParameters:
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/models/attention.py
-class TtJointTransformerBlock(torch.nn.Module):
+class TtJointTransformerBlock:
     def __init__(
         self,
         *,
@@ -78,7 +78,7 @@ class TtJointTransformerBlock(torch.nn.Module):
             self.norm1 = TtAdaLayerNormZero(dim)
             self.attn2 = None
 
-    def forward(
+    def __call__(
         self,
         hidden_states: torch.FloatTensor,
         encoder_hidden_states: torch.FloatTensor,

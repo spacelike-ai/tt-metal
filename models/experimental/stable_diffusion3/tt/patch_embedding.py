@@ -16,7 +16,7 @@ class TtPatchEmbedParameters:
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/models/embeddings.py
-class TtPatchEmbed(torch.nn.Module):
+class TtPatchEmbed:
     def __init__(
         self,
         *,
@@ -39,7 +39,7 @@ class TtPatchEmbed(torch.nn.Module):
 
         self.register_buffer("pos_embed", torch.zeros((1, pos_embed_max_size**2, embed_dim)))
 
-    def forward(self, latent: torch.Tensor) -> torch.Tensor:
+    def __call__(self, latent: torch.Tensor) -> torch.Tensor:
         height, width = latent.shape[-2:]
 
         latent = self.proj(latent)
