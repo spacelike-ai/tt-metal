@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import torch
+
+import ttnn
+
+from .linear import TtLinear, TtLinearParameters
+from .substate import substate
+
+
+@dataclass
+class TtFeedForwardParameters:
+    in_proj: TtLinearParameters
+    out_proj: TtLinearParameters
+
+    @classmethod
+    def prepare(
+        cls,
+        torch_state: dict[str, torch.Tensor],
+        *,
+        dtype: ttnn.DataType | None = None,
+        device: ttnn.Device,
+    ) -> TtFeedForwardParameters:
+        return cls(
+            in_proj=TtLinearParameters.prepare(substate(torch_state, "net.0.proj"), dtype=dtype, device=device),
+            out_proj=TtLinearParameters.prepare(substate(torch_state, "net.2"), dtype=dtype, device=device),
+        )
+
+
+class TtFeedForward:
+    def __init__(
+        self,
+        parameters: TtFeedForwardParameters,
+        *,
+        approximate: str = "none",
+    ) -> None:
+        super().__init__()
+
+        self.fast_and_approximate_mode = (
+            approximate != "none"
+        )  # TODO (Friedrich): check for other cases, or change setting to bool
+
+        self.in_proj = TtLinear(parameters.in_proj)
+        self.out_proj = TtLinear(parameters.out_proj)
+
+    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        x = self.in_proj(x)
+        x = ttnn.gelu(
+            x, fast_and_approximate_mode=self.fast_and_approximate_mode
+        )  # TODO (Friedrich): is this the correct approximation?
+        return self.out_proj(x)
