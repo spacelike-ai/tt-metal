@@ -30,16 +30,14 @@ class TtLinearParameters:
                 dtype=dtype,
                 device=device,
             ),
-            bias=(
-                None
-                if torch_bias is None
-                else ttnn.from_torch(
-                    torch_bias.unsqueeze(0),
-                    layout=ttnn.TILE_LAYOUT,
-                    dtype=dtype,
-                    device=device,
-                )
-            ),
+            bias=ttnn.from_torch(
+                torch_bias.unsqueeze(0),
+                layout=ttnn.TILE_LAYOUT,
+                dtype=dtype,
+                device=device,
+            )
+            if torch_bias is not None
+            else None,
         )
 
 
