@@ -1,8 +1,23 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import torch
+
+from models.experimental.stable_diffusion3.tt.linear import TtLinearParameters
+
+
+@dataclass
+class TtEmbeddingParameters:
+    linear_1: TtLinearParameters
+    linear_2: TtLinearParameters
+
+
+@dataclass
+class TtCombinedTimestepTextProjEmbeddingsParameters:
+    timestep_embedder: TtEmbeddingParameters
+    text_embedder: TtEmbeddingParameters
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/models/embeddings.py

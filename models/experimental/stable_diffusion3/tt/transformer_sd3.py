@@ -1,13 +1,26 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 
 import ttnn
+from models.experimental.stable_diffusion3.tt.linear import TtLinearParameters
 
-from .joint_transformer_block import TtJointTransformerBlock
-from .normalization import TtAdaLayerNormContinuous
-from .patch_embedding import TtPatchEmbed
-from .timestep_embedding import TtCombinedTimestepTextProjEmbeddings
+from .joint_transformer_block import TtJointTransformerBlock, TtJointTransformerBlockParameters
+from .normalization import TtAdaLayerNormContinuous, TtAdaLayerNormParameters
+from .patch_embedding import TtPatchEmbed, TtPatchEmbedParameters
+from .timestep_embedding import TtCombinedTimestepTextProjEmbeddings, TtCombinedTimestepTextProjEmbeddingsParameters
+
+
+@dataclass
+class TtSD3Transformer2DModelParameters:
+    pos_embed: TtPatchEmbedParameters
+    time_text_embed: TtCombinedTimestepTextProjEmbeddingsParameters
+    context_embedder: TtLinearParameters
+    transformer_blocks: list[TtJointTransformerBlockParameters]
+    norm_out: TtAdaLayerNormParameters
+    proj_out: TtLinearParameters
 
 
 class TtSD3Transformer2DModel:

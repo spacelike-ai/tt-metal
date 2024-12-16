@@ -1,6 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
+
+import ttnn
+
+from .conv2d import TtConv2dParameters
+
+
+@dataclass
+class TtPatchEmbedParameters:
+    proj: TtConv2dParameters
+    pos_embed: ttnn.Tensor
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/models/embeddings.py
