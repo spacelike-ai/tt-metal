@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -71,67 +72,95 @@ class TtAttentionPart:
 
 
 class TtAttention:
-    def __init__(self, parameters: TtAttentionParameters) -> None:
+    def __init__(self, parameters: TtAttentionParameters, *, num_heads: int, head_dim: int) -> None:
         super().__init__()
 
-        self.part_a = TtAttentionPart(parameters.part_a)
-        self.part_b = TtAttentionPart(parameters.part_b) if parameters.part_b is not None else None
+        self._num_heads = num_heads
+        self._head_dim = head_dim
 
-    def forward(
+        self._part_a = TtAttentionPart(parameters.part_a)
+        self._part_b = TtAttentionPart(parameters.part_b) if parameters.part_b is not None else None
+
+    def __call__(
         self, hidden_states: ttnn.Tensor, encoder_hidden_states: ttnn.Tensor | None = None
     ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
+        """
+        hidden_states: N ⊗ S1 ⊗ (H1 * E1)
+        encoder_hidden_states: N ⊗ S2 ⊗ (H2 * E2)
+        """
         batch_size = hidden_states.shape[0]
 
-        num_heads = self.num_heads
-        head_dim = self.head_dim
+        q = self._part_a.q_proj(hidden_states)  # N ⊗ S1 ⊗ (H1 * Eq1)
+        k = self._part_a.k_proj(hidden_states)  # N ⊗ S1 ⊗ (H1 * Eq1)
+        v = self._part_a.v_proj(hidden_states)  # N ⊗ S1 ⊗ (H1 * Ev1)
 
-        residual = hidden_states
+        q = ttnn.to_torch(q)
+        k = ttnn.to_torch(k)
+        v = ttnn.to_torch(v)
 
-        q = self.part_a.k_proj(hidden_states)
-        k = self.part_a.k_proj(hidden_states)
-        v = self.part_a.v_proj(hidden_states)
+        q = q.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H1 ⊗ S1 ⊗ Eq1
+        k = k.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H1 ⊗ Eq1 ⊗ S1
+        v = v.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H1 ⊗ S1 ⊗ Ev1
 
-        q = q.view(batch_size, -1, num_heads, head_dim).transpose(1, 2)
-        k = k.view(batch_size, -1, num_heads, head_dim).transpose(1, 2)
-        v = v.view(batch_size, -1, num_heads, head_dim).transpose(1, 2)
+        q = ttnn.from_torch(q, device=hidden_states.device())
+        k = ttnn.from_torch(k, device=hidden_states.device())
+        v = ttnn.from_torch(v, device=hidden_states.device())
 
-        q = self.part_a.norm_q(q)
-        k = self.part_a.norm_k(k)
+        q = self._part_a.norm_q(q)
+        k = self._part_a.norm_k(k)
 
-        if self.part_b is not None:
-            encoder_hidden_states_query_proj = self.q_proj_2(encoder_hidden_states)
-            encoder_hidden_states_key_proj = self.k_proj_2(encoder_hidden_states)
-            encoder_hidden_states_value_proj = self.v_proj_2(encoder_hidden_states)
+        # if self._part_b is not None:
+        #     encoder_hidden_states_query_proj = self.q_proj_2(encoder_hidden_states)
+        #     encoder_hidden_states_key_proj = self.k_proj_2(encoder_hidden_states)
+        #     encoder_hidden_states_value_proj = self.v_proj_2(encoder_hidden_states)
 
-            encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(
-                batch_size, -1, num_heads, head_dim
-            ).transpose(1, 2)
-            encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(
-                batch_size, -1, num_heads, head_dim
-            ).transpose(1, 2)
-            encoder_hidden_states_value_proj = encoder_hidden_states_value_proj.view(
-                batch_size, -1, num_heads, head_dim
-            ).transpose(1, 2)
+        #     encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(
+        #         batch_size, -1, num_heads, head_dim
+        #     ).transpose(1, 2)
+        #     encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(
+        #         batch_size, -1, num_heads, head_dim
+        #     ).transpose(1, 2)
+        #     encoder_hidden_states_value_proj = encoder_hidden_states_value_proj.view(
+        #         batch_size, -1, num_heads, head_dim
+        #     ).transpose(1, 2)
 
-            encoder_hidden_states_query_proj = self.norm_q_2(encoder_hidden_states_query_proj)
-            encoder_hidden_states_key_proj = self.norm_added_k(encoder_hidden_states_key_proj)
+        #     encoder_hidden_states_query_proj = self.norm_q_2(encoder_hidden_states_query_proj)
+        #     encoder_hidden_states_key_proj = self.norm_added_k(encoder_hidden_states_key_proj)
 
-            q = torch.cat([q, encoder_hidden_states_query_proj], dim=2)
-            k = torch.cat([k, encoder_hidden_states_key_proj], dim=2)
-            v = torch.cat([v, encoder_hidden_states_value_proj], dim=2)
+        #     q = torch.cat([q, encoder_hidden_states_query_proj], dim=2)
+        #     k = torch.cat([k, encoder_hidden_states_key_proj], dim=2)
+        #     v = torch.cat([v, encoder_hidden_states_value_proj], dim=2)
 
-        hidden_states = torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
-        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, num_heads * head_dim)
-        hidden_states = hidden_states.to(q.dtype)
+        k = ttnn.transpose(k, 2, 3)
+        k = ttnn.tilize(k)
+        q = ttnn.tilize(q)
+        v = ttnn.tilize(v)
 
-        if encoder_hidden_states is not None:
-            hidden_states, encoder_hidden_states = (
-                hidden_states[:, : residual.shape[1]],
-                hidden_states[:, residual.shape[1] :],
-            )
-            if not self.context_pre_only:
-                encoder_hidden_states = self.to_add_out(encoder_hidden_states)
+        attention_scores = ttnn.matmul(q, k)
+        ttnn.deallocate(q)
+        ttnn.deallocate(k)
 
-        hidden_states = self.out_proj_1[0](hidden_states)
+        attention_probs = ttnn.transformer.attention_softmax(
+            attention_scores, attention_mask=None, head_size=self._head_dim
+        )
+        ttnn.deallocate(attention_scores)
+
+        attn = ttnn.matmul(attention_probs, v)
+        ttnn.deallocate(attention_probs)
+        ttnn.deallocate(v)
+
+        concatenated_attn = ttnn.transformer.concatenate_heads(attn)
+        ttnn.deallocate(attn)
+
+        hidden_states = self._part_a.out_proj(concatenated_attn)
+        ttnn.deallocate(concatenated_attn)
+
+        # if encoder_hidden_states is not None:
+        #     hidden_states, encoder_hidden_states = (
+        #         hidden_states[:, : residual.shape[1]],
+        #         hidden_states[:, residual.shape[1] :],
+        #     )
+        #     if not self.context_pre_only:
+        #         encoder_hidden_states = self.to_add_out(encoder_hidden_states)
 
         return hidden_states, encoder_hidden_states

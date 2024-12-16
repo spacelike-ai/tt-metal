@@ -32,7 +32,7 @@ def test_rms_norm(
     torch_model: RmsNorm = parent_torch_model.transformer_blocks[block_index].attn.norm_q
     torch_model.eval()
 
-    parameters = TtRmsNormParameters.from_torch(torch_state=torch_model.state_dict(), device=device)
+    parameters = TtRmsNormParameters.from_torch(torch_model.state_dict(), device=device)
     tt_model = TtRmsNorm(parameters, eps=torch_model.eps)
 
     torch_input_tensor = torch.randn((batch_size, input_dim, 64))

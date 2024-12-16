@@ -32,21 +32,31 @@ def test_attention(
     torch_model: Attention = parent_torch_model.transformer_blocks[block_index].attn
     torch_model.eval()
 
-    parameters = TtAttentionParameters.from_torch(torch_state=torch_model.state_dict(), device=device)
-    tt_model = TtAttention(parameters)
+    parameters = TtAttentionParameters.from_torch(torch_model.state_dict(), device=device)
+    tt_model = TtAttention(parameters, num_heads=torch_model.num_heads, head_dim=torch_model.head_dim)
 
-    torch_input_tensor = torch.randn((batch_size, input_dim, 64))
+    torch_hidden_states = torch.randn((batch_size, 1024, 1536))
+    torch_encoder_hidden_states = torch.randn((batch_size, 333, 1536))
 
-    tt_input_tensor = ttnn.from_torch(
-        torch_input_tensor,
+    tt_hidden_states = ttnn.from_torch(
+        torch_hidden_states,
         dtype=ttnn.bfloat16,
         device=device,
         layout=ttnn.TILE_LAYOUT,
     )
 
-    torch_output = torch_model(torch_input_tensor)
+    tt_encoder_hidden_states = ttnn.from_torch(
+        torch_encoder_hidden_states,
+        dtype=ttnn.bfloat16,
+        device=device,
+        layout=ttnn.TILE_LAYOUT,
+    )
 
-    tt_output = tt_model(tt_input_tensor)
-    tt_output_torch = ttnn.to_torch(tt_output)
+    torch_hidden_states, torch_encoder_hidden_states = torch_model(torch_hidden_states, torch_encoder_hidden_states)
 
-    assert_with_pcc(torch_output, tt_output_torch, pcc=0.99999)
+    tt_hidden_states, tt_encoder_hidden_states = tt_model(tt_hidden_states, tt_encoder_hidden_states)
+    tt_hidden_states_torch = ttnn.to_torch(tt_hidden_states)
+    tt_encoder_hidden_states_torch = ttnn.to_torch(tt_encoder_hidden_states)
+
+    assert_with_pcc(torch_hidden_states, tt_hidden_states_torch, pcc=0.999)
+    assert_with_pcc(torch_encoder_hidden_states, tt_encoder_hidden_states_torch, pcc=0.999)
