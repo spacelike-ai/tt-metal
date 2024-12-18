@@ -77,44 +77,43 @@ class Attention(torch.nn.Module):
         query = self.norm_q(query)
         key = self.norm_k(key)
 
-        # if encoder_hidden_states is not None:
-        #     encoder_hidden_states_query_proj = self.add_q_proj(encoder_hidden_states)
-        #     encoder_hidden_states_key_proj = self.add_k_proj(encoder_hidden_states)
-        #     encoder_hidden_states_value_proj = self.add_v_proj(encoder_hidden_states)
+        if encoder_hidden_states is not None:
+            encoder_hidden_states_query_proj = self.add_q_proj(encoder_hidden_states)
+            encoder_hidden_states_key_proj = self.add_k_proj(encoder_hidden_states)
+            encoder_hidden_states_value_proj = self.add_v_proj(encoder_hidden_states)
 
-        #     encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(
-        #         batch_size, -1, num_heads, head_dim
-        #     ).transpose(1, 2)
-        #     encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(
-        #         batch_size, -1, num_heads, head_dim
-        #     ).transpose(1, 2)
-        #     encoder_hidden_states_value_proj = encoder_hidden_states_value_proj.view(
-        #         batch_size, -1, num_heads, head_dim
-        #     ).transpose(1, 2)
+            encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(
+                batch_size, -1, num_heads, head_dim
+            ).transpose(1, 2)
+            encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(
+                batch_size, -1, num_heads, head_dim
+            ).transpose(1, 2)
+            encoder_hidden_states_value_proj = encoder_hidden_states_value_proj.view(
+                batch_size, -1, num_heads, head_dim
+            ).transpose(1, 2)
 
-        #     if self.norm_added_q is not None:
-        #         encoder_hidden_states_query_proj = self.norm_added_q(encoder_hidden_states_query_proj)
-        #     if self.norm_added_k is not None:
-        #         encoder_hidden_states_key_proj = self.norm_added_k(encoder_hidden_states_key_proj)
+            if self.norm_added_q is not None:
+                encoder_hidden_states_query_proj = self.norm_added_q(encoder_hidden_states_query_proj)
+            if self.norm_added_k is not None:
+                encoder_hidden_states_key_proj = self.norm_added_k(encoder_hidden_states_key_proj)
 
-        #     query = torch.cat([query, encoder_hidden_states_query_proj], dim=2)
-        #     key = torch.cat([key, encoder_hidden_states_key_proj], dim=2)
-        #     value = torch.cat([value, encoder_hidden_states_value_proj], dim=2)
+            query = torch.cat([query, encoder_hidden_states_query_proj], dim=2)
+            key = torch.cat([key, encoder_hidden_states_key_proj], dim=2)
+            value = torch.cat([value, encoder_hidden_states_value_proj], dim=2)
 
         hidden_states = torch.nn.functional.scaled_dot_product_attention(
             query, key, value, dropout_p=0.0, is_causal=False
         )
-
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, num_heads * head_dim)
         hidden_states = hidden_states.to(query.dtype)
 
-        # if encoder_hidden_states is not None:
-        #     hidden_states, encoder_hidden_states = (
-        #         hidden_states[:, : residual.shape[1]],
-        #         hidden_states[:, residual.shape[1] :],
-        #     )
-        #     if not self.context_pre_only:
-        #         encoder_hidden_states = self.to_add_out(encoder_hidden_states)
+        if encoder_hidden_states is not None:
+            hidden_states, encoder_hidden_states = (
+                hidden_states[:, : residual.shape[1]],
+                hidden_states[:, residual.shape[1] :],
+            )
+            if not self.context_pre_only:
+                encoder_hidden_states = self.to_add_out(encoder_hidden_states)
 
         hidden_states = self.to_out[0](hidden_states)
 
