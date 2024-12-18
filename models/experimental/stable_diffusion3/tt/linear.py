@@ -20,23 +20,20 @@ class TtLinearParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
     ) -> TtLinearParameters:
-        torch_weight = state["weight"]
-        torch_bias = state["bias"]
-
         return cls(
             weight=ttnn.from_torch(
-                torch_weight.transpose(0, 1),
+                state["weight"].transpose(0, 1),
                 layout=ttnn.TILE_LAYOUT,
                 dtype=dtype,
                 device=device,
             ),
             bias=ttnn.from_torch(
-                torch_bias.unsqueeze(0),
+                state["bias"],
                 layout=ttnn.TILE_LAYOUT,
                 dtype=dtype,
                 device=device,
             )
-            if torch_bias is not None
+            if "bias" in state
             else None,
         )
 

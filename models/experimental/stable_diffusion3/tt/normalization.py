@@ -41,25 +41,22 @@ class TtLayerNormParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
     ) -> TtRmsNormParameters:
-        torch_weight = state["weight"]
-        torch_bias = state["bias"]
-
         return cls(
             weight=ttnn.from_torch(
-                torch_weight,
+                state["weight"],
                 layout=ttnn.TILE_LAYOUT,
                 dtype=dtype,
                 device=device,
             )
-            if torch_weight is not None
+            if "weight" in state
             else None,
             bias=ttnn.from_torch(
-                torch_bias,
+                state["bias"],
                 layout=ttnn.TILE_LAYOUT,
                 dtype=dtype,
                 device=device,
             )
-            if torch_bias is not None
+            if "bias" in state
             else None,
         )
 
