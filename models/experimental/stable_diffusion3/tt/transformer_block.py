@@ -14,7 +14,7 @@ from .substate import has_substate, substate
 
 
 @dataclass
-class TtJointTransformerBlockParameters:
+class TtTransformerBlockParameters:
     spatial_t_embed: TtLinearParameters
     prompt_t_embed: TtLinearParameters
     attn_1: TtAttentionParameters
@@ -58,10 +58,10 @@ class TtJointTransformerBlockParameters:
         )
 
 
-class TtJointTransformerBlock:
+class TtTransformerBlock:
     def __init__(
         self,
-        parameters: TtJointTransformerBlockParameters,
+        parameters: TtTransformerBlockParameters,
         *,
         num_attention_heads: int,
         attention_head_dim: int,

@@ -5,10 +5,10 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.loaders.single_file_model import FromOriginalModelMixin
 from diffusers.models.modeling_utils import ModelMixin
 
-from .joint_transformer_block import JointTransformerBlock
 from .normalization import AdaLayerNormContinuous
 from .patch_embedding import PatchEmbed
 from .timestep_embedding import CombinedTimestepTextProjEmbeddings
+from .transformer_block import TransformerBlock
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/models/controlnet_sd3.py
@@ -23,7 +23,7 @@ class SD3Transformer2DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         num_layers: int = 18,
         attention_head_dim: int = 64,
         num_attention_heads: int = 18,
-        joint_attention_dim: int = 4096,
+        attention_dim: int = 4096,
         caption_projection_dim: int = 1152,
         pooled_projection_dim: int = 2048,
         out_channels: int = 16,
@@ -49,11 +49,11 @@ class SD3Transformer2DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             embedding_dim=inner_dim,
             pooled_projection_dim=pooled_projection_dim,
         )
-        self.context_embedder = torch.nn.Linear(joint_attention_dim, caption_projection_dim)
+        self.context_embedder = torch.nn.Linear(attention_dim, caption_projection_dim)
 
         self.transformer_blocks = torch.nn.ModuleList(
             [
-                JointTransformerBlock(
+                TransformerBlock(
                     dim=inner_dim,
                     num_attention_heads=num_attention_heads,
                     attention_head_dim=attention_head_dim,

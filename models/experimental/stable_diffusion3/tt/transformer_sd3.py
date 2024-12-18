@@ -7,9 +7,9 @@ import torch
 import ttnn
 from models.experimental.stable_diffusion3.tt.linear import TtLinearParameters
 
-from .joint_transformer_block import TtJointTransformerBlock, TtJointTransformerBlockParameters
 from .patch_embedding import TtPatchEmbed, TtPatchEmbedParameters
 from .timestep_embedding import TtCombinedTimestepTextProjEmbeddings, TtCombinedTimestepTextProjEmbeddingsParameters
+from .transformer_block import TtTransformerBlock, TtTransformerBlockParameters
 
 
 @dataclass
@@ -17,7 +17,7 @@ class TtSD3Transformer2DModelParameters:
     pos_embed: TtPatchEmbedParameters
     time_text_embed: TtCombinedTimestepTextProjEmbeddingsParameters
     context_embedder: TtLinearParameters
-    transformer_blocks: list[TtJointTransformerBlockParameters]
+    transformer_blocks: list[TtTransformerBlockParameters]
     norm_out: TtAdaLayerNormParameters
     proj_out: TtLinearParameters
 
@@ -31,7 +31,7 @@ class TtSD3Transformer2DModel:
         num_layers: int = 18,
         attention_head_dim: int = 64,
         num_attention_heads: int = 18,
-        joint_attention_dim: int = 4096,
+        attention_dim: int = 4096,
         caption_projection_dim: int = 1152,
         pooled_projection_dim: int = 2048,
         out_channels: int = 16,
@@ -60,11 +60,11 @@ class TtSD3Transformer2DModel:
             embedding_dim=inner_dim,
             pooled_projection_dim=pooled_projection_dim,
         )
-        self.context_embedder = torch.nn.Linear(joint_attention_dim, caption_projection_dim)
+        self.context_embedder = torch.nn.Linear(attention_dim, caption_projection_dim)
 
         self.transformer_blocks = torch.nn.ModuleList(
             [
-                TtJointTransformerBlock(
+                TtTransformerBlock(
                     dim=inner_dim,
                     num_attention_heads=num_attention_heads,
                     attention_head_dim=attention_head_dim,

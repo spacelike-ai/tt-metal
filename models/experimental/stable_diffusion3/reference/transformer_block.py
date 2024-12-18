@@ -12,7 +12,7 @@ from .normalization import (
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/models/attention.py
-class JointTransformerBlock(torch.nn.Module):
+class TransformerBlock(torch.nn.Module):
     def __init__(
         self,
         *,
