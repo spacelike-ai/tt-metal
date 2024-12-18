@@ -81,11 +81,11 @@ class TtAttention:
         self._prompt_attn = TtAttentionPart(parameters.part_b) if parameters.part_b is not None else None
 
     def __call__(
-        self, spatial: ttnn.Tensor, prompt_embed: ttnn.Tensor | None = None
+        self, *, spatial: ttnn.Tensor, prompt: ttnn.Tensor | None = None
     ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
         """
         spatial: N ⊗ S1 ⊗ (H * E1)
-        prompt_embed: N ⊗ S2 ⊗ (H * E2)
+        prompt: N ⊗ S2 ⊗ (H * E2)
         """
         batch_size = spatial.shape[0]
         spatial_sequence_length = spatial.shape[1]
@@ -110,12 +110,12 @@ class TtAttention:
         q = self._spatial_attn.norm_q(q)
         k = self._spatial_attn.norm_k(k)
 
-        if prompt_embed is not None:
+        if prompt is not None:
             assert self._prompt_attn is not None
 
-            q2 = self._prompt_attn.q_proj(prompt_embed)
-            k2 = self._prompt_attn.k_proj(prompt_embed)
-            v2 = self._prompt_attn.v_proj(prompt_embed)
+            q2 = self._prompt_attn.q_proj(prompt)
+            k2 = self._prompt_attn.k_proj(prompt)
+            v2 = self._prompt_attn.v_proj(prompt)
 
             q2 = ttnn.to_torch(q2)
             k2 = ttnn.to_torch(k2)
@@ -171,22 +171,22 @@ class TtAttention:
         concatenated_attn = ttnn.transformer.concatenate_heads(attn)
         ttnn.deallocate(attn)
 
-        if prompt_embed is not None:
+        if prompt is not None:
             torch_concatenated_attn = ttnn.to_torch(concatenated_attn)
-            torch_spatial, torch_prompt_embed = (
+            torch_spatial, torch_prompt = (
                 torch_concatenated_attn[:, :spatial_sequence_length],
                 torch_concatenated_attn[:, spatial_sequence_length:],
             )
             spatial = ttnn.from_torch(torch_spatial, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-            prompt_embed = ttnn.from_torch(torch_prompt_embed, device=prompt_embed.device(), layout=ttnn.TILE_LAYOUT)
+            prompt = ttnn.from_torch(torch_prompt, device=prompt.device(), layout=ttnn.TILE_LAYOUT)
 
-            prompt_embed = self._prompt_attn.out_proj(prompt_embed)
+            prompt = self._prompt_attn.out_proj(prompt)
         else:
             spatial = concatenated_attn
 
         spatial = self._spatial_attn.out_proj(spatial)
 
-        return spatial, prompt_embed
+        return spatial, prompt
 
 
 # def _concat(tensors: list[ttnn.Tensor], dim: int) -> ttnn.Tensor:

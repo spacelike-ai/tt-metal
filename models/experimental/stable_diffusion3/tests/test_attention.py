@@ -39,14 +39,14 @@ def test_attention(
     spatial = torch.randn((batch_size, spatial_sequence_length, 1536))
     prompt_embed = torch.randn((batch_size, prompt_sequence_length, 1536))
 
-    tt_hidden_states = ttnn.from_torch(
+    tt_spatial = ttnn.from_torch(
         spatial,
         dtype=ttnn.bfloat16,
         device=device,
         layout=ttnn.TILE_LAYOUT,
     )
 
-    tt_encoder_hidden_states = ttnn.from_torch(
+    tt_prompt_embed = ttnn.from_torch(
         prompt_embed,
         dtype=ttnn.bfloat16,
         device=device,
@@ -54,11 +54,11 @@ def test_attention(
     )
 
     with torch.no_grad():
-        spatial, prompt_embed = torch_model(spatial, prompt_embed)
+        spatial, prompt_embed = torch_model(spatial=spatial, prompt=prompt_embed)
 
-    tt_hidden_states, tt_encoder_hidden_states = tt_model(tt_hidden_states, tt_encoder_hidden_states)
-    tt_hidden_states_torch = ttnn.to_torch(tt_hidden_states)
-    tt_encoder_hidden_states_torch = ttnn.to_torch(tt_encoder_hidden_states)
+    tt_spatial, tt_prompt_embed = tt_model(spatial=tt_spatial, prompt=tt_prompt_embed)
+    tt_spatial_torch = ttnn.to_torch(tt_spatial)
+    tt_prompt_embed_torch = ttnn.to_torch(tt_prompt_embed)
 
-    assert_with_pcc(spatial, tt_hidden_states_torch, pcc=0.999)
-    assert_with_pcc(prompt_embed, tt_encoder_hidden_states_torch, pcc=0.999)
+    assert_with_pcc(spatial, tt_spatial_torch, pcc=0.999)
+    assert_with_pcc(prompt_embed, tt_prompt_embed_torch, pcc=0.999)

@@ -4,11 +4,7 @@ import torch
 
 from .attention import Attention
 from .feed_forward import FeedForward
-from .normalization import (
-    AdaLayerNormContinuous,
-    AdaLayerNormZero,
-    SD35AdaLayerNormZeroX,
-)
+from .normalization import AdaLayerNormDummy
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/models/attention.py
@@ -41,16 +37,16 @@ class TransformerBlock(torch.nn.Module):
         self.ff = FeedForward(dim=dim, dim_out=dim, approximate="tanh")
 
         if context_pre_only:
-            self.norm1_context = AdaLayerNormContinuous(dim, dim)
+            self.norm1_context = AdaLayerNormDummy(dim, 2 * dim)
             self.norm2_context = None
             self.ff_context = None
         else:
-            self.norm1_context = AdaLayerNormZero(dim)
+            self.norm1_context = AdaLayerNormDummy(dim, 6 * dim)
             self.norm2_context = torch.nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
             self.ff_context = FeedForward(dim=dim, dim_out=dim, approximate="tanh")
 
         if use_dual_attention:
-            self.norm1 = SD35AdaLayerNormZeroX(dim)
+            self.norm1 = AdaLayerNormDummy(dim, 9 * dim)
             self.attn2 = Attention(
                 query_dim=dim,
                 dim_head=attention_head_dim,
@@ -59,85 +55,174 @@ class TransformerBlock(torch.nn.Module):
                 qk_norm=qk_norm,
             )
         else:
-            self.norm1 = AdaLayerNormZero(dim)
+            self.norm1 = AdaLayerNormDummy(dim, 6 * dim)
             self.attn2 = None
+
+    def _spatial_attn_block(
+        self,
+        inp: torch.Tensor,
+        *,
+        gate: torch.Tensor,
+        scale: torch.Tensor,
+        shift: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.attn2 is not None
+
+        scaled = inp * (1 + scale[:, None]) + shift[:, None]
+        attn, _ = self.attn2(spatial=scaled)
+        return gate.unsqueeze(1) * attn
+
+    def _dual_attn_block(
+        self,
+        *,
+        spatial: torch.Tensor,
+        prompt: torch.Tensor,
+        spatial_gate: torch.Tensor,
+        prompt_gate: torch.Tensor | None,
+        prompt_scale: torch.Tensor,
+        prompt_shift: torch.Tensor,
+        spatial_scale: torch.Tensor,
+        spatial_shift: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        spatial_scaled = spatial * (1 + spatial_scale[:, None]) + spatial_shift[:, None]
+        prompt_scaled = prompt * (1 + prompt_scale[:, None]) + prompt_shift[:, None]
+
+        spatial_attn, prompt_attn = self.attn(spatial=spatial_scaled, prompt=prompt_scaled)
+
+        spatial_attn = spatial_gate.unsqueeze(1) * spatial_attn
+
+        prompt_attn = prompt_gate.unsqueeze(1) * prompt_attn if prompt_gate is not None else None
+
+        return spatial_attn, prompt_attn
+
+    def _spatial_ff_block(
+        self,
+        inp: torch.Tensor,
+        *,
+        gate: torch.Tensor,
+        scale: torch.Tensor,
+        shift: torch.Tensor,
+    ) -> torch.Tensor:
+        scaled = inp * (1 + scale[:, None]) + shift[:, None]
+        return gate.unsqueeze(1) * self.ff(scaled)
+
+    def _prompt_ff_block(
+        self,
+        inp: torch.Tensor,
+        *,
+        gate: torch.Tensor,
+        scale: torch.Tensor,
+        shift: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.ff_context is not None
+
+        scaled = inp * (1 + scale[:, None]) + shift[:, None]
+        return gate.unsqueeze(1) * self.ff_context(scaled)
 
     def forward(
         self,
-        *,
-        spatial: torch.FloatTensor,
-        prompt_embed: torch.FloatTensor,
-        time_embed: torch.FloatTensor,
+        spatial: torch.Tensor,
+        prompt: torch.Tensor,
+        time_embed: torch.Tensor,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
-        if self.attn2 is None:
-            norm_spatial, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(spatial, emb=time_embed)
-            norm_spatial2 = None
-            gate_msa2 = None
-        else:
-            (
-                norm_spatial,
-                gate_msa,
-                shift_mlp,
-                scale_mlp,
-                gate_mlp,
-                norm_spatial2,
-                gate_msa2,
-            ) = self.norm1(spatial, emb=time_embed)
-
-        if self.context_pre_only:
-            norm_prompt_embed = self.norm1_context(prompt_embed, time_embed)
-            c_gate_msa = None
-            c_shift_mlp = None
-            c_scale_mlp = None
-            c_gate_mlp = None
-        else:
-            (
-                norm_prompt_embed,
-                c_gate_msa,
-                c_shift_mlp,
-                c_scale_mlp,
-                c_gate_mlp,
-            ) = self.norm1_context(prompt_embed, emb=time_embed)
-
-        # Attention.
-        attn_output, context_attn_output = self.attn(
-            spatial=norm_spatial,
-            prompt_embed=norm_prompt_embed,
-        )
-
-        # Process attention outputs for the `spatial`.
-        attn_output = gate_msa.unsqueeze(1) * attn_output
-        spatial = spatial + attn_output
+        time_embed1 = self.norm1.linear(torch.nn.functional.silu(time_embed))
+        time_embed2 = self.norm1_context.linear(torch.nn.functional.silu(time_embed))
 
         if self.attn2 is not None:
-            assert gate_msa2 is not None
-            attn_output2, _ = self.attn2(spatial=norm_spatial2)
-            attn_output2 = gate_msa2.unsqueeze(1) * attn_output2
-            spatial = spatial + attn_output2
+            (
+                spatial_shift_dual_attn,
+                spatial_scale_dual_attn,
+                spatial_gate_dual_attn,
+                spatial_shift_ff,
+                spatial_scale_ff,
+                spatial_gate_ff,
+                spatial_shift_attn,
+                spatial_scale_attn,
+                spatial_gate_attn,
+            ) = time_embed1.chunk(9, dim=1)
+        else:
+            (
+                spatial_shift_dual_attn,
+                spatial_scale_dual_attn,
+                spatial_gate_dual_attn,
+                spatial_shift_ff,
+                spatial_scale_ff,
+                spatial_gate_ff,
+            ) = time_embed1.chunk(6, dim=1)
 
-        norm_spatial = self.norm2(spatial)
-        norm_spatial = norm_spatial * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
-        ff_output = self.ff(norm_spatial)
-        ff_output = gate_mlp.unsqueeze(1) * ff_output
+            spatial_gate_attn = None
+            spatial_shift_attn = None
+            spatial_scale_attn = None
 
-        spatial = spatial + ff_output
+        if self.context_pre_only:
+            prompt_gate_attn = None
+            prompt_shift_ff = None
+            prompt_scale_ff = None
+            prompt_gate_ff = None
+
+            prompt_scale_attn, prompt_shift_attn = torch.chunk(time_embed2, 2, dim=1)
+        else:
+            (
+                prompt_shift_attn,
+                prompt_scale_attn,
+                prompt_gate_attn,
+                prompt_shift_ff,
+                prompt_scale_ff,
+                prompt_gate_ff,
+            ) = time_embed2.chunk(6, dim=1)
+
+        spatial_normed = self.norm1.norm(spatial)
+        prompt_normed = self.norm1_context.norm(prompt)
+
+        spatial_attn, prompt_attn = self._dual_attn_block(
+            spatial=spatial_normed,
+            prompt=prompt_normed,
+            spatial_gate=spatial_gate_dual_attn,
+            prompt_gate=prompt_gate_attn,
+            prompt_scale=prompt_scale_attn,
+            prompt_shift=prompt_shift_attn,
+            spatial_scale=spatial_scale_dual_attn,
+            spatial_shift=spatial_shift_dual_attn,
+        )
+
+        spatial += spatial_attn
+
+        if self.attn2 is not None:
+            assert spatial_gate_attn is not None
+            assert spatial_scale_attn is not None
+            assert spatial_shift_attn is not None
+
+            spatial += self._spatial_attn_block(
+                spatial_normed,
+                gate=spatial_gate_attn,
+                scale=spatial_scale_attn,
+                shift=spatial_shift_attn,
+            )
+
+        spatial_normed = self.norm2(spatial)
+        spatial += self._spatial_ff_block(
+            spatial_normed,
+            gate=spatial_gate_ff,
+            scale=spatial_scale_ff,
+            shift=spatial_shift_ff,
+        )
 
         if self.context_pre_only:
             return None, spatial
 
         assert self.norm2_context is not None
-        assert self.ff_context is not None
-        assert c_gate_msa is not None
-        assert c_scale_mlp is not None
-        assert c_shift_mlp is not None
-        assert c_gate_mlp is not None
+        assert prompt_scale_ff is not None
+        assert prompt_shift_ff is not None
+        assert prompt_gate_ff is not None
 
-        context_attn_output = c_gate_msa.unsqueeze(1) * context_attn_output
-        prompt_embed = prompt_embed + context_attn_output
+        prompt += prompt_attn
 
-        norm_prompt_embed = self.norm2_context(prompt_embed)
-        norm_prompt_embed = norm_prompt_embed * (1 + c_scale_mlp[:, None]) + c_shift_mlp[:, None]
-        context_ff_output = self.ff_context(norm_prompt_embed)
-        prompt_embed = prompt_embed + c_gate_mlp.unsqueeze(1) * context_ff_output
+        prompt_normed = self.norm2_context(prompt)
+        prompt += self._prompt_ff_block(
+            prompt_normed,
+            gate=prompt_gate_ff,
+            scale=prompt_scale_ff,
+            shift=prompt_shift_ff,
+        )
 
-        return prompt_embed, spatial
+        return prompt, spatial

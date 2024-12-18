@@ -59,7 +59,7 @@ class Attention(torch.nn.Module):
         self,
         *,
         spatial: torch.Tensor,
-        prompt_embed: torch.Tensor | None = None,
+        prompt: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         batch_size = spatial.shape[0]
         num_heads = self.num_heads
@@ -78,36 +78,36 @@ class Attention(torch.nn.Module):
         query = self.norm_q(query)
         key = self.norm_k(key)
 
-        if prompt_embed is not None:
-            prompt_embed_query_proj = self.add_q_proj(prompt_embed)
-            prompt_embed_key_proj = self.add_k_proj(prompt_embed)
-            prompt_embed_value_proj = self.add_v_proj(prompt_embed)
+        if prompt is not None:
+            prompt_query_proj = self.add_q_proj(prompt)
+            prompt_key_proj = self.add_k_proj(prompt)
+            prompt_value_proj = self.add_v_proj(prompt)
 
-            prompt_embed_query_proj = prompt_embed_query_proj.view(batch_size, -1, num_heads, head_dim).transpose(1, 2)
-            prompt_embed_key_proj = prompt_embed_key_proj.view(batch_size, -1, num_heads, head_dim).transpose(1, 2)
-            prompt_embed_value_proj = prompt_embed_value_proj.view(batch_size, -1, num_heads, head_dim).transpose(1, 2)
+            prompt_query_proj = prompt_query_proj.view(batch_size, -1, num_heads, head_dim).transpose(1, 2)
+            prompt_key_proj = prompt_key_proj.view(batch_size, -1, num_heads, head_dim).transpose(1, 2)
+            prompt_value_proj = prompt_value_proj.view(batch_size, -1, num_heads, head_dim).transpose(1, 2)
 
             if self.norm_added_q is not None:
-                prompt_embed_query_proj = self.norm_added_q(prompt_embed_query_proj)
+                prompt_query_proj = self.norm_added_q(prompt_query_proj)
             if self.norm_added_k is not None:
-                prompt_embed_key_proj = self.norm_added_k(prompt_embed_key_proj)
+                prompt_key_proj = self.norm_added_k(prompt_key_proj)
 
-            query = torch.cat([query, prompt_embed_query_proj], dim=2)
-            key = torch.cat([key, prompt_embed_key_proj], dim=2)
-            value = torch.cat([value, prompt_embed_value_proj], dim=2)
+            query = torch.cat([query, prompt_query_proj], dim=2)
+            key = torch.cat([key, prompt_key_proj], dim=2)
+            value = torch.cat([value, prompt_value_proj], dim=2)
 
         spatial = torch.nn.functional.scaled_dot_product_attention(query, key, value, dropout_p=0.0, is_causal=False)
         spatial = spatial.transpose(1, 2).reshape(batch_size, -1, num_heads * head_dim)
         spatial = spatial.to(query.dtype)
 
-        if prompt_embed is not None:
-            spatial, prompt_embed = (
+        if prompt is not None:
+            spatial, prompt = (
                 spatial[:, : residual.shape[1]],
                 spatial[:, residual.shape[1] :],
             )
             if not self.context_pre_only:
-                prompt_embed = self.to_add_out(prompt_embed)
+                prompt = self.to_add_out(prompt)
 
         spatial = self.to_out[0](spatial)
 
-        return spatial, prompt_embed
+        return spatial, prompt
