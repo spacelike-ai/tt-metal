@@ -45,7 +45,8 @@ def test_feed_forward(
         layout=ttnn.TILE_LAYOUT,
     )
 
-    torch_output = torch_model(torch_input_tensor)
+    with torch.no_grad():
+        torch_output = torch_model(torch_input_tensor)
 
     tt_output = tt_model(tt_input_tensor)
     tt_output_torch = ttnn.to_torch(tt_output)

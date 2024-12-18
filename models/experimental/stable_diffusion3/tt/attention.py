@@ -18,7 +18,7 @@ class TtAttentionPartParameters:
     v_proj: TtLinearParameters
     norm_q: TtRmsNormParameters
     norm_k: TtRmsNormParameters
-    out_proj: TtLinearParameters
+    out_proj: TtLinearParameters  # TODO: make optional?
 
 
 @dataclass
@@ -77,63 +77,83 @@ class TtAttention:
         self._num_heads = num_heads
         self._head_dim = head_dim
 
-        self._part_a = TtAttentionPart(parameters.part_a)
-        self._part_b = TtAttentionPart(parameters.part_b) if parameters.part_b is not None else None
+        self._spatial_attn = TtAttentionPart(parameters.part_a)
+        self._prompt_attn = TtAttentionPart(parameters.part_b) if parameters.part_b is not None else None
 
     def __call__(
         self, spatial: ttnn.Tensor, prompt_embed: ttnn.Tensor | None = None
     ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
         """
-        spatial: N ⊗ S1 ⊗ (H1 * E1)
-        prompt_embed: N ⊗ S2 ⊗ (H2 * E2)
+        spatial: N ⊗ S1 ⊗ (H * E1)
+        prompt_embed: N ⊗ S2 ⊗ (H * E2)
         """
         batch_size = spatial.shape[0]
+        spatial_sequence_length = spatial.shape[1]
 
-        q = self._part_a.q_proj(spatial)  # N ⊗ S1 ⊗ (H1 * Eq1)
-        k = self._part_a.k_proj(spatial)  # N ⊗ S1 ⊗ (H1 * Eq1)
-        v = self._part_a.v_proj(spatial)  # N ⊗ S1 ⊗ (H1 * Ev1)
+        q = self._spatial_attn.q_proj(spatial)  # N ⊗ S1 ⊗ (H * Eq)
+        k = self._spatial_attn.k_proj(spatial)  # N ⊗ S1 ⊗ (H * Eq)
+        v = self._spatial_attn.v_proj(spatial)  # N ⊗ S1 ⊗ (H * Ev)
 
         q = ttnn.to_torch(q)
         k = ttnn.to_torch(k)
         v = ttnn.to_torch(v)
 
-        q = q.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H1 ⊗ S1 ⊗ Eq1
-        k = k.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H1 ⊗ Eq1 ⊗ S1
-        v = v.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H1 ⊗ S1 ⊗ Ev1
+        # TODO: port to ttnn
+        q = q.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H ⊗ S1 ⊗ Eq
+        k = k.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H ⊗ S1 ⊗ Eq
+        v = v.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H ⊗ S1 ⊗ Ev
 
-        q = ttnn.from_torch(q, device=spatial.device())
-        k = ttnn.from_torch(k, device=spatial.device())
-        v = ttnn.from_torch(v, device=spatial.device())
+        q = ttnn.from_torch(q, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+        k = ttnn.from_torch(k, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+        v = ttnn.from_torch(v, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
 
-        q = self._part_a.norm_q(q)
-        k = self._part_a.norm_k(k)
+        q = self._spatial_attn.norm_q(q)
+        k = self._spatial_attn.norm_k(k)
 
-        # if self._part_b is not None:
-        #     prompt_embed_query_proj = self.q_proj_2(prompt_embed)
-        #     prompt_embed_key_proj = self.k_proj_2(prompt_embed)
-        #     prompt_embed_value_proj = self.v_proj_2(prompt_embed)
+        if prompt_embed is not None:
+            assert self._prompt_attn is not None
 
-        #     prompt_embed_query_proj = prompt_embed_query_proj.view(
-        #         batch_size, -1, num_heads, head_dim
-        #     ).transpose(1, 2)
-        #     prompt_embed_key_proj = prompt_embed_key_proj.view(
-        #         batch_size, -1, num_heads, head_dim
-        #     ).transpose(1, 2)
-        #     prompt_embed_value_proj = prompt_embed_value_proj.view(
-        #         batch_size, -1, num_heads, head_dim
-        #     ).transpose(1, 2)
+            q2 = self._prompt_attn.q_proj(prompt_embed)
+            k2 = self._prompt_attn.k_proj(prompt_embed)
+            v2 = self._prompt_attn.v_proj(prompt_embed)
 
-        #     prompt_embed_query_proj = self.norm_q_2(prompt_embed_query_proj)
-        #     prompt_embed_key_proj = self.norm_added_k(prompt_embed_key_proj)
+            q2 = ttnn.to_torch(q2)
+            k2 = ttnn.to_torch(k2)
+            v2 = ttnn.to_torch(v2)
 
-        #     q = torch.cat([q, prompt_embed_query_proj], dim=2)
-        #     k = torch.cat([k, prompt_embed_key_proj], dim=2)
-        #     v = torch.cat([v, prompt_embed_value_proj], dim=2)
+            # TODO: port to ttnn
+            q2 = q2.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H ⊗ S2 ⊗ Eq
+            k2 = k2.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H ⊗ S2 ⊗ Eq
+            v2 = v2.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H ⊗ S2 ⊗ Ev
+
+            q2 = ttnn.from_torch(q2, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+            k2 = ttnn.from_torch(k2, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+            v2 = ttnn.from_torch(v2, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+
+            q2 = self._prompt_attn.norm_q(q2)
+            k2 = self._prompt_attn.norm_k(k2)
+
+            # TODO: `concat` does not work correctly with tilized tensors and `tilize` does not yield the correct result
+            k = ttnn.from_torch(
+                torch.cat([ttnn.to_torch(k), ttnn.to_torch(k2)], dim=2),
+                device=spatial.device(),
+                layout=ttnn.TILE_LAYOUT,
+            )
+            q = ttnn.from_torch(
+                torch.cat([ttnn.to_torch(q), ttnn.to_torch(q2)], dim=2),
+                device=spatial.device(),
+                layout=ttnn.TILE_LAYOUT,
+            )
+            v = ttnn.from_torch(
+                torch.cat([ttnn.to_torch(v), ttnn.to_torch(v2)], dim=2),
+                device=spatial.device(),
+                layout=ttnn.TILE_LAYOUT,
+            )
+            # q = ttnn.concat([q, q2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Eq
+            # k = ttnn.concat([k, k2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Eq
+            # v = ttnn.concat([v, v2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Ev
 
         k = ttnn.transpose(k, 2, 3)
-        k = ttnn.tilize(k)
-        q = ttnn.tilize(q)
-        v = ttnn.tilize(v)
 
         attention_scores = ttnn.matmul(q, k)
         ttnn.deallocate(q)
@@ -151,15 +171,28 @@ class TtAttention:
         concatenated_attn = ttnn.transformer.concatenate_heads(attn)
         ttnn.deallocate(attn)
 
-        spatial = self._part_a.out_proj(concatenated_attn)
-        ttnn.deallocate(concatenated_attn)
+        if prompt_embed is not None:
+            torch_concatenated_attn = ttnn.to_torch(concatenated_attn)
+            torch_spatial, torch_prompt_embed = (
+                torch_concatenated_attn[:, :spatial_sequence_length],
+                torch_concatenated_attn[:, spatial_sequence_length:],
+            )
+            spatial = ttnn.from_torch(torch_spatial, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+            prompt_embed = ttnn.from_torch(torch_prompt_embed, device=prompt_embed.device(), layout=ttnn.TILE_LAYOUT)
 
-        # if prompt_embed is not None:
-        #     spatial, prompt_embed = (
-        #         spatial[:, : residual.shape[1]],
-        #         spatial[:, residual.shape[1] :],
-        #     )
-        #     if not self.context_pre_only:
-        #         prompt_embed = self.to_add_out(prompt_embed)
+            prompt_embed = self._prompt_attn.out_proj(prompt_embed)
+        else:
+            spatial = concatenated_attn
+
+        spatial = self._spatial_attn.out_proj(spatial)
 
         return spatial, prompt_embed
+
+
+# def _concat(tensors: list[ttnn.Tensor], dim: int) -> ttnn.Tensor:
+#     shape = list(tensors[0].shape)
+#     for t in tensors[1:]:
+#         shape[dim] += t.shape[dim]
+
+#     result = ttnn.concat(tensors, dim=dim)
+#     return ttnn.reshape(result, ttnn.Shape(shape, result.shape.with_tile_padding()))
