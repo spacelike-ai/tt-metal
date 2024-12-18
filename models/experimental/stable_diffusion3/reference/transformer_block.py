@@ -64,65 +64,66 @@ class TransformerBlock(torch.nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.FloatTensor,
-        encoder_hidden_states: torch.FloatTensor,
-        temb: torch.FloatTensor,
+        *,
+        spatial: torch.FloatTensor,
+        prompt_embed: torch.FloatTensor,
+        time_embed: torch.FloatTensor,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         if self.attn2 is None:
-            norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
-            norm_hidden_states2 = None
+            norm_spatial, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(spatial, emb=time_embed)
+            norm_spatial2 = None
             gate_msa2 = None
         else:
             (
-                norm_hidden_states,
+                norm_spatial,
                 gate_msa,
                 shift_mlp,
                 scale_mlp,
                 gate_mlp,
-                norm_hidden_states2,
+                norm_spatial2,
                 gate_msa2,
-            ) = self.norm1(hidden_states, emb=temb)
+            ) = self.norm1(spatial, emb=time_embed)
 
         if self.context_pre_only:
-            norm_encoder_hidden_states = self.norm1_context(encoder_hidden_states, temb)
+            norm_prompt_embed = self.norm1_context(prompt_embed, time_embed)
             c_gate_msa = None
             c_shift_mlp = None
             c_scale_mlp = None
             c_gate_mlp = None
         else:
             (
-                norm_encoder_hidden_states,
+                norm_prompt_embed,
                 c_gate_msa,
                 c_shift_mlp,
                 c_scale_mlp,
                 c_gate_mlp,
-            ) = self.norm1_context(encoder_hidden_states, emb=temb)
+            ) = self.norm1_context(prompt_embed, emb=time_embed)
 
         # Attention.
         attn_output, context_attn_output = self.attn(
-            hidden_states=norm_hidden_states,
-            encoder_hidden_states=norm_encoder_hidden_states,
+            spatial=norm_spatial,
+            prompt_embed=norm_prompt_embed,
         )
 
-        # Process attention outputs for the `hidden_states`.
+        # Process attention outputs for the `spatial`.
         attn_output = gate_msa.unsqueeze(1) * attn_output
-        hidden_states = hidden_states + attn_output
+        spatial = spatial + attn_output
 
         if self.attn2 is not None:
             assert gate_msa2 is not None
-            attn_output2, _ = self.attn2(hidden_states=norm_hidden_states2)
+            attn_output2, _ = self.attn2(spatial=norm_spatial2)
             attn_output2 = gate_msa2.unsqueeze(1) * attn_output2
-            hidden_states = hidden_states + attn_output2
+            spatial = spatial + attn_output2
 
-        norm_hidden_states = self.norm2(hidden_states)
-        norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
-        ff_output = self.ff(norm_hidden_states)
+        norm_spatial = self.norm2(spatial)
+        norm_spatial = norm_spatial * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
+        ff_output = self.ff(norm_spatial)
         ff_output = gate_mlp.unsqueeze(1) * ff_output
 
-        hidden_states = hidden_states + ff_output
+        spatial = spatial + ff_output
 
         if self.context_pre_only:
-            return None, hidden_states
+            return None, spatial
 
         assert self.norm2_context is not None
         assert self.ff_context is not None
@@ -132,11 +133,11 @@ class TransformerBlock(torch.nn.Module):
         assert c_gate_mlp is not None
 
         context_attn_output = c_gate_msa.unsqueeze(1) * context_attn_output
-        encoder_hidden_states = encoder_hidden_states + context_attn_output
+        prompt_embed = prompt_embed + context_attn_output
 
-        norm_encoder_hidden_states = self.norm2_context(encoder_hidden_states)
-        norm_encoder_hidden_states = norm_encoder_hidden_states * (1 + c_scale_mlp[:, None]) + c_shift_mlp[:, None]
-        context_ff_output = self.ff_context(norm_encoder_hidden_states)
-        encoder_hidden_states = encoder_hidden_states + c_gate_mlp.unsqueeze(1) * context_ff_output
+        norm_prompt_embed = self.norm2_context(prompt_embed)
+        norm_prompt_embed = norm_prompt_embed * (1 + c_scale_mlp[:, None]) + c_shift_mlp[:, None]
+        context_ff_output = self.ff_context(norm_prompt_embed)
+        prompt_embed = prompt_embed + c_gate_mlp.unsqueeze(1) * context_ff_output
 
-        return encoder_hidden_states, hidden_states
+        return prompt_embed, spatial

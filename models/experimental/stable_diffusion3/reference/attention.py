@@ -57,18 +57,19 @@ class Attention(torch.nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.Tensor | None = None,
+        *,
+        spatial: torch.Tensor,
+        prompt_embed: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        batch_size = hidden_states.shape[0]
+        batch_size = spatial.shape[0]
         num_heads = self.num_heads
         head_dim = self.head_dim
 
-        residual = hidden_states
+        residual = spatial
 
-        query = self.to_q(hidden_states)
-        key = self.to_k(hidden_states)
-        value = self.to_v(hidden_states)
+        query = self.to_q(spatial)
+        key = self.to_k(spatial)
+        value = self.to_v(spatial)
 
         query = query.view(batch_size, -1, num_heads, head_dim).transpose(1, 2)
         key = key.view(batch_size, -1, num_heads, head_dim).transpose(1, 2)
@@ -77,44 +78,36 @@ class Attention(torch.nn.Module):
         query = self.norm_q(query)
         key = self.norm_k(key)
 
-        if encoder_hidden_states is not None:
-            encoder_hidden_states_query_proj = self.add_q_proj(encoder_hidden_states)
-            encoder_hidden_states_key_proj = self.add_k_proj(encoder_hidden_states)
-            encoder_hidden_states_value_proj = self.add_v_proj(encoder_hidden_states)
+        if prompt_embed is not None:
+            prompt_embed_query_proj = self.add_q_proj(prompt_embed)
+            prompt_embed_key_proj = self.add_k_proj(prompt_embed)
+            prompt_embed_value_proj = self.add_v_proj(prompt_embed)
 
-            encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(
-                batch_size, -1, num_heads, head_dim
-            ).transpose(1, 2)
-            encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(
-                batch_size, -1, num_heads, head_dim
-            ).transpose(1, 2)
-            encoder_hidden_states_value_proj = encoder_hidden_states_value_proj.view(
-                batch_size, -1, num_heads, head_dim
-            ).transpose(1, 2)
+            prompt_embed_query_proj = prompt_embed_query_proj.view(batch_size, -1, num_heads, head_dim).transpose(1, 2)
+            prompt_embed_key_proj = prompt_embed_key_proj.view(batch_size, -1, num_heads, head_dim).transpose(1, 2)
+            prompt_embed_value_proj = prompt_embed_value_proj.view(batch_size, -1, num_heads, head_dim).transpose(1, 2)
 
             if self.norm_added_q is not None:
-                encoder_hidden_states_query_proj = self.norm_added_q(encoder_hidden_states_query_proj)
+                prompt_embed_query_proj = self.norm_added_q(prompt_embed_query_proj)
             if self.norm_added_k is not None:
-                encoder_hidden_states_key_proj = self.norm_added_k(encoder_hidden_states_key_proj)
+                prompt_embed_key_proj = self.norm_added_k(prompt_embed_key_proj)
 
-            query = torch.cat([query, encoder_hidden_states_query_proj], dim=2)
-            key = torch.cat([key, encoder_hidden_states_key_proj], dim=2)
-            value = torch.cat([value, encoder_hidden_states_value_proj], dim=2)
+            query = torch.cat([query, prompt_embed_query_proj], dim=2)
+            key = torch.cat([key, prompt_embed_key_proj], dim=2)
+            value = torch.cat([value, prompt_embed_value_proj], dim=2)
 
-        hidden_states = torch.nn.functional.scaled_dot_product_attention(
-            query, key, value, dropout_p=0.0, is_causal=False
-        )
-        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, num_heads * head_dim)
-        hidden_states = hidden_states.to(query.dtype)
+        spatial = torch.nn.functional.scaled_dot_product_attention(query, key, value, dropout_p=0.0, is_causal=False)
+        spatial = spatial.transpose(1, 2).reshape(batch_size, -1, num_heads * head_dim)
+        spatial = spatial.to(query.dtype)
 
-        if encoder_hidden_states is not None:
-            hidden_states, encoder_hidden_states = (
-                hidden_states[:, : residual.shape[1]],
-                hidden_states[:, residual.shape[1] :],
+        if prompt_embed is not None:
+            spatial, prompt_embed = (
+                spatial[:, : residual.shape[1]],
+                spatial[:, residual.shape[1] :],
             )
             if not self.context_pre_only:
-                encoder_hidden_states = self.to_add_out(encoder_hidden_states)
+                prompt_embed = self.to_add_out(prompt_embed)
 
-        hidden_states = self.to_out[0](hidden_states)
+        spatial = self.to_out[0](spatial)
 
-        return hidden_states, encoder_hidden_states
+        return spatial, prompt_embed

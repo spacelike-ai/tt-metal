@@ -70,33 +70,34 @@ class SD3Transformer2DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.Tensor,
+        *,
+        spatial: torch.Tensor,
+        prompt_embed: torch.Tensor,
         pooled_projections: torch.Tensor,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
-        height, width = hidden_states.shape[-2:]
+        height, width = spatial.shape[-2:]
 
-        hidden_states = self.pos_embed(hidden_states)
-        temb = self.time_text_embed(timestep, pooled_projections)
-        encoder_hidden_states = self.context_embedder(encoder_hidden_states)
+        spatial = self.pos_embed(spatial)
+        time_embed = self.time_text_embed(timestep, pooled_projections)
+        prompt_embed = self.context_embedder(prompt_embed)
 
         for block in self.transformer_blocks:
-            encoder_hidden_states, hidden_states = block(
-                hidden_states=hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
-                temb=temb,
+            prompt_embed, spatial = block(
+                spatial=spatial,
+                prompt_embed=prompt_embed,
+                time_embed=time_embed,
             )
 
-        hidden_states = self.norm_out(hidden_states, temb)
-        hidden_states = self.proj_out(hidden_states)
+        spatial = self.norm_out(spatial, time_embed)
+        spatial = self.proj_out(spatial)
 
         patch_count_y = height // self._patch_size
         patch_count_x = width // self._patch_size
 
-        hidden_states = hidden_states.reshape(
+        spatial = spatial.reshape(
             shape=(
-                hidden_states.shape[0],
+                spatial.shape[0],
                 patch_count_y,
                 patch_count_x,
                 self._patch_size,
@@ -105,11 +106,11 @@ class SD3Transformer2DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             )
         )
 
-        hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
+        spatial = torch.einsum("nhwpqc->nchpwq", spatial)
 
-        return hidden_states.reshape(
+        return spatial.reshape(
             shape=(
-                hidden_states.shape[0],
+                spatial.shape[0],
                 self._out_channels,
                 patch_count_y * self._patch_size,
                 patch_count_x * self._patch_size,
