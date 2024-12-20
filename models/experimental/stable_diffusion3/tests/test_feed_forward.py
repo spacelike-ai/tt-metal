@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
     "block_index, batch_size, input_dim",
     [
         (0, 32, 128),
-        (0, 32, 128),
     ],
 )
 def test_feed_forward(

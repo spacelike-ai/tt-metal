@@ -16,8 +16,7 @@ logger = logging.getLogger(__name__)
 @pytest.mark.parametrize(
     "block_index, batch_size, spatial_sequence_length, prompt_sequence_length",
     [
-        (0, 2, 20, 30),
-        # (0, 2, 1024, 333),
+        (0, 2, 1024, 333),
     ],
 )
 def test_transformer_block(
@@ -34,7 +33,11 @@ def test_transformer_block(
     torch_model: TransformerBlock = parent_torch_model.transformer_blocks[block_index]
     torch_model.eval()
 
-    parameters = TtTransformerBlockParameters.from_torch(torch_model.state_dict(), device=device)
+    parameters = TtTransformerBlockParameters.from_torch(
+        torch_model.state_dict(),
+        device=device,
+        dtype=ttnn.float32,
+    )
     tt_model = TtTransformerBlock(
         parameters,
         num_heads=torch_model.num_heads,
@@ -50,21 +53,21 @@ def test_transformer_block(
 
     tt_spatial = ttnn.from_torch(
         spatial,
-        dtype=ttnn.bfloat16,
+        dtype=ttnn.float32,
         device=device,
         layout=ttnn.TILE_LAYOUT,
     )
 
     tt_prompt_embed = ttnn.from_torch(
         prompt_embed,
-        dtype=ttnn.bfloat16,
+        dtype=ttnn.float32,
         device=device,
         layout=ttnn.TILE_LAYOUT,
     )
 
     tt_time_embed = ttnn.from_torch(
         time_embed[:, None],
-        dtype=ttnn.bfloat16,
+        dtype=ttnn.float32,
         device=device,
         layout=ttnn.TILE_LAYOUT,
     )

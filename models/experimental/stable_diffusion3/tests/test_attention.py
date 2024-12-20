@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 @pytest.mark.parametrize(
     "block_index, batch_size, spatial_sequence_length, prompt_sequence_length",
     [
-        (0, 2, 2, 2),
+        (0, 4, 1024, 333),
     ],
 )
 def test_attention(

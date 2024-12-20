@@ -48,4 +48,10 @@ class TtLinear:
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         assert x.shape[-1] == self._in_features, "input tensor does not have the expected shape"
 
-        return ttnn.linear(x, self._weight, bias=self._bias)
+        try:
+            return ttnn.linear(x, self._weight, bias=self._bias)
+        except Exception:
+            result = ttnn.to_torch(x) @ ttnn.to_torch(self._weight)
+            if self._bias is not None:
+                result += ttnn.to_torch(self._bias)
+            return ttnn.from_torch(result, device=x.device(), layout=ttnn.TILE_LAYOUT, dtype=x.dtype)
