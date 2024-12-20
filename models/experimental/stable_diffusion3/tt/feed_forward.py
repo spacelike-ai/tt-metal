@@ -46,8 +46,14 @@ class TtFeedForward:
         self.out_proj = TtLinear(parameters.out_proj)
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        x = self.in_proj(x)
-        x = ttnn.gelu(
-            x, fast_and_approximate_mode=self.fast_and_approximate_mode
+        x2 = self.in_proj(x)
+
+        x3 = ttnn.gelu(
+            x2, fast_and_approximate_mode=self.fast_and_approximate_mode
         )  # TODO (Friedrich): is this the correct approximation?
-        return self.out_proj(x)
+        ttnn.deallocate(x2)
+
+        result = self.out_proj(x3)
+        ttnn.deallocate(x3)
+
+        return result

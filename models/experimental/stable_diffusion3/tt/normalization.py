@@ -30,8 +30,8 @@ class TtRmsNormParameters:
 
 @dataclass
 class TtLayerNormParameters:
-    weight: ttnn.Tensor | None
-    bias: ttnn.Tensor | None
+    weight: ttnn.Tensor | None = None
+    bias: ttnn.Tensor | None = None
 
     @classmethod
     def from_torch(

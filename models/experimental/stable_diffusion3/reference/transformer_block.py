@@ -186,8 +186,6 @@ class TransformerBlock(torch.nn.Module):
             spatial_shift=spatial_shift_dual_attn,
         )
 
-        return spatial_attn, prompt_attn
-
         spatial += spatial_attn
 
         if self.attn2 is not None:

@@ -20,7 +20,6 @@ class TtTransformerBlockParameters:
     prompt_time_embed: TtLinearParameters
     spatial_time_embed: TtLinearParameters
     prompt_norm_1: TtLayerNormParameters
-    prompt_norm_2: TtLayerNormParameters | None
     spatial_norm_1: TtLayerNormParameters
     spatial_norm_2: TtLayerNormParameters
     prompt_ff: TtFeedForwardParameters | None
@@ -44,9 +43,6 @@ class TtTransformerBlockParameters:
             prompt_norm_1=TtLayerNormParameters.from_torch(
                 substate(state, "norm1_context.norm"), dtype=dtype, device=device
             ),
-            prompt_norm_2=TtLayerNormParameters.from_torch(substate(state, "norm2_context"), dtype=dtype, device=device)
-            if has_substate(state, "norm2_context")
-            else None,
             spatial_time_embed=TtLinearParameters.from_torch(
                 substate(state, "norm1.linear"), dtype=dtype, device=device
             ),
@@ -83,9 +79,7 @@ class TtTransformerBlock:
         self._spatial_norm_1 = TtLayerNorm(parameters.spatial_norm_1, eps=eps)
         self._spatial_norm_2 = TtLayerNorm(parameters.spatial_norm_2, eps=eps)
         self._prompt_norm_1 = TtLayerNorm(parameters.prompt_norm_1, eps=eps)
-        self._prompt_norm_2 = (
-            TtLayerNorm(parameters.prompt_norm_2, eps=eps) if parameters.prompt_norm_2 is not None else None
-        )
+        self._prompt_norm_2 = TtLayerNorm(TtLayerNormParameters(), eps=eps)
 
         self._spatial_ff = TtFeedForward(parameters.spatial_ff, approximate="tanh")
         self._prompt_ff = (
@@ -107,7 +101,11 @@ class TtTransformerBlock:
 
         scaled = inp * (1 + scale) + shift
         attn, _ = self._spatial_attn(spatial=scaled)
-        return gate * attn
+        result = gate * attn
+
+        ttnn.deallocate(scaled)
+        ttnn.deallocate(attn)
+        return result
 
     def _dual_attn_block(
         self,
@@ -126,10 +124,12 @@ class TtTransformerBlock:
 
         spatial_attn, prompt_attn = self._dual_attn(spatial=spatial_scaled, prompt=prompt_scaled)  # quite imprecise
 
-        spatial_attn = spatial_gate * spatial_attn
-        prompt_attn = prompt_gate * prompt_attn if prompt_gate is not None else None
+        spatial_attn_scaled = spatial_gate * spatial_attn
+        prompt_attn_scaled = prompt_gate * prompt_attn if prompt_gate is not None else None
 
-        return spatial_attn, prompt_attn
+        ttnn.deallocate(spatial_attn)
+        ttnn.deallocate(prompt_attn)
+        return spatial_attn_scaled, prompt_attn_scaled
 
     def _spatial_ff_block(
         self,
@@ -140,7 +140,9 @@ class TtTransformerBlock:
         shift: ttnn.Tensor,
     ) -> ttnn.Tensor:
         scaled = inp * (1 + scale) + shift
-        return gate * self.ff(scaled)
+        result = gate * self._spatial_ff(scaled)
+        ttnn.deallocate(scaled)
+        return result
 
     def _prompt_ff_block(
         self,
@@ -150,10 +152,12 @@ class TtTransformerBlock:
         scale: ttnn.Tensor,
         shift: ttnn.Tensor,
     ) -> ttnn.Tensor:
-        assert self.ff_context is not None
+        assert self._prompt_ff is not None
 
         scaled = inp * (1 + scale) + shift
-        return gate * self.ff_context(scaled)
+        result = gate * self._prompt_ff(scaled)
+        ttnn.deallocate(scaled)
+        return result
 
     def __call__(
         self, spatial: ttnn.Tensor, prompt: ttnn.Tensor, time_embed: ttnn.Tensor
@@ -162,9 +166,12 @@ class TtTransformerBlock:
 
         spatial_time = self._spatial_time_embed(t)
         prompt_time = self._prompt_time_embed(t)
+        ttnn.deallocate(t)
 
         torch_spatial_time = ttnn.to_torch(spatial_time)
         torch_prompt_time = ttnn.to_torch(prompt_time)
+        ttnn.deallocate(spatial_time)
+        ttnn.deallocate(prompt_time)
 
         if self._spatial_attn is not None:
             (
@@ -275,10 +282,16 @@ class TtTransformerBlock:
             spatial_scale=spatial_scale_dual_attn,
             spatial_shift=spatial_shift_dual_attn,
         )
-
-        return spatial_attn, prompt_attn
+        ttnn.deallocate(prompt_normed)
+        ttnn.deallocate(spatial_gate_dual_attn)
+        ttnn.deallocate(prompt_gate_attn)
+        ttnn.deallocate(prompt_scale_attn)
+        ttnn.deallocate(prompt_shift_attn)
+        ttnn.deallocate(spatial_scale_dual_attn)
+        ttnn.deallocate(spatial_shift_dual_attn)
 
         spatial += spatial_attn
+        ttnn.deallocate(spatial_attn)
 
         if self._spatial_attn is not None:
             assert spatial_gate_attn is not None
@@ -291,6 +304,10 @@ class TtTransformerBlock:
                 scale=spatial_scale_attn,
                 shift=spatial_shift_attn,
             )
+            ttnn.deallocate(spatial_normed)
+            ttnn.deallocate(spatial_gate_attn)
+            ttnn.deallocate(spatial_scale_attn)
+            ttnn.deallocate(spatial_shift_attn)
 
         spatial_normed = self._spatial_norm_2(spatial)
         spatial += self._spatial_ff_block(
@@ -299,16 +316,20 @@ class TtTransformerBlock:
             scale=spatial_scale_ff,
             shift=spatial_shift_ff,
         )
+        ttnn.deallocate(spatial_normed)
+        ttnn.deallocate(spatial_gate_ff)
+        ttnn.deallocate(spatial_scale_ff)
+        ttnn.deallocate(spatial_shift_ff)
 
         if self._context_pre_only:
             return None, spatial
 
-        assert self._prompt_norm_2 is not None
         assert prompt_scale_ff is not None
         assert prompt_shift_ff is not None
         assert prompt_gate_ff is not None
 
         prompt += prompt_attn
+        ttnn.deallocate(prompt_attn)
 
         prompt_normed = self._prompt_norm_2(prompt)
         prompt += self._prompt_ff_block(
@@ -317,5 +338,9 @@ class TtTransformerBlock:
             scale=prompt_scale_ff,
             shift=prompt_shift_ff,
         )
+        ttnn.deallocate(prompt_normed)
+        ttnn.deallocate(prompt_gate_ff)
+        ttnn.deallocate(prompt_scale_ff)
+        ttnn.deallocate(prompt_shift_ff)
 
         return prompt, spatial

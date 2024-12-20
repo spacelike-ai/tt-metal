@@ -10,7 +10,7 @@ import ttnn
 @dataclass
 class TtLinearParameters:
     weight: ttnn.Tensor
-    bias: ttnn.Tensor | None
+    bias: ttnn.Tensor | None = None
 
     @classmethod
     def from_torch(
