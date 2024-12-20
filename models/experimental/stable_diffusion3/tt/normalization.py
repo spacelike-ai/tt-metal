@@ -85,5 +85,19 @@ class TtLayerNorm:
         self._weight = parameters.weight
         self._bias = parameters.bias
 
+        assert self._weight is None
+        assert self._bias is None
+
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        return ttnn.layer_norm(x, weight=self._weight, bias=self._bias, epsilon=self._eps)
+        # ttnn.layer_norm does currently not work correctly with padded tensors
+        # assert list(x.shape) == list(x.shape.with_tile_padding())
+        # return ttnn.layer_norm(x, weight=self._weight, bias=self._bias, epsilon=self._eps)
+
+        torch_x = ttnn.to_torch(x)
+        torch_weight = ttnn.to_torch(self._weight) if self._weight is not None else None
+        torch_bias = ttnn.to_torch(self._bias) if self._bias is not None else None
+
+        torch_result = torch.nn.functional.layer_norm(
+            torch_x, [torch_x.shape[-1]], weight=torch_weight, bias=torch_bias
+        )
+        return ttnn.from_torch(torch_result, device=x.device(), layout=ttnn.TILE_LAYOUT)

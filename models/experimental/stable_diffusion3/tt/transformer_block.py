@@ -8,23 +8,23 @@ import ttnn
 
 from .attention import TtAttention, TtAttentionParameters
 from .feed_forward import TtFeedForward, TtFeedForwardParameters
-from .linear import TtLinearParameters
+from .linear import TtLinear, TtLinearParameters
 from .normalization import TtLayerNorm, TtLayerNormParameters
 from .substate import has_substate, substate
 
 
 @dataclass
 class TtTransformerBlockParameters:
-    spatial_t_embed: TtLinearParameters
-    prompt_t_embed: TtLinearParameters
-    attn_1: TtAttentionParameters
-    attn_2: TtAttentionParameters | None
+    dual_attn: TtAttentionParameters
+    spatial_attn: TtAttentionParameters | None
+    prompt_time_embed: TtLinearParameters
+    spatial_time_embed: TtLinearParameters
+    prompt_norm_1: TtLayerNormParameters
+    prompt_norm_2: TtLayerNormParameters | None
     spatial_norm_1: TtLayerNormParameters
     spatial_norm_2: TtLayerNormParameters
-    prompt_norm_1: TtLayerNormParameters
-    pormpt_norm_2: TtLayerNormParameters | None
-    spatial_ff: TtFeedForwardParameters
     prompt_ff: TtFeedForwardParameters | None
+    spatial_ff: TtFeedForwardParameters
 
     @classmethod
     def from_torch(
@@ -35,8 +35,8 @@ class TtTransformerBlockParameters:
         device: ttnn.Device,
     ) -> TtFeedForwardParameters:
         return cls(
-            attn_1=TtAttentionParameters.from_torch(substate(state, "attn"), dtype=dtype, device=device),
-            attn_2=TtAttentionParameters.from_torch(substate(state, "attn2"), dtype=dtype, device=device)
+            dual_attn=TtAttentionParameters.from_torch(substate(state, "attn"), dtype=dtype, device=device),
+            spatial_attn=TtAttentionParameters.from_torch(substate(state, "attn2"), dtype=dtype, device=device)
             if has_substate(state, "attn2")
             else None,
             spatial_norm_1=TtLayerNormParameters.from_torch(substate(state, "norm1.norm"), dtype=dtype, device=device),
@@ -44,11 +44,13 @@ class TtTransformerBlockParameters:
             prompt_norm_1=TtLayerNormParameters.from_torch(
                 substate(state, "norm1_context.norm"), dtype=dtype, device=device
             ),
-            pormpt_norm_2=TtLayerNormParameters.from_torch(substate(state, "norm2_context"), dtype=dtype, device=device)
+            prompt_norm_2=TtLayerNormParameters.from_torch(substate(state, "norm2_context"), dtype=dtype, device=device)
             if has_substate(state, "norm2_context")
             else None,
-            spatial_t_embed=TtLinearParameters.from_torch(substate(state, "norm1.linear"), dtype=dtype, device=device),
-            prompt_t_embed=TtLayerNormParameters.from_torch(
+            spatial_time_embed=TtLinearParameters.from_torch(
+                substate(state, "norm1.linear"), dtype=dtype, device=device
+            ),
+            prompt_time_embed=TtLinearParameters.from_torch(
                 substate(state, "norm1_context.linear"), dtype=dtype, device=device
             ),
             spatial_ff=TtFeedForwardParameters.from_torch(substate(state, "ff"), dtype=dtype, device=device),
@@ -63,21 +65,26 @@ class TtTransformerBlock:
         self,
         parameters: TtTransformerBlockParameters,
         *,
-        num_attention_heads: int,
-        attention_head_dim: int,
+        num_heads: int,
+        head_dim: int,
+        context_pre_only: bool,
     ) -> None:
-        self._attn_1 = TtAttention(parameters.attn_1, head_dim=attention_head_dim, num_heads=num_attention_heads)
-        self._attn_2 = (
-            TtAttention(parameters.attn_2, head_dim=attention_head_dim, num_heads=num_attention_heads)
-            if parameters.attn2 is not None
+        eps = 1e-6
+
+        self._context_pre_only = context_pre_only
+
+        self._dual_attn = TtAttention(parameters.dual_attn, head_dim=head_dim, num_heads=num_heads)
+        self._spatial_attn = (
+            TtAttention(parameters.spatial_attn, head_dim=head_dim, num_heads=num_heads)
+            if parameters.spatial_attn is not None
             else None
         )
 
-        self._spatial_norm_1 = TtLayerNorm(parameters.spatial_norm_1)
-        self._spatial_norm_2 = TtLayerNorm(parameters.spatial_norm_2, eps=1e-6)
-        self._prompt_norm_1 = TtLayerNorm(parameters.prompt_norm_1)
-        self._pormpt_norm_2 = (
-            TtLayerNorm(parameters.pormpt_norm_2, eps=1e-6) if parameters.pormpt_norm_2 is not None else None
+        self._spatial_norm_1 = TtLayerNorm(parameters.spatial_norm_1, eps=eps)
+        self._spatial_norm_2 = TtLayerNorm(parameters.spatial_norm_2, eps=eps)
+        self._prompt_norm_1 = TtLayerNorm(parameters.prompt_norm_1, eps=eps)
+        self._prompt_norm_2 = (
+            TtLayerNorm(parameters.prompt_norm_2, eps=eps) if parameters.prompt_norm_2 is not None else None
         )
 
         self._spatial_ff = TtFeedForward(parameters.spatial_ff, approximate="tanh")
@@ -85,82 +92,230 @@ class TtTransformerBlock:
             TtFeedForward(parameters.prompt_ff, approximate="tanh") if parameters.prompt_ff is not None else None
         )
 
-        self._spatial_t_embed = TtLayerNorm(parameters.spatial_t_embed)
-        self._prompt_t_embed = TtLayerNorm(parameters.prompt_t_embed)
+        self._spatial_time_embed = TtLinear(parameters.spatial_time_embed)
+        self._prompt_time_embed = TtLinear(parameters.prompt_time_embed)
+
+    def _spatial_attn_block(
+        self,
+        inp: ttnn.Tensor,
+        *,
+        gate: ttnn.Tensor,
+        scale: ttnn.Tensor,
+        shift: ttnn.Tensor,
+    ) -> ttnn.Tensor:
+        assert self._spatial_attn is not None
+
+        scaled = inp * (1 + scale) + shift
+        attn, _ = self._spatial_attn(spatial=scaled)
+        return gate * attn
+
+    def _dual_attn_block(
+        self,
+        *,
+        spatial: ttnn.Tensor,
+        prompt: ttnn.Tensor,
+        spatial_gate: ttnn.Tensor,
+        prompt_gate: ttnn.Tensor | None,
+        prompt_scale: ttnn.Tensor,
+        prompt_shift: ttnn.Tensor,
+        spatial_scale: ttnn.Tensor,
+        spatial_shift: ttnn.Tensor,
+    ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
+        spatial_scaled = spatial * (1 + spatial_scale) + spatial_shift
+        prompt_scaled = prompt * (1 + prompt_scale) + prompt_shift
+
+        spatial_attn, prompt_attn = self._dual_attn(spatial=spatial_scaled, prompt=prompt_scaled)  # quite imprecise
+
+        spatial_attn = spatial_gate * spatial_attn
+        prompt_attn = prompt_gate * prompt_attn if prompt_gate is not None else None
+
+        return spatial_attn, prompt_attn
+
+    def _spatial_ff_block(
+        self,
+        inp: ttnn.Tensor,
+        *,
+        gate: ttnn.Tensor,
+        scale: ttnn.Tensor,
+        shift: ttnn.Tensor,
+    ) -> ttnn.Tensor:
+        scaled = inp * (1 + scale) + shift
+        return gate * self.ff(scaled)
+
+    def _prompt_ff_block(
+        self,
+        inp: ttnn.Tensor,
+        *,
+        gate: ttnn.Tensor,
+        scale: ttnn.Tensor,
+        shift: ttnn.Tensor,
+    ) -> ttnn.Tensor:
+        assert self.ff_context is not None
+
+        scaled = inp * (1 + scale) + shift
+        return gate * self.ff_context(scaled)
 
     def __call__(
-        self,
-        hidden_states: ttnn.Tensor,
-        encoder_hidden_states: ttnn.Tensor,
-        temb: ttnn.Tensor,
+        self, spatial: ttnn.Tensor, prompt: ttnn.Tensor, time_embed: ttnn.Tensor
     ) -> tuple[ttnn.Tensor | None, ttnn.Tensor]:
-        if self._attn_2 is None:
-            norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
-            norm_hidden_states2 = None
-            gate_msa2 = None
+        t = ttnn.silu(time_embed)
+
+        spatial_time = self._spatial_time_embed(t)
+        prompt_time = self._prompt_time_embed(t)
+
+        torch_spatial_time = ttnn.to_torch(spatial_time)
+        torch_prompt_time = ttnn.to_torch(prompt_time)
+
+        if self._spatial_attn is not None:
+            (
+                torch_spatial_shift_dual_attn,
+                torch_spatial_scale_dual_attn,
+                torch_spatial_gate_dual_attn,
+                torch_spatial_shift_ff,
+                torch_spatial_scale_ff,
+                torch_spatial_gate_ff,
+                torch_spatial_shift_attn,
+                torch_spatial_scale_attn,
+                torch_spatial_gate_attn,
+            ) = torch_spatial_time.chunk(9, dim=-1)
+
+            spatial_shift_dual_attn = ttnn.from_torch(
+                torch_spatial_shift_dual_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
+            )
+            spatial_scale_dual_attn = ttnn.from_torch(
+                torch_spatial_scale_dual_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
+            )
+            spatial_gate_dual_attn = ttnn.from_torch(
+                torch_spatial_gate_dual_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
+            )
+            spatial_shift_ff = ttnn.from_torch(torch_spatial_shift_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+            spatial_scale_ff = ttnn.from_torch(torch_spatial_scale_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+            spatial_gate_ff = ttnn.from_torch(torch_spatial_gate_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+            spatial_shift_attn = ttnn.from_torch(
+                torch_spatial_shift_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
+            )
+            spatial_scale_attn = ttnn.from_torch(
+                torch_spatial_scale_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
+            )
+            spatial_gate_attn = ttnn.from_torch(
+                torch_spatial_gate_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
+            )
         else:
             (
-                norm_hidden_states,
-                gate_msa,
-                shift_mlp,
-                scale_mlp,
-                gate_mlp,
-                norm_hidden_states2,
-                gate_msa2,
-            ) = self.norm1(hidden_states, emb=temb)
+                torch_spatial_shift_dual_attn,
+                torch_spatial_scale_dual_attn,
+                torch_spatial_gate_dual_attn,
+                torch_spatial_shift_ff,
+                torch_spatial_scale_ff,
+                torch_spatial_gate_ff,
+            ) = torch_spatial_time.chunk(6, dim=-1)
 
-        if self._pormpt_norm_2 is not None:
-            (
-                norm_encoder_hidden_states,
-                c_gate_msa,
-                c_shift_mlp,
-                c_scale_mlp,
-                c_gate_mlp,
-            ) = self.norm1_context(encoder_hidden_states, emb=temb)
+            spatial_shift_dual_attn = ttnn.from_torch(
+                torch_spatial_shift_dual_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
+            )
+            spatial_scale_dual_attn = ttnn.from_torch(
+                torch_spatial_scale_dual_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
+            )
+            spatial_gate_dual_attn = ttnn.from_torch(
+                torch_spatial_gate_dual_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
+            )
+            spatial_shift_ff = ttnn.from_torch(torch_spatial_shift_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+            spatial_scale_ff = ttnn.from_torch(torch_spatial_scale_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+            spatial_gate_ff = ttnn.from_torch(torch_spatial_gate_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+
+            spatial_gate_attn = None
+            spatial_shift_attn = None
+            spatial_scale_attn = None
+
+        if self._context_pre_only:
+            prompt_gate_attn = None
+            prompt_shift_ff = None
+            prompt_scale_ff = None
+            prompt_gate_ff = None
+
+            torch_prompt_scale_attn, torch_prompt_shift_attn = torch.chunk(torch_prompt_time, 2, dim=1)
+
+            prompt_scale_attn = ttnn.from_torch(
+                torch_prompt_scale_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
+            )
+            prompt_shift_attn = ttnn.from_torch(
+                torch_prompt_shift_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
+            )
         else:
-            norm_encoder_hidden_states = self.norm1_context(encoder_hidden_states, temb)
-            c_gate_msa = None
-            c_shift_mlp = None
-            c_scale_mlp = None
-            c_gate_mlp = None
+            (
+                torch_prompt_shift_attn,
+                torch_prompt_scale_attn,
+                torch_prompt_gate_attn,
+                torch_prompt_shift_ff,
+                torch_prompt_scale_ff,
+                torch_prompt_gate_ff,
+            ) = torch_prompt_time.chunk(6, dim=-1)
 
-        attn_output, context_attn_output = self.attn(
-            hidden_states=norm_hidden_states,
-            encoder_hidden_states=norm_encoder_hidden_states,
+            prompt_shift_attn = ttnn.from_torch(
+                torch_prompt_shift_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
+            )
+            prompt_scale_attn = ttnn.from_torch(
+                torch_prompt_scale_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
+            )
+            prompt_gate_attn = ttnn.from_torch(torch_prompt_gate_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+            prompt_shift_ff = ttnn.from_torch(torch_prompt_shift_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+            prompt_scale_ff = ttnn.from_torch(torch_prompt_scale_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+            prompt_gate_ff = ttnn.from_torch(torch_prompt_gate_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+
+        spatial_normed = self._spatial_norm_1(spatial)
+        prompt_normed = self._prompt_norm_1(prompt)
+
+        spatial_attn, prompt_attn = self._dual_attn_block(
+            spatial=spatial_normed,
+            prompt=prompt_normed,
+            spatial_gate=spatial_gate_dual_attn,
+            prompt_gate=prompt_gate_attn,
+            prompt_scale=prompt_scale_attn,
+            prompt_shift=prompt_shift_attn,
+            spatial_scale=spatial_scale_dual_attn,
+            spatial_shift=spatial_shift_dual_attn,
         )
 
-        attn_output = gate_msa.unsqueeze(1) * attn_output
-        hidden_states = hidden_states + attn_output
+        return spatial_attn, prompt_attn
 
-        if self.attn2 is not None:
-            assert gate_msa2 is not None
-            attn_output2, _ = self.attn2(hidden_states=norm_hidden_states2)
-            attn_output2 = gate_msa2.unsqueeze(1) * attn_output2
-            hidden_states = hidden_states + attn_output2
+        spatial += spatial_attn
 
-        norm_hidden_states = self.norm2(hidden_states)
-        norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
-        spatial_ff_output = self.spatial_ff(norm_hidden_states)
-        spatial_ff_output = gate_mlp.unsqueeze(1) * spatial_ff_output
+        if self._spatial_attn is not None:
+            assert spatial_gate_attn is not None
+            assert spatial_scale_attn is not None
+            assert spatial_shift_attn is not None
 
-        hidden_states = hidden_states + spatial_ff_output
+            spatial += self._spatial_attn_block(
+                spatial_normed,
+                gate=spatial_gate_attn,
+                scale=spatial_scale_attn,
+                shift=spatial_shift_attn,
+            )
 
-        if self.context_pre_only:
-            return None, hidden_states
+        spatial_normed = self._spatial_norm_2(spatial)
+        spatial += self._spatial_ff_block(
+            spatial_normed,
+            gate=spatial_gate_ff,
+            scale=spatial_scale_ff,
+            shift=spatial_shift_ff,
+        )
 
-        assert self.norm2_context is not None
-        assert self.prompt_ff is not None
-        assert c_gate_msa is not None
-        assert c_scale_mlp is not None
-        assert c_shift_mlp is not None
-        assert c_gate_mlp is not None
+        if self._context_pre_only:
+            return None, spatial
 
-        context_attn_output = c_gate_msa.unsqueeze(1) * context_attn_output
-        encoder_hidden_states = encoder_hidden_states + context_attn_output
+        assert self._prompt_norm_2 is not None
+        assert prompt_scale_ff is not None
+        assert prompt_shift_ff is not None
+        assert prompt_gate_ff is not None
 
-        norm_encoder_hidden_states = self.norm2_context(encoder_hidden_states)
-        norm_encoder_hidden_states = norm_encoder_hidden_states * (1 + c_scale_mlp[:, None]) + c_shift_mlp[:, None]
-        context_ff_output = self.prompt_ff(norm_encoder_hidden_states)
-        encoder_hidden_states = encoder_hidden_states + c_gate_mlp.unsqueeze(1) * context_ff_output
+        prompt += prompt_attn
 
-        return encoder_hidden_states, hidden_states
+        prompt_normed = self._prompt_norm_2(prompt)
+        prompt += self._prompt_ff_block(
+            prompt_normed,
+            gate=prompt_gate_ff,
+            scale=prompt_scale_ff,
+            shift=prompt_shift_ff,
+        )
+
+        return prompt, spatial

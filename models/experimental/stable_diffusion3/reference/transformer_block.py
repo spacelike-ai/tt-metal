@@ -13,8 +13,8 @@ class TransformerBlock(torch.nn.Module):
         self,
         *,
         dim: int,
-        num_attention_heads: int,
-        attention_head_dim: int,
+        num_heads: int,
+        head_dim: int,
         context_pre_only: bool,
         qk_norm: str,
         use_dual_attention: bool,
@@ -22,12 +22,14 @@ class TransformerBlock(torch.nn.Module):
         super().__init__()
 
         self.context_pre_only = context_pre_only
+        self.num_heads = num_heads
+        self.head_dim = head_dim
 
         self.attn = Attention(
             query_dim=dim,
             added_kv_proj_dim=dim,
-            dim_head=attention_head_dim,
-            heads=num_attention_heads,
+            dim_head=head_dim,
+            heads=num_heads,
             out_dim=dim,
             context_pre_only=context_pre_only,
             qk_norm=qk_norm,
@@ -49,8 +51,8 @@ class TransformerBlock(torch.nn.Module):
             self.norm1 = AdaLayerNormDummy(dim, 9 * dim)
             self.attn2 = Attention(
                 query_dim=dim,
-                dim_head=attention_head_dim,
-                heads=num_attention_heads,
+                dim_head=head_dim,
+                heads=num_heads,
                 out_dim=dim,
                 qk_norm=qk_norm,
             )
@@ -90,7 +92,6 @@ class TransformerBlock(torch.nn.Module):
         spatial_attn, prompt_attn = self.attn(spatial=spatial_scaled, prompt=prompt_scaled)
 
         spatial_attn = spatial_gate.unsqueeze(1) * spatial_attn
-
         prompt_attn = prompt_gate.unsqueeze(1) * prompt_attn if prompt_gate is not None else None
 
         return spatial_attn, prompt_attn
@@ -184,6 +185,8 @@ class TransformerBlock(torch.nn.Module):
             spatial_scale=spatial_scale_dual_attn,
             spatial_shift=spatial_shift_dual_attn,
         )
+
+        return spatial_attn, prompt_attn
 
         spatial += spatial_attn
 

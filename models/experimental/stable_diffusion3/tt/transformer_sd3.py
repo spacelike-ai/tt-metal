@@ -66,8 +66,8 @@ class TtSD3Transformer2DModel:
             [
                 TtTransformerBlock(
                     dim=inner_dim,
-                    num_attention_heads=num_attention_heads,
-                    attention_head_dim=attention_head_dim,
+                    num_heads=num_attention_heads,
+                    head_dim=attention_head_dim,
                     context_pre_only=i == num_layers - 1,
                     qk_norm=qk_norm,
                     use_dual_attention=i in dual_attention_layers,
