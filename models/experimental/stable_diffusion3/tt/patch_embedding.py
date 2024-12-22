@@ -7,12 +7,32 @@ import torch
 import ttnn
 
 from .conv2d import TtConv2dParameters
+from .substate import substate
 
 
 @dataclass
 class TtPatchEmbedParameters:
     proj: TtConv2dParameters
     pos_embed: ttnn.Tensor
+
+    @classmethod
+    def from_torch(
+        cls,
+        state: dict[str, torch.Tensor],
+        *,
+        dtype: ttnn.DataType | None = None,
+        device: ttnn.Device,
+    ) -> TtPatchEmbedParameters:
+        print(state.keys())
+        return cls(
+            proj=TtConv2dParameters.from_torch(substate(state, "proj"), dtype=dtype, device=device),
+            pos_embed=ttnn.from_torch(
+                state["pos_embed"],
+                layout=ttnn.TILE_LAYOUT,
+                dtype=dtype,
+                device=device,
+            ),
+        )
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/models/embeddings.py

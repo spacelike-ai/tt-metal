@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass
 
 import torch
@@ -7,7 +8,9 @@ import torch
 import ttnn
 from models.experimental.stable_diffusion3.tt.linear import TtLinearParameters
 
+from .normalization import TtLayerNormParameters
 from .patch_embedding import TtPatchEmbed, TtPatchEmbedParameters
+from .substate import has_substate, substate
 from .timestep_embedding import TtCombinedTimestepTextProjEmbeddings, TtCombinedTimestepTextProjEmbeddingsParameters
 from .transformer_block import TtTransformerBlock, TtTransformerBlockParameters
 
@@ -18,8 +21,39 @@ class TtSD3Transformer2DModelParameters:
     time_text_embed: TtCombinedTimestepTextProjEmbeddingsParameters
     context_embedder: TtLinearParameters
     transformer_blocks: list[TtTransformerBlockParameters]
-    norm_out: TtAdaLayerNormParameters
+    norm_out: TtLayerNormParameters
     proj_out: TtLinearParameters
+
+    @classmethod
+    def from_torch(
+        cls,
+        state: dict[str, torch.Tensor],
+        *,
+        dtype: ttnn.DataType | None = None,
+        device: ttnn.Device,
+    ) -> TtSD3Transformer2DModelParameters:
+        transformer_blocks = []
+        for i in itertools.count():
+            key = f"transformer_blocks.{i}"
+            if not has_substate(state, key):
+                break
+
+            transformer_blocks.append(
+                TtTransformerBlockParameters.from_torch(substate(state, key), dtype=dtype, device=device)
+            )
+
+        return cls(
+            pos_embed=TtPatchEmbedParameters.from_torch(substate(state, "pos_embed"), dtype=dtype, device=device),
+            time_text_embed=TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(
+                substate(state, "time_text_embed"), dtype=dtype, device=device
+            ),
+            context_embedder=TtLinearParameters.from_torch(
+                substate(state, "context_embedder"), dtype=dtype, device=device
+            ),
+            transformer_blocks=transformer_blocks,
+            norm_out=TtLayerNormParameters.from_torch(substate(state, "norm_out"), dtype=dtype, device=device),
+            proj_out=TtLinearParameters.from_torch(substate(state, "proj_out"), dtype=dtype, device=device),
+        )
 
 
 class TtSD3Transformer2DModel:

@@ -5,7 +5,10 @@ from dataclasses import dataclass
 
 import torch
 
+import ttnn
 from models.experimental.stable_diffusion3.tt.linear import TtLinearParameters
+
+from .substate import substate
 
 
 @dataclass
@@ -13,11 +16,41 @@ class TtEmbeddingParameters:
     linear_1: TtLinearParameters
     linear_2: TtLinearParameters
 
+    @classmethod
+    def from_torch(
+        cls,
+        state: dict[str, torch.Tensor],
+        *,
+        dtype: ttnn.DataType | None = None,
+        device: ttnn.Device,
+    ) -> TtEmbeddingParameters:
+        return cls(
+            linear_1=TtLinearParameters.from_torch(substate(state, "linear_1"), dtype=dtype, device=device),
+            linear_2=TtLinearParameters.from_torch(substate(state, "linear_2"), dtype=dtype, device=device),
+        )
+
 
 @dataclass
 class TtCombinedTimestepTextProjEmbeddingsParameters:
     timestep_embedder: TtEmbeddingParameters
     text_embedder: TtEmbeddingParameters
+
+    @classmethod
+    def from_torch(
+        cls,
+        state: dict[str, torch.Tensor],
+        *,
+        dtype: ttnn.DataType | None = None,
+        device: ttnn.Device,
+    ) -> TtCombinedTimestepTextProjEmbeddingsParameters:
+        return cls(
+            timestep_embedder=TtEmbeddingParameters.from_torch(
+                substate(state, "timestep_embedder"), dtype=dtype, device=device
+            ),
+            text_embedder=TtEmbeddingParameters.from_torch(
+                substate(state, "text_embedder"), dtype=dtype, device=device
+            ),
+        )
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/models/embeddings.py

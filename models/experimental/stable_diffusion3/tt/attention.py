@@ -18,7 +18,7 @@ class TtAttentionPartParameters:
     v_proj: TtLinearParameters
     norm_q: TtRmsNormParameters
     norm_k: TtRmsNormParameters
-    out_proj: TtLinearParameters  # TODO: make optional?
+    out_proj: TtLinearParameters | None
 
 
 @dataclass
@@ -49,7 +49,9 @@ class TtAttentionParameters:
                 v_proj=TtLinearParameters.from_torch(substate(state, "add_v_proj"), dtype=dtype, device=device),
                 norm_q=TtRmsNormParameters.from_torch(substate(state, "norm_added_q"), dtype=dtype, device=device),
                 norm_k=TtRmsNormParameters.from_torch(substate(state, "norm_added_k"), dtype=dtype, device=device),
-                out_proj=TtLinearParameters.from_torch(substate(state, "to_add_out"), dtype=dtype, device=device),
+                out_proj=TtLinearParameters.from_torch(substate(state, "to_add_out"), dtype=dtype, device=device)
+                if has_substate(state, "to_add_out")
+                else None,
             )
             if has_substate(state, "add_q_proj")
             else None,
@@ -65,7 +67,7 @@ class TtAttentionPart:
         self.q_proj = TtLinear(parameters.q_proj)
         self.k_proj = TtLinear(parameters.k_proj)
         self.v_proj = TtLinear(parameters.v_proj)
-        self.out_proj = TtLinear(parameters.out_proj)
+        self.out_proj = TtLinear(parameters.out_proj) if parameters.out_proj is not None else None
         self.norm_q = TtRmsNorm(parameters.norm_q, eps=eps)
         self.norm_k = TtRmsNorm(parameters.norm_k, eps=eps)
 
@@ -180,11 +182,13 @@ class TtAttention:
             spatial = ttnn.from_torch(torch_spatial, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
             prompt = ttnn.from_torch(torch_prompt, device=prompt.device(), layout=ttnn.TILE_LAYOUT)
 
-            prompt = self._prompt_attn.out_proj(prompt)
+            if self._prompt_attn.out_proj is not None:
+                prompt = self._prompt_attn.out_proj(prompt)
         else:
             spatial = concatenated_attn
 
-        spatial = self._spatial_attn.out_proj(spatial)
+        if self._spatial_attn.out_proj is not None:
+            spatial = self._spatial_attn.out_proj(spatial)
 
         return spatial, prompt
 
