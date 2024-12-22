@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
 
 import ttnn
 
-from .conv2d import TtConv2dParameters
+from .conv2d import TtConv2d, TtConv2dParameters
 from .substate import substate
 
 
@@ -23,59 +24,41 @@ class TtPatchEmbedParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
     ) -> TtPatchEmbedParameters:
-        print(state.keys())
         return cls(
             proj=TtConv2dParameters.from_torch(substate(state, "proj"), dtype=dtype, device=device),
-            pos_embed=ttnn.from_torch(
-                state["pos_embed"],
-                layout=ttnn.TILE_LAYOUT,
-                dtype=dtype,
-                device=device,
-            ),
+            pos_embed=ttnn.from_torch(state["pos_embed"], dtype=dtype, device=device),
         )
 
 
-# adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/models/embeddings.py
 class TtPatchEmbed:
-    def __init__(
-        self,
-        *,
-        patch_size: int,
-        in_channels: int,
-        embed_dim: int,
-        pos_embed_max_size: int,
-    ) -> None:
+    def __init__(self, parameters: TtPatchEmbedParameters) -> None:
         super().__init__()
 
-        self.pos_embed_max_size = pos_embed_max_size
-        self.patch_size = patch_size
+        weight_shape = list(parameters.proj.weight.shape)
+        self._pos_embed_max_size = math.isqrt(parameters.pos_embed.shape[1])
 
-        self.proj = torch.nn.Conv2d(
-            in_channels,
-            embed_dim,
-            kernel_size=(patch_size, patch_size),
-            stride=patch_size,
-        )
-
-        self.register_buffer("pos_embed", torch.zeros((1, pos_embed_max_size**2, embed_dim)))
+        self._proj = TtConv2d(parameters.proj, stride=weight_shape[-2:])
+        self._pos_embed = parameters.pos_embed
 
     def __call__(self, latent: torch.Tensor) -> torch.Tensor:
-        height, width = latent.shape[-2:]
+        latent = self._proj(latent)
 
-        latent = self.proj(latent)
-        latent = latent.flatten(2).transpose(1, 2)  # BCHW -> BNC
+        batch_size, c, height, width = list(latent.shape)
+
+        assert latent.layout == ttnn.ROW_MAJOR_LAYOUT
+        latent = latent.reshape([batch_size, c, height * width])
+
+        # latent = ttnn.transpose(latent, 1, 2)
+        latent = ttnn.from_torch(ttnn.to_torch(latent).transpose(1, 2), device=latent.device())
 
         pos_embed = self._cropped_pos_embed(height, width)
 
-        return (latent + pos_embed).to(latent.dtype)
+        return ttnn.tilize(latent) + ttnn.tilize(pos_embed)
 
-    def _cropped_pos_embed(self, height: int, width: int) -> torch.Tensor:
-        height = height // self.patch_size
-        width = width // self.patch_size
+    def _cropped_pos_embed(self, height: int, width: int) -> ttnn.Tensor:
+        top = (self._pos_embed_max_size - height) // 2
+        left = (self._pos_embed_max_size - width) // 2
 
-        top = (self.pos_embed_max_size - height) // 2
-        left = (self.pos_embed_max_size - width) // 2
-
-        spatial_pos_embed = self.pos_embed.reshape(1, self.pos_embed_max_size, self.pos_embed_max_size, -1)
+        spatial_pos_embed = self._pos_embed.reshape([1, self._pos_embed_max_size, self._pos_embed_max_size, -1])
         spatial_pos_embed = spatial_pos_embed[:, top : top + height, left : left + width, :]
-        return spatial_pos_embed.reshape(1, -1, spatial_pos_embed.shape[-1])
+        return spatial_pos_embed.reshape([1, -1, spatial_pos_embed.shape[-1]])
