@@ -53,13 +53,12 @@ class TtCombinedTimestepTextProjEmbeddingsParameters:
         )
 
 
-# adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/models/embeddings.py
 class TtCombinedTimestepTextProjEmbeddings:
-    def __init__(self, *, embedding_dim: int, pooled_projection_dim: int) -> None:
+    def __init__(self, *, parameters: TtCombinedTimestepTextProjEmbeddingsParameters) -> None:
         super().__init__()
 
-        self.timestep_embedder = _TimestepEmbedding(in_channels=256, time_embed_dim=embedding_dim)
-        self.text_embedder = _PixArtAlphaTextProjection(in_features=pooled_projection_dim, hidden_size=embedding_dim)
+        self.timestep_embedder = _TimestepEmbedding(parameters.timestep_embedder)
+        self.text_embedder = _TimestepEmbedding(parameters.text_embedder)
 
     def __call__(self, timestep: torch.Tensor, pooled_projection: torch.Tensor) -> torch.Tensor:
         timesteps_proj = _time_proj(num_channels=256, timesteps=timestep)
@@ -70,17 +69,16 @@ class TtCombinedTimestepTextProjEmbeddings:
 
 
 class _TimestepEmbedding:
-    def __init__(self, *, in_channels: int, time_embed_dim: int) -> None:
+    def __init__(self, *, parameters: TtEmbeddingParameters) -> None:
         super().__init__()
 
-        self.linear_1 = torch.nn.Linear(in_channels, time_embed_dim)
-        self.act = torch.nn.SiLU()
-        self.linear_2 = torch.nn.Linear(time_embed_dim, time_embed_dim)
+        self._linear_1 = parameters.linear_1
+        self._linear_2 = parameters.linear_2
 
-    def __call__(self, sample: torch.Tensor) -> torch.Tensor:
-        sample = self.linear_1(sample)
-        sample = self.act(sample)
-        return self.linear_2(sample)
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.linear_1(x)
+        x = ttnn.silu(x)
+        return self.linear_2(x)
 
 
 def _time_proj(num_channels: int, timesteps: torch.Tensor) -> torch.Tensor:
@@ -96,17 +94,3 @@ def _time_proj(num_channels: int, timesteps: torch.Tensor) -> torch.Tensor:
     emb = timesteps[:, None].float() * emb[None, :]
 
     return torch.cat([torch.cos(emb), torch.sin(emb)], dim=-1)
-
-
-class _PixArtAlphaTextProjection:
-    def __init__(self, *, in_features: int, hidden_size: int) -> None:
-        super().__init__()
-
-        self.linear_1 = torch.nn.Linear(in_features=in_features, out_features=hidden_size)
-        self.linear_2 = torch.nn.Linear(in_features=hidden_size, out_features=hidden_size)
-        self.act_1 = torch.nn.SiLU()
-
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.linear_1(x)
-        x = self.act_1(x)
-        return self.linear_2(x)
