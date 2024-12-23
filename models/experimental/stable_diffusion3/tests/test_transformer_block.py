@@ -39,11 +39,7 @@ def test_transformer_block(
         device=device,
         dtype=ttnn.float32,
     )
-    tt_model = TtTransformerBlock(
-        parameters,
-        num_heads=torch_model.num_heads,
-        head_dim=torch_model.head_dim,
-    )
+    tt_model = TtTransformerBlock(parameters, num_heads=torch_model.num_heads)
 
     embedding_dim = 1536
 

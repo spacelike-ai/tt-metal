@@ -41,6 +41,10 @@ class TtLinearParameters:
     def in_channels(self) -> int:
         return self.weight.shape[0]
 
+    @property
+    def out_channels(self) -> int:
+        return self.weight.shape[1]
+
 
 class TtLinear:
     def __init__(

@@ -62,15 +62,12 @@ class TtTransformerBlock:
         parameters: TtTransformerBlockParameters,
         *,
         num_heads: int,
-        head_dim: int,
     ) -> None:
         eps = 1e-6
 
-        self._dual_attn = TtAttention(parameters.dual_attn, head_dim=head_dim, num_heads=num_heads)
+        self._dual_attn = TtAttention(parameters.dual_attn, num_heads=num_heads)
         self._spatial_attn = (
-            TtAttention(parameters.spatial_attn, head_dim=head_dim, num_heads=num_heads)
-            if parameters.spatial_attn is not None
-            else None
+            TtAttention(parameters.spatial_attn, num_heads=num_heads) if parameters.spatial_attn is not None else None
         )
 
         self._spatial_norm_1 = TtLayerNorm(parameters.spatial_norm_1, eps=eps)

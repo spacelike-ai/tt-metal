@@ -57,6 +57,9 @@ class TtAttentionParameters:
             else None,
         )
 
+    def head_dim(self, *, num_heads: int) -> int:
+        return self.part_a.q_proj.out_channels // num_heads
+
 
 class TtAttentionPart:
     def __init__(self, parameters: TtAttentionPartParameters) -> None:
@@ -73,11 +76,11 @@ class TtAttentionPart:
 
 
 class TtAttention:
-    def __init__(self, parameters: TtAttentionParameters, *, num_heads: int, head_dim: int) -> None:
+    def __init__(self, parameters: TtAttentionParameters, *, num_heads: int) -> None:
         super().__init__()
 
         self._num_heads = num_heads
-        self._head_dim = head_dim
+        self._head_dim = parameters.head_dim(num_heads=num_heads)
 
         self._spatial_attn = TtAttentionPart(parameters.part_a)
         self._prompt_attn = TtAttentionPart(parameters.part_b) if parameters.part_b is not None else None
