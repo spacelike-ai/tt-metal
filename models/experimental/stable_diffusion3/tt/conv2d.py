@@ -38,6 +38,18 @@ class TtConv2dParameters:
             if "bias" in state
             else None,
         )
+ 
+    @property
+    def in_channels(self) -> int:
+        return self.weight.shape[1]
+ 
+    @property
+    def out_channels(self) -> int:
+        return self.weight.shape[0]
+
+    @property
+    def kernel_size(self) -> tuple[int, int]:
+        return list(self.weight.shape)[-2:]
 
 
 class TtConv2d:
@@ -51,10 +63,9 @@ class TtConv2d:
         self._stride = stride
         self._padding = padding
 
-        weight_shape = parameters.weight.shape
-        self._in_channels = weight_shape[1]
-        self._out_channels = weight_shape[0]
-        self._kernel_size = (weight_shape[2], weight_shape[3])
+        self._in_channels = parameters.in_channels
+        self._out_channels = parameters.out_channels
+        self._kernel_size = parameters.kernel_size
 
         self._weight = parameters.weight
         self._bias = parameters.bias

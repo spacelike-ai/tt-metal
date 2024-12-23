@@ -41,14 +41,12 @@ def test_attention(
 
     tt_spatial = ttnn.from_torch(
         spatial,
-        dtype=ttnn.bfloat16,
         device=device,
         layout=ttnn.TILE_LAYOUT,
     )
 
     tt_prompt_embed = ttnn.from_torch(
         prompt_embed,
-        dtype=ttnn.bfloat16,
         device=device,
         layout=ttnn.TILE_LAYOUT,
     )

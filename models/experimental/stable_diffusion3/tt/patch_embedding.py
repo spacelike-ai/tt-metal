@@ -29,15 +29,20 @@ class TtPatchEmbedParameters:
             pos_embed=ttnn.from_torch(state["pos_embed"], dtype=dtype, device=device),
         )
 
+    @property
+    def pos_embed_max_size(self) -> int:
+        return math.isqrt(self.pos_embed.shape[1])
+
+    @property
+    def patch_size(self) -> int:
+        return list(self.proj.weight.shape)[-2:]
 
 class TtPatchEmbed:
     def __init__(self, parameters: TtPatchEmbedParameters) -> None:
         super().__init__()
-
-        weight_shape = list(parameters.proj.weight.shape)
-        self._pos_embed_max_size = math.isqrt(parameters.pos_embed.shape[1])
-
-        self._proj = TtConv2d(parameters.proj, stride=weight_shape[-2:])
+ 
+        self._pos_embed_max_size = parameters.pos_embed_max_size
+        self._proj = TtConv2d(parameters.proj, stride=parameters.patch_size)
         self._pos_embed = parameters.pos_embed
 
     def __call__(self, latent: torch.Tensor) -> torch.Tensor:

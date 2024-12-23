@@ -39,7 +39,6 @@ def test_feed_forward(
 
     tt_input_tensor = ttnn.from_torch(
         torch_input_tensor,
-        dtype=ttnn.bfloat16,
         device=device,
         layout=ttnn.TILE_LAYOUT,
     )

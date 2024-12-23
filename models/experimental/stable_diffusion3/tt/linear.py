@@ -37,6 +37,10 @@ class TtLinearParameters:
             else None,
         )
 
+    @property
+    def in_channels(self) -> int:
+        return self.weight.shape[0]
+
 
 class TtLinear:
     def __init__(
@@ -50,8 +54,7 @@ class TtLinear:
         output_tile: list[int] | None = None,
         output_dtype: ttnn.DataType | None = None,
     ) -> None:
-        self._in_features = parameters.weight.shape[0]
-
+        self._in_channels = parameters.in_channels
         self._weight = parameters.weight
         self._bias = parameters.bias
 
@@ -62,7 +65,7 @@ class TtLinear:
         self._output_tile = output_tile
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        assert x.shape[-1] == self._in_features, "input tensor does not have the expected shape"
+        assert x.shape[-1] == self._in_channels, "input tensor does not have the expected shape"
 
         try:
             return ttnn.linear(
