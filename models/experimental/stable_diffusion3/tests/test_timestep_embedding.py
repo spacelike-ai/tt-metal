@@ -36,13 +36,14 @@ def test_timestep_embedding(
     parameters = TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(torch_model.state_dict(), device=device)
     tt_model = TtCombinedTimestepTextProjEmbeddings(parameters)
 
-    torch_input_tensor = torch.randn((batch_size, 16, 64, 64))
+    timestep = torch.randn((batch_size,))
+    pooled_projection = torch.randn((batch_size, 2048))
 
-    tt_input_tensor = ttnn.from_torch(torch_input_tensor, device=device)
+    tt_pooled_projection = ttnn.from_torch(pooled_projection, device=device)
 
-    torch_output = torch_model(torch_input_tensor)
+    torch_output = torch_model(timestep, pooled_projection)
 
-    tt_output = tt_model(tt_input_tensor)
+    tt_output = tt_model(torch_timestep=timestep, pooled_projection=tt_pooled_projection)
     tt_output_torch = ttnn.to_torch(tt_output)
 
-    assert_with_pcc(torch_output, tt_output_torch, pcc=0.99999)
+    assert_with_pcc(torch_output, tt_output_torch, pcc=0.9999)

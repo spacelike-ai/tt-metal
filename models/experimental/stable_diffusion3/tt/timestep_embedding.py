@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import torch
 
 import ttnn
-from models.experimental.stable_diffusion3.tt.linear import TtLinearParameters
+from models.experimental.stable_diffusion3.tt.linear import TtLinear, TtLinearParameters
 
 from .substate import substate
 
@@ -54,34 +54,34 @@ class TtCombinedTimestepTextProjEmbeddingsParameters:
 
 
 class TtCombinedTimestepTextProjEmbeddings:
-    def __init__(self, *, parameters: TtCombinedTimestepTextProjEmbeddingsParameters) -> None:
+    def __init__(self, parameters: TtCombinedTimestepTextProjEmbeddingsParameters) -> None:
         super().__init__()
 
-        self.timestep_embedder = _TimestepEmbedding(parameters.timestep_embedder)
-        self.text_embedder = _TimestepEmbedding(parameters.text_embedder)
+        self._timestep_embedder = _TimestepEmbedding(parameters.timestep_embedder)
+        self._text_embedder = _TimestepEmbedding(parameters.text_embedder)
 
-    def __call__(self, timestep: ttnn.Tensor, pooled_projection: ttnn.Tensor) -> ttnn.Tensor:
-        timesteps_proj = _time_proj(num_channels=256, timesteps=timestep, device=timestep.device())
+    def __call__(self, *, torch_timestep: torch.Tensor, pooled_projection: ttnn.Tensor) -> ttnn.Tensor:
+        torch_timesteps_proj = _time_proj(num_channels=256, timesteps=torch_timestep)
+        timesteps_proj = ttnn.from_torch(torch_timesteps_proj, device=pooled_projection.device())
 
-        timesteps_emb = self.timestep_embedder(timesteps_proj.to(dtype=pooled_projection.dtype))
-
-        return timesteps_emb + self.text_embedder(pooled_projection)
+        return self._timestep_embedder(timesteps_proj) + self._text_embedder(pooled_projection)
 
 
 class _TimestepEmbedding:
-    def __init__(self, *, parameters: TtEmbeddingParameters) -> None:
+    def __init__(self, parameters: TtEmbeddingParameters) -> None:
         super().__init__()
 
-        self._linear_1 = parameters.linear_1
-        self._linear_2 = parameters.linear_2
+        self._linear_1 = TtLinear(parameters.linear_1)
+        self._linear_2 = TtLinear(parameters.linear_2)
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        x = self.linear_1(x)
+        x = self._linear_1(x)
         x = ttnn.silu(x)
-        return self.linear_2(x)
+        return self._linear_2(x)
 
 
-def _time_proj(*, num_channels: int, timesteps: ttnn.Tensor, device: ttnn.Device,) -> ttnn.Tensor:
+# tensors involved here are so small, there is no real optimization potential by converting them to ttnn
+def _time_proj(*, num_channels: int, timesteps: torch.Tensor) -> torch.Tensor:
     assert num_channels % 2 == 0
     half_dim = num_channels // 2
 
@@ -93,6 +93,4 @@ def _time_proj(*, num_channels: int, timesteps: ttnn.Tensor, device: ttnn.Device
     emb = torch.exp(exponent)
     emb = timesteps[:, None].float() * emb[None, :]
 
-    result = torch.cat([torch.cos(emb), torch.sin(emb)], dim=-1)
-
-    return ttnn.from_torch(result, device=device, layout=ttnn.TILE_LAYOUT)
+    return torch.cat([torch.cos(emb), torch.sin(emb)], dim=-1)
