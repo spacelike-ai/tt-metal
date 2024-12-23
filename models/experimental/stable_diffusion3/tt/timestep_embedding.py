@@ -19,7 +19,7 @@ class TtEmbeddingParameters:
     @classmethod
     def from_torch(
         cls,
-        state: dict[str, torch.Tensor],
+        state: dict[str, ttnn.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
@@ -38,7 +38,7 @@ class TtCombinedTimestepTextProjEmbeddingsParameters:
     @classmethod
     def from_torch(
         cls,
-        state: dict[str, torch.Tensor],
+        state: dict[str, ttnn.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
@@ -60,8 +60,8 @@ class TtCombinedTimestepTextProjEmbeddings:
         self.timestep_embedder = _TimestepEmbedding(parameters.timestep_embedder)
         self.text_embedder = _TimestepEmbedding(parameters.text_embedder)
 
-    def __call__(self, timestep: torch.Tensor, pooled_projection: torch.Tensor) -> torch.Tensor:
-        timesteps_proj = _time_proj(num_channels=256, timesteps=timestep)
+    def __call__(self, timestep: ttnn.Tensor, pooled_projection: ttnn.Tensor) -> ttnn.Tensor:
+        timesteps_proj = _time_proj(num_channels=256, timesteps=timestep, device=timestep.device())
 
         timesteps_emb = self.timestep_embedder(timesteps_proj.to(dtype=pooled_projection.dtype))
 
@@ -75,13 +75,13 @@ class _TimestepEmbedding:
         self._linear_1 = parameters.linear_1
         self._linear_2 = parameters.linear_2
 
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         x = self.linear_1(x)
         x = ttnn.silu(x)
         return self.linear_2(x)
 
 
-def _time_proj(num_channels: int, timesteps: torch.Tensor) -> torch.Tensor:
+def _time_proj(*, num_channels: int, timesteps: ttnn.Tensor, device: ttnn.Device,) -> ttnn.Tensor:
     assert num_channels % 2 == 0
     half_dim = num_channels // 2
 
@@ -93,4 +93,6 @@ def _time_proj(num_channels: int, timesteps: torch.Tensor) -> torch.Tensor:
     emb = torch.exp(exponent)
     emb = timesteps[:, None].float() * emb[None, :]
 
-    return torch.cat([torch.cos(emb), torch.sin(emb)], dim=-1)
+    result = torch.cat([torch.cos(emb), torch.sin(emb)], dim=-1)
+
+    return ttnn.from_torch(result, device=device, layout=ttnn.TILE_LAYOUT)
