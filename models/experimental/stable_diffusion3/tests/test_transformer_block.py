@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
     "block_index, batch_size, spatial_sequence_length, prompt_sequence_length",
     [
         (0, 2, 1024, 333),
+        (23, 2, 1024, 333),
     ],
 )
 def test_transformer_block(
@@ -42,7 +43,6 @@ def test_transformer_block(
         parameters,
         num_heads=torch_model.num_heads,
         head_dim=torch_model.head_dim,
-        context_pre_only=torch_model.context_pre_only,
     )
 
     embedding_dim = 1536
@@ -76,8 +76,12 @@ def test_transformer_block(
         spatial, prompt_embed = torch_model(spatial=spatial, prompt=prompt_embed, time_embed=time_embed)
 
     tt_spatial, tt_prompt_embed = tt_model(spatial=tt_spatial, prompt=tt_prompt_embed, time_embed=tt_time_embed)
-    tt_spatial_torch = ttnn.to_torch(tt_spatial)
+
+    assert (spatial is None) == (tt_spatial is None)
+
+    tt_spatial_torch = ttnn.to_torch(tt_spatial) if tt_spatial is not None else None
     tt_prompt_embed_torch = ttnn.to_torch(tt_prompt_embed)
 
-    assert_with_pcc(spatial, tt_spatial_torch, pcc=0.999)
+    if spatial is not None and tt_spatial_torch is not None:
+        assert_with_pcc(spatial, tt_spatial_torch, pcc=0.999)
     assert_with_pcc(prompt_embed, tt_prompt_embed_torch, pcc=0.999)

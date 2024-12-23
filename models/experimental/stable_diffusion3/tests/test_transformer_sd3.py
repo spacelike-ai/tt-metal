@@ -13,17 +13,15 @@ logger = logging.getLogger(__name__)
 
 
 @pytest.mark.parametrize(
-    "block_index, batch_size, spatial_sequence_length, prompt_sequence_length",
+    "batch_size, prompt_sequence_length",
     [
-        (0, 2, 1024, 333),
+        (2, 333),
     ],
 )
 def test_transformer_sd3(
     *,
     device: ttnn.Device,
-    block_index: int,
     batch_size: int,
-    spatial_sequence_length: int,
     prompt_sequence_length: int,
 ):
     torch_model = SD3Transformer2DModel.from_pretrained(
@@ -36,18 +34,12 @@ def test_transformer_sd3(
         device=device,
         dtype=ttnn.float32,
     )
-    tt_model = TtSD3Transformer2DModel(
-        parameters,
-        num_heads=torch_model.num_heads,
-        head_dim=torch_model.head_dim,
-        context_pre_only=torch_model.context_pre_only,
-    )
+    tt_model = TtSD3Transformer2DModel(parameters)
 
-    embedding_dim = 1536
-
-    spatial = torch.randn((batch_size, spatial_sequence_length, embedding_dim))
-    prompt_embed = torch.randn((batch_size, prompt_sequence_length, embedding_dim))
-    time_embed = torch.randn((batch_size, embedding_dim))
+    spatial = torch.randn(batch_size, 16, 64, 64)
+    prompt_embed = torch.randn(batch_size, prompt_sequence_length, 4096)
+    pooled_projection = torch.randn(batch_size, 2048)
+    timestep = torch.randn(batch_size)
 
     tt_spatial = ttnn.from_torch(
         spatial,
@@ -63,17 +55,26 @@ def test_transformer_sd3(
         layout=ttnn.TILE_LAYOUT,
     )
 
-    tt_time_embed = ttnn.from_torch(
-        time_embed[:, None],
+    tt_timestep = ttnn.from_torch(
+        timestep[:, None],
         dtype=ttnn.float32,
         device=device,
         layout=ttnn.TILE_LAYOUT,
     )
 
-    with torch.no_grad():
-        spatial, prompt_embed = torch_model(spatial=spatial, prompt=prompt_embed, time_embed=time_embed)
+    tt_pooled_projection = ttnn.from_torch(pooled_projection, device=device)
 
-    tt_spatial, tt_prompt_embed = tt_model(spatial=tt_spatial, prompt=tt_prompt_embed, time_embed=tt_time_embed)
+    with torch.no_grad():
+        spatial, prompt_embed = torch_model(
+            spatial=spatial, prompt_embed=prompt_embed, pooled_projections=pooled_projection, timestep=timestep
+        )
+
+    tt_spatial, tt_prompt_embed = tt_model(
+        spatial=tt_spatial,
+        prompt_embed=tt_prompt_embed,
+        pooled_projections=tt_pooled_projection,
+        timestep=tt_timestep,
+    )
     tt_spatial_torch = ttnn.to_torch(tt_spatial)
     tt_prompt_embed_torch = ttnn.to_torch(tt_prompt_embed)
 

@@ -63,11 +63,8 @@ class TtTransformerBlock:
         *,
         num_heads: int,
         head_dim: int,
-        context_pre_only: bool,
     ) -> None:
         eps = 1e-6
-
-        self._context_pre_only = context_pre_only
 
         self._dual_attn = TtAttention(parameters.dual_attn, head_dim=head_dim, num_heads=num_heads)
         self._spatial_attn = (
@@ -88,6 +85,8 @@ class TtTransformerBlock:
 
         self._spatial_time_embed = TtLinear(parameters.spatial_time_embed)
         self._prompt_time_embed = TtLinear(parameters.prompt_time_embed)
+
+        self._context_pre_only = self._prompt_ff is None
 
     def _spatial_attn_block(
         self,
@@ -240,7 +239,7 @@ class TtTransformerBlock:
             prompt_scale_ff = None
             prompt_gate_ff = None
 
-            torch_prompt_scale_attn, torch_prompt_shift_attn = torch.chunk(torch_prompt_time, 2, dim=1)
+            torch_prompt_scale_attn, torch_prompt_shift_attn = torch.chunk(torch_prompt_time, 2, dim=-1)
 
             prompt_scale_attn = ttnn.from_torch(
                 torch_prompt_scale_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
@@ -284,7 +283,8 @@ class TtTransformerBlock:
         )
         ttnn.deallocate(prompt_normed)
         ttnn.deallocate(spatial_gate_dual_attn)
-        ttnn.deallocate(prompt_gate_attn)
+        if prompt_gate_attn is not None:
+            ttnn.deallocate(prompt_gate_attn)
         ttnn.deallocate(prompt_scale_attn)
         ttnn.deallocate(prompt_shift_attn)
         ttnn.deallocate(spatial_scale_dual_attn)

@@ -70,8 +70,8 @@ class SD3Transformer2DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
     def forward(
         self,
-        spatial: torch.Tensor,  # spatial
-        prompt_embed: torch.Tensor,  # prompt_embed
+        spatial: torch.Tensor,
+        prompt_embed: torch.Tensor,
         pooled_projections: torch.Tensor,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
