@@ -34,7 +34,7 @@ def test_transformer_sd3(
         device=device,
         dtype=ttnn.float32,
     )
-    tt_model = TtSD3Transformer2DModel(parameters)
+    tt_model = TtSD3Transformer2DModel(parameters, num_attention_heads=torch_model.num_attention_heads)
 
     spatial = torch.randn(batch_size, 16, 64, 64)
     prompt_embed = torch.randn(batch_size, prompt_sequence_length, 4096)
@@ -45,18 +45,11 @@ def test_transformer_sd3(
         spatial,
         dtype=ttnn.float32,
         device=device,
-        layout=ttnn.TILE_LAYOUT,
+        layout=ttnn.ROW_MAJOR_LAYOUT,
     )
 
     tt_prompt_embed = ttnn.from_torch(
         prompt_embed,
-        dtype=ttnn.float32,
-        device=device,
-        layout=ttnn.TILE_LAYOUT,
-    )
-
-    tt_timestep = ttnn.from_torch(
-        timestep[:, None],
         dtype=ttnn.float32,
         device=device,
         layout=ttnn.TILE_LAYOUT,
@@ -72,8 +65,8 @@ def test_transformer_sd3(
     tt_spatial, tt_prompt_embed = tt_model(
         spatial=tt_spatial,
         prompt_embed=tt_prompt_embed,
-        pooled_projections=tt_pooled_projection,
-        timestep=tt_timestep,
+        pooled_projection=tt_pooled_projection,
+        torch_timestep=timestep,
     )
     tt_spatial_torch = ttnn.to_torch(tt_spatial)
     tt_prompt_embed_torch = ttnn.to_torch(tt_prompt_embed)

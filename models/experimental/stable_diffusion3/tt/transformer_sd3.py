@@ -42,6 +42,8 @@ class TtSD3Transformer2DModelParameters:
                 TtTransformerBlockParameters.from_torch(substate(state, key), dtype=dtype, device=device)
             )
 
+            break  # TODO: remove
+
         return cls(
             pos_embed=TtPatchEmbedParameters.from_torch(substate(state, "pos_embed"), dtype=dtype, device=device),
             time_text_embed=TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(
@@ -61,115 +63,77 @@ class TtSD3Transformer2DModel:
         self,
         parameters: TtSD3Transformer2DModelParameters,
         *,
-        # patch_size: int = 2,
         # in_channels: int = 16,
-        # num_layers: int = 18,
-        # attention_head_dim: int = 64,
-        num_attention_heads: int = 18,
-        # attention_dim: int = 4096,
-        # caption_projection_dim: int = 1152,
-        # pooled_projection_dim: int = 2048,
-        # out_channels: int = 16,
-        # pos_embed_max_size: int = 96,
-        # dual_attention_layers: tuple[int, ...] = (),
-        # qk_norm: str = "rms_norm",
-        # device: ttnn.Device,
-        # parameters: dict[str, torch.Tensor],
+        num_attention_heads: int,
     ) -> None:
         super().__init__()
-
-        eps = 123123123213
 
         self._pos_embed = TtPatchEmbed(parameters.pos_embed)
         self._time_text_embed = TtCombinedTimestepTextProjEmbeddings(parameters.time_text_embed)
         self._context_embedder = TtLinear(parameters.context_embedder)
-        self._transformer_blocks = [TtTransformerBlock(block) for block in parameters.transformer_blocks]
-        self._norm_out = TtLayerNorm(parameters.norm_out, eps=eps)
+        self._transformer_blocks = [
+            TtTransformerBlock(block, num_heads=num_attention_heads) for block in parameters.transformer_blocks
+        ]
+        self._norm_out = TtLayerNorm(parameters.norm_out, eps=1e-6)
         self._proj_out = TtLinear(parameters.proj_out)
 
-        # inner_dim = num_attention_heads * attention_head_dim
-
-        # self._device = device
         # self._out_channels = out_channels
-        # self._patch_size = patch_size
-        # self._in_channels = in_channels
-
-        # self.pos_embed = TtPatchEmbed(
-        #     patch_size=patch_size,
-        #     in_channels=in_channels,
-        #     embed_dim=inner_dim,
-        #     pos_embed_max_size=pos_embed_max_size,
-        # )
-        # self.time_text_embed = TtCombinedTimestepTextProjEmbeddings(
-        #     embedding_dim=inner_dim,
-        #     pooled_projection_dim=pooled_projection_dim,
-        # )
-        # self.context_embedder = torch.nn.Linear(attention_dim, caption_projection_dim)
-
-        # self.transformer_blocks = torch.nn.ModuleList(
-        #     [
-        #         TtTransformerBlock(
-        #             dim=inner_dim,
-        #             num_heads=num_attention_heads,
-        #             head_dim=attention_head_dim,
-        #             context_pre_only=i == num_layers - 1,
-        #             qk_norm=qk_norm,
-        #             use_dual_attention=i in dual_attention_layers,
-        #         )
-        #         for i in range(num_layers)
-        #     ]
-        # )
-
-        # self.norm_out = TtAdaLayerNormContinuous(inner_dim, inner_dim)
-        # self.proj_out = torch.nn.Linear(inner_dim, patch_size * patch_size * self._out_channels)
+        self._patch_size = parameters.pos_embed.patch_size
 
     def __call__(
         self,
+        *,
         spatial: ttnn.Tensor,
         prompt_embed: ttnn.Tensor,
-        pooled_projections: ttnn.Tensor,
-        timestep: ttnn.Tensor,
+        pooled_projection: ttnn.Tensor,
+        torch_timestep: torch.Tensor,
     ) -> ttnn.Tensor:
         height, width = list(spatial.shape)[-2:]
 
-        # spatial = self.pos_embed(spatial)
-        # time_embed = self.time_text_embed(timestep, pooled_projections)
-        # prompt_embed = self.context_embedder(prompt_embed)
+        spatial = self._pos_embed(spatial)
+        time_embed = self._time_text_embed(torch_timestep=torch_timestep, pooled_projection=pooled_projection)
+        prompt_embed = self._context_embedder(prompt_embed)
 
-        # for block in self.transformer_blocks:
-        #     prompt_embed, spatial = block(
-        #         spatial=spatial,
-        #         prompt=prompt_embed,
-        #         time_embed=time_embed,
-        #     )
+        time_embed = ttnn.untilize(time_embed)
+        time_embed = time_embed.reshape([time_embed.shape[0], 1, time_embed.shape[1]])
+        time_embed = ttnn.tilize(time_embed)
 
-        # time_embed = self.norm_out.linear(torch.nn.functional.silu(time_embed))
-        # scale, shift = torch.chunk(time_embed, 2, dim=1)
-        # spatial = self.norm_out.norm(spatial) * (1 + scale)[:, None, :] + shift[:, None, :]
+        for block in self._transformer_blocks:
+            prompt_embed, spatial = block(
+                spatial=spatial,
+                prompt=prompt_embed,
+                time_embed=time_embed,
+            )
 
-        # spatial = self.proj_out(spatial)
+            return prompt_embed, spatial
 
-        # patch_count_y = height // self._patch_size
-        # patch_count_x = width // self._patch_size
+        time_embed = self._norm_out.linear(torch.nn.functional.silu(time_embed))
+        scale, shift = torch.chunk(time_embed, 2, dim=1)
+        spatial = self._norm_out.norm(spatial) * (1 + scale)[:, None, :] + shift[:, None, :]
 
-        # spatial = spatial.reshape(
-        #     shape=(
-        #         spatial.shape[0],
-        #         patch_count_y,
-        #         patch_count_x,
-        #         self._patch_size,
-        #         self._patch_size,
-        #         self._out_channels,
-        #     )
-        # )
+        spatial = self._proj_out(spatial)
 
-        # spatial = torch.einsum("nhwpqc->nchpwq", spatial)
+        patch_count_y = height // self._patch_size[0]
+        patch_count_x = width // self._patch_size[1]
 
-        # return spatial.reshape(
-        #     shape=(
-        #         spatial.shape[0],
-        #         self._out_channels,
-        #         patch_count_y * self._patch_size,
-        #         patch_count_x * self._patch_size,
-        #     )
-        # )
+        spatial = spatial.reshape(
+            shape=(
+                spatial.shape[0],
+                patch_count_y,
+                patch_count_x,
+                self._patch_size[0],
+                self._patch_size[1],
+                self._out_channels,
+            )
+        )
+
+        spatial = torch.einsum("nhwpqc->nchpwq", spatial)
+
+        return spatial.reshape(
+            shape=(
+                spatial.shape[0],
+                self._out_channels,
+                patch_count_y * self._patch_size,
+                patch_count_x * self._patch_size,
+            )
+        )
