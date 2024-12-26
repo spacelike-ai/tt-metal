@@ -42,7 +42,8 @@ class TtSD3Transformer2DModelParameters:
                 TtTransformerBlockParameters.from_torch(substate(state, key), dtype=dtype, device=device)
             )
 
-            break  # TODO: remove
+            if i == 2:
+                break  # TODO: remove
 
         return cls(
             pos_embed=TtPatchEmbedParameters.from_torch(substate(state, "pos_embed"), dtype=dtype, device=device),
@@ -94,18 +95,22 @@ class TtSD3Transformer2DModel:
         time_embed = self._time_text_embed(torch_timestep=torch_timestep, pooled_projection=pooled_projection)
         prompt_embed = self._context_embedder(prompt_embed)
 
-        time_embed = ttnn.untilize(time_embed)
-        time_embed = time_embed.reshape([time_embed.shape[0], 1, time_embed.shape[1]])
-        time_embed = ttnn.tilize(time_embed)
+        time_embed = ttnn.from_torch(
+            ttnn.to_torch(time_embed).unsqueeze(1),
+            device=time_embed.device(),
+            layout=ttnn.TILE_LAYOUT,
+        )
+        # time_embed = ttnn.untilize(time_embed)
+        # time_embed = time_embed.reshape([time_embed.shape[0], 1, time_embed.shape[1]])
+        # time_embed = ttnn.tilize(time_embed)
 
-        for block in self._transformer_blocks:
+        for block in self._transformer_blocks[0:1]:  # TODO: remove range
             prompt_embed, spatial = block(
                 spatial=spatial,
                 prompt=prompt_embed,
                 time_embed=time_embed,
             )
-
-            return prompt_embed, spatial
+            return prompt_embed
 
         time_embed = self._norm_out.linear(torch.nn.functional.silu(time_embed))
         scale, shift = torch.chunk(time_embed, 2, dim=1)

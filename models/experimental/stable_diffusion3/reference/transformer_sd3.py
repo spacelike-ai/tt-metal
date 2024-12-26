@@ -81,12 +81,13 @@ class SD3Transformer2DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         time_embed = self.time_text_embed(timestep, pooled_projections)
         prompt_embed = self.context_embedder(prompt_embed)
 
-        for block in self.transformer_blocks:
+        for block in self.transformer_blocks[0:1]:
             prompt_embed, spatial = block(
                 spatial=spatial,
                 prompt=prompt_embed,
                 time_embed=time_embed,
             )
+            return prompt_embed
 
         time_embed = self.norm_out.linear(torch.nn.functional.silu(time_embed))
         scale, shift = torch.chunk(time_embed, 2, dim=1)

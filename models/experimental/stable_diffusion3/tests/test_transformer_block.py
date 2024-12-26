@@ -79,5 +79,5 @@ def test_transformer_block(
     tt_prompt_embed_torch = ttnn.to_torch(tt_prompt_embed)
 
     if spatial is not None and tt_spatial_torch is not None:
-        assert_with_pcc(spatial, tt_spatial_torch, pcc=0.999)
-    assert_with_pcc(prompt_embed, tt_prompt_embed_torch, pcc=0.999)
+        assert_with_pcc(spatial, tt_spatial_torch, pcc=0.999_999_99)
+    assert_with_pcc(prompt_embed, tt_prompt_embed_torch, pcc=0.999_999_99)

@@ -36,40 +36,46 @@ def test_transformer_sd3(
     )
     tt_model = TtSD3Transformer2DModel(parameters, num_attention_heads=torch_model.num_attention_heads)
 
-    spatial = torch.randn(batch_size, 16, 64, 64)
-    prompt_embed = torch.randn(batch_size, prompt_sequence_length, 4096)
-    pooled_projection = torch.randn(batch_size, 2048)
-    timestep = torch.randn(batch_size)
+    for i in range(3):
+        torch.manual_seed(i + 2)
+        print(f"iteration {i}")
 
-    tt_spatial = ttnn.from_torch(
-        spatial,
-        dtype=ttnn.float32,
-        device=device,
-        layout=ttnn.ROW_MAJOR_LAYOUT,
-    )
+        spatial = torch.randn(batch_size, 16, 64, 64)
+        prompt_embed = torch.randn(batch_size, prompt_sequence_length, 4096)
+        pooled_projection = torch.randn(batch_size, 2048)
+        timestep = torch.randn(batch_size)
 
-    tt_prompt_embed = ttnn.from_torch(
-        prompt_embed,
-        dtype=ttnn.float32,
-        device=device,
-        layout=ttnn.TILE_LAYOUT,
-    )
-
-    tt_pooled_projection = ttnn.from_torch(pooled_projection, device=device)
-
-    with torch.no_grad():
-        spatial, prompt_embed = torch_model(
-            spatial=spatial, prompt_embed=prompt_embed, pooled_projections=pooled_projection, timestep=timestep
+        tt_spatial = ttnn.from_torch(
+            spatial,
+            dtype=ttnn.float32,
+            device=device,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
         )
 
-    tt_spatial, tt_prompt_embed = tt_model(
-        spatial=tt_spatial,
-        prompt_embed=tt_prompt_embed,
-        pooled_projection=tt_pooled_projection,
-        torch_timestep=timestep,
-    )
-    tt_spatial_torch = ttnn.to_torch(tt_spatial)
-    tt_prompt_embed_torch = ttnn.to_torch(tt_prompt_embed)
+        tt_prompt_embed = ttnn.from_torch(
+            prompt_embed,
+            dtype=ttnn.float32,
+            device=device,
+            layout=ttnn.TILE_LAYOUT,
+        )
 
-    assert_with_pcc(spatial, tt_spatial_torch, pcc=0.999)
-    assert_with_pcc(prompt_embed, tt_prompt_embed_torch, pcc=0.999)
+        tt_pooled_projection = ttnn.from_torch(pooled_projection, device=device)
+
+        with torch.no_grad():
+            print("torch...")
+            torch_result = torch_model(
+                spatial=spatial, prompt_embed=prompt_embed, pooled_projections=pooled_projection, timestep=timestep
+            )
+            print("done")
+
+        print("ttnn...")
+        tt_result = tt_model(
+            spatial=tt_spatial,
+            prompt_embed=tt_prompt_embed,
+            pooled_projection=tt_pooled_projection,
+            torch_timestep=timestep,
+        )
+        print("done")
+        tt_result_torch = ttnn.to_torch(tt_result)
+
+        assert_with_pcc(torch_result, tt_result_torch, pcc=0.999_999_99)

@@ -37,10 +37,11 @@ class TtPatchEmbedParameters:
     def patch_size(self) -> int:
         return list(self.proj.weight.shape)[-2:]
 
+
 class TtPatchEmbed:
     def __init__(self, parameters: TtPatchEmbedParameters) -> None:
         super().__init__()
- 
+
         self._pos_embed_max_size = parameters.pos_embed_max_size
         self._proj = TtConv2d(parameters.proj, stride=parameters.patch_size)
         self._pos_embed = parameters.pos_embed
@@ -58,7 +59,19 @@ class TtPatchEmbed:
 
         pos_embed = self._cropped_pos_embed(height, width)
 
-        return ttnn.tilize(latent) + ttnn.tilize(pos_embed)
+        latent = ttnn.from_torch(
+            ttnn.to_torch(latent),
+            device=latent.device(),
+            layout=ttnn.TILE_LAYOUT,
+        )
+        pos_embed = ttnn.from_torch(
+            ttnn.to_torch(pos_embed),
+            device=pos_embed.device(),
+            layout=ttnn.TILE_LAYOUT,
+        )
+        # latent = ttnn.tilize(latent)  # imprecise
+        # pos_embed = ttnn.tilize(pos_embed)  # imprecise
+        return latent + pos_embed
 
     def _cropped_pos_embed(self, height: int, width: int) -> ttnn.Tensor:
         top = (self._pos_embed_max_size - height) // 2

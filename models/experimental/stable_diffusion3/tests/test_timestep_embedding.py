@@ -46,4 +46,4 @@ def test_timestep_embedding(
     tt_output = tt_model(torch_timestep=timestep, pooled_projection=tt_pooled_projection)
     tt_output_torch = ttnn.to_torch(tt_output)
 
-    assert_with_pcc(torch_output, tt_output_torch, pcc=0.9999)
+    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_999_99)

@@ -38,19 +38,21 @@ class TtFeedForward:
     ) -> None:
         super().__init__()
 
-        self.fast_and_approximate_mode = (
-            approximate != "none"
-        )  # TODO (Friedrich): check for other cases, or change setting to bool
-
+        self._approximate = approximate
         self.in_proj = TtLinear(parameters.in_proj)
         self.out_proj = TtLinear(parameters.out_proj)
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         x2 = self.in_proj(x)
 
-        x3 = ttnn.gelu(
-            x2, fast_and_approximate_mode=self.fast_and_approximate_mode
-        )  # TODO (Friedrich): is this the correct approximation?
+        x3 = ttnn.from_torch(
+            torch.nn.functional.gelu(ttnn.to_torch(x2), approximate=self._approximate),
+            device=x2.device(),
+            layout=x2.layout,
+        )
+        # x3 = ttnn.gelu(
+        #     x2, fast_and_approximate_mode=self._approximate != "none"
+        # )  # TODO (Friedrich): is this the correct approximation?
         ttnn.deallocate(x2)
 
         result = self.out_proj(x3)

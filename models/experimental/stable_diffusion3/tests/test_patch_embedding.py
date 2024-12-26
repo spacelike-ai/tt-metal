@@ -45,4 +45,4 @@ def test_patch_embedding(
     tt_output = tt_model(tt_input_tensor)
     tt_output_torch = ttnn.to_torch(tt_output)
 
-    assert_with_pcc(torch_output, tt_output_torch, pcc=0.99999)
+    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_999_99)

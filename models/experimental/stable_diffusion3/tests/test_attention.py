@@ -34,8 +34,9 @@ def test_attention(
     torch_model.eval()
 
     parameters = TtAttentionParameters.from_torch(torch_model.state_dict(), device=device)
-    tt_model = TtAttention(parameters, num_heads=torch_model.num_heads, head_dim=torch_model.head_dim)
+    tt_model = TtAttention(parameters, num_heads=torch_model.num_heads)
 
+    torch.manual_seed(0)
     spatial = torch.randn((batch_size, spatial_sequence_length, 1536))
     prompt_embed = torch.randn((batch_size, prompt_sequence_length, 1536))
 
@@ -58,5 +59,5 @@ def test_attention(
     tt_spatial_torch = ttnn.to_torch(tt_spatial)
     tt_prompt_embed_torch = ttnn.to_torch(tt_prompt_embed)
 
-    assert_with_pcc(spatial, tt_spatial_torch, pcc=0.999)
-    assert_with_pcc(prompt_embed, tt_prompt_embed_torch, pcc=0.999)
+    assert_with_pcc(spatial, tt_spatial_torch, pcc=0.999_999)
+    assert_with_pcc(prompt_embed, tt_prompt_embed_torch, pcc=0.999_999)

@@ -24,16 +24,20 @@ def test_layer_norm(
     batch_size: int,
     input_dim: int,
 ):
-    torch_model = torch.nn.LayerNorm(input_dim, eps=1.0)
+    dtype = torch.bfloat16
+
+    torch_model = torch.nn.LayerNorm([input_dim], eps=1.0).to(dtype=dtype)
 
     parameters = TtLayerNormParameters.from_torch(torch_model.state_dict(), device=device)
     tt_model = TtLayerNorm(parameters, eps=torch_model.eps)
 
-    torch_input_tensor = torch.randn((batch_size, input_dim))
+    torch_input_tensor = torch.randn(
+        (batch_size, input_dim),
+        dtype=dtype,
+    )
 
     tt_input_tensor = ttnn.from_torch(
         torch_input_tensor,
-        dtype=ttnn.bfloat16,
         device=device,
         layout=ttnn.TILE_LAYOUT,
     )
@@ -44,13 +48,14 @@ def test_layer_norm(
     tt_output = tt_model(tt_input_tensor)
     tt_output_torch = ttnn.to_torch(tt_output)
 
-    assert_with_pcc(torch_output, tt_output_torch, pcc=0.9999)
+    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_950)
 
 
 @pytest.mark.parametrize(
     "batch_size, input_dim",
     [
         (32, 128),
+        (10, 20),
     ],
 )
 def test_rms_norm(
@@ -59,17 +64,21 @@ def test_rms_norm(
     batch_size: int,
     input_dim: int,
 ):
-    torch_model = RmsNorm(dim=input_dim, eps=1.0)
+    dtype = torch.bfloat16
+
+    torch_model = RmsNorm(dim=input_dim, eps=1.0).to(dtype=dtype)
     torch.nn.init.normal_(torch_model.weight)
 
     parameters = TtRmsNormParameters.from_torch(torch_model.state_dict(), device=device)
     tt_model = TtRmsNorm(parameters, eps=torch_model.eps)
 
-    torch_input_tensor = torch.randn((batch_size, input_dim))
+    torch_input_tensor = torch.randn(
+        (batch_size, input_dim),
+        dtype=dtype,
+    )
 
     tt_input_tensor = ttnn.from_torch(
         torch_input_tensor,
-        dtype=ttnn.bfloat16,
         device=device,
         layout=ttnn.TILE_LAYOUT,
     )
@@ -79,4 +88,4 @@ def test_rms_norm(
     tt_output = tt_model(tt_input_tensor)
     tt_output_torch = ttnn.to_torch(tt_output)
 
-    assert_with_pcc(torch_output, tt_output_torch, pcc=0.99999)
+    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_999)

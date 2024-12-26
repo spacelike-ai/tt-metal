@@ -159,7 +159,6 @@ class TtTransformerBlock:
         self, spatial: ttnn.Tensor, prompt: ttnn.Tensor, time_embed: ttnn.Tensor
     ) -> tuple[ttnn.Tensor | None, ttnn.Tensor]:
         t = ttnn.silu(time_embed)
-
         spatial_time = self._spatial_time_embed(t)
         prompt_time = self._prompt_time_embed(t)
         ttnn.deallocate(t)
