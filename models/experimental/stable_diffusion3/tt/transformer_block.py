@@ -97,6 +97,7 @@ class TtTransformerBlock:
 
         scaled = inp * (1 + scale) + shift
         attn, _ = self._spatial_attn(spatial=scaled)
+
         result = gate * attn
 
         ttnn.deallocate(scaled)
@@ -115,13 +116,45 @@ class TtTransformerBlock:
         spatial_scale: ttnn.Tensor,
         spatial_shift: ttnn.Tensor,
     ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
+        # spatial = ttnn.from_torch(torch.load("spatial.pt"), device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+        # prompt = ttnn.from_torch(torch.load("prompt.pt"), device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+        # spatial_gate = ttnn.from_torch(torch.load("spatial_gate.pt"), device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+        # prompt_gate = ttnn.from_torch(torch.load("prompt_gate.pt"), device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+        # prompt_scale = ttnn.from_torch(torch.load("prompt_scale.pt"), device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+        # prompt_shift = ttnn.from_torch(torch.load("prompt_shift.pt"), device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+
+        # spatial_scale = ttnn.from_torch(
+        #     torch.load("spatial_scale.pt"), device=spatial.device(), layout=ttnn.TILE_LAYOUT
+        # )
+        # spatial_shift = ttnn.from_torch(
+        #     torch.load("spatial_shift.pt"), device=spatial.device(), layout=ttnn.TILE_LAYOUT
+        # )
+
         spatial_scaled = spatial * (1 + spatial_scale) + spatial_shift
         prompt_scaled = prompt * (1 + prompt_scale) + prompt_shift
 
+        # spatial_scaled = ttnn.from_torch(
+        #     torch.load("spatial_scaled.pt"), device=prompt.device(), layout=ttnn.TILE_LAYOUT
+        # )
+        # prompt_scaled = ttnn.from_torch(torch.load("prompt_scaled.pt"), device=prompt.device(), layout=ttnn.TILE_LAYOUT)
         spatial_attn, prompt_attn = self._dual_attn(spatial=spatial_scaled, prompt=prompt_scaled)
 
-        spatial_attn_scaled = spatial_gate * spatial_attn
-        prompt_attn_scaled = prompt_gate * prompt_attn if prompt_gate is not None else None
+        spatial_attn_scaled = ttnn.from_torch(
+            ttnn.to_torch(spatial_gate) * ttnn.to_torch(spatial_attn),
+            device=spatial.device(),
+            layout=ttnn.TILE_LAYOUT,
+        )
+        prompt_attn_scaled = (
+            ttnn.from_torch(
+                ttnn.to_torch(prompt_gate) * ttnn.to_torch(prompt_attn),
+                device=prompt.device(),
+                layout=ttnn.TILE_LAYOUT,
+            )
+            if prompt_gate is not None
+            else None
+        )
+        # spatial_attn_scaled = spatial_gate * spatial_attn
+        # prompt_attn_scaled = prompt_gate * prompt_attn if prompt_gate is not None else None
 
         ttnn.deallocate(spatial_attn)
         ttnn.deallocate(prompt_attn)
