@@ -105,7 +105,7 @@ class TtSD3Transformer2DModel:
         # time_embed = ttnn.tilize(time_embed)
 
         for block in self._transformer_blocks[0:1]:  # TODO: remove range
-            prompt_embed, spatial = block(
+            spatial, prompt_embed = block(
                 spatial=spatial,
                 prompt=prompt_embed,
                 time_embed=time_embed,

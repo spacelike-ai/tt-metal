@@ -46,9 +46,9 @@ def test_transformer_block(
     tt_time = ttnn.from_torch(time.unsqueeze(1), device=device, layout=ttnn.TILE_LAYOUT)
 
     with torch.no_grad():
-        prompt, spatial = torch_model(spatial=spatial, prompt=prompt, time_embed=time)
+        spatial, prompt = torch_model(spatial=spatial, prompt=prompt, time_embed=time)
 
-    tt_prompt, tt_spatial = tt_model(spatial=tt_spatial, prompt=tt_prompt, time_embed=tt_time)
+    tt_spatial, tt_prompt = tt_model(spatial=tt_spatial, prompt=tt_prompt, time_embed=tt_time)
 
     assert (prompt is None) == (tt_prompt is None)
 

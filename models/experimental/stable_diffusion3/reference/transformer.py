@@ -82,7 +82,7 @@ class SD3Transformer2DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         prompt_embed = self.context_embedder(prompt_embed)
 
         for block in self.transformer_blocks[0:1]:
-            prompt_embed, spatial = block(
+            spatial, prompt_embed = block(
                 spatial=spatial,
                 prompt=prompt_embed,
                 time_embed=time_embed,

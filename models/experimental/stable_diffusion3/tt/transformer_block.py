@@ -114,7 +114,7 @@ class TtTransformerBlock:
         prompt_shift: ttnn.Tensor,
         spatial_scale: ttnn.Tensor,
         spatial_shift: ttnn.Tensor,
-    ) -> tuple[ttnn.Tensor | None, ttnn.Tensor]:
+    ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
         spatial_scaled = spatial * (1 + spatial_scale) + spatial_shift
         prompt_scaled = prompt * (1 + prompt_scale) + prompt_shift
 
@@ -125,7 +125,7 @@ class TtTransformerBlock:
 
         ttnn.deallocate(spatial_attn)
         ttnn.deallocate(prompt_attn)
-        return prompt_attn_scaled, spatial_attn_scaled
+        return spatial_attn_scaled, prompt_attn_scaled
 
     def _spatial_ff_block(
         self,
@@ -157,7 +157,7 @@ class TtTransformerBlock:
 
     def __call__(
         self, spatial: ttnn.Tensor, prompt: ttnn.Tensor, time_embed: ttnn.Tensor
-    ) -> tuple[ttnn.Tensor | None, ttnn.Tensor]:
+    ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
         t = ttnn.silu(time_embed)
         spatial_time = self._spatial_time_embed(t)
         prompt_time = self._prompt_time_embed(t)
@@ -267,7 +267,7 @@ class TtTransformerBlock:
         spatial_normed = self._spatial_norm_1(spatial)
         prompt_normed = self._prompt_norm_1(prompt)
 
-        prompt_attn, spatial_attn = self._dual_attn_block(
+        spatial_attn, prompt_attn = self._dual_attn_block(
             spatial=spatial_normed,
             prompt=prompt_normed,
             spatial_gate=spatial_gate_dual_attn,
@@ -318,7 +318,7 @@ class TtTransformerBlock:
         ttnn.deallocate(spatial_shift_ff)
 
         if self._context_pre_only:
-            return None, spatial
+            return spatial, None
 
         assert prompt_scale_ff is not None
         assert prompt_shift_ff is not None
@@ -339,4 +339,4 @@ class TtTransformerBlock:
         ttnn.deallocate(prompt_scale_ff)
         ttnn.deallocate(prompt_shift_ff)
 
-        return prompt, spatial
+        return spatial, prompt
