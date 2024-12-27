@@ -114,18 +114,18 @@ class TtTransformerBlock:
         prompt_shift: ttnn.Tensor,
         spatial_scale: ttnn.Tensor,
         spatial_shift: ttnn.Tensor,
-    ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
+    ) -> tuple[ttnn.Tensor | None, ttnn.Tensor]:
         spatial_scaled = spatial * (1 + spatial_scale) + spatial_shift
         prompt_scaled = prompt * (1 + prompt_scale) + prompt_shift
 
-        spatial_attn, prompt_attn = self._dual_attn(spatial=spatial_scaled, prompt=prompt_scaled)  # quite imprecise
+        spatial_attn, prompt_attn = self._dual_attn(spatial=spatial_scaled, prompt=prompt_scaled)
 
         spatial_attn_scaled = spatial_gate * spatial_attn
         prompt_attn_scaled = prompt_gate * prompt_attn if prompt_gate is not None else None
 
         ttnn.deallocate(spatial_attn)
         ttnn.deallocate(prompt_attn)
-        return spatial_attn_scaled, prompt_attn_scaled
+        return prompt_attn_scaled, spatial_attn_scaled
 
     def _spatial_ff_block(
         self,
@@ -267,7 +267,7 @@ class TtTransformerBlock:
         spatial_normed = self._spatial_norm_1(spatial)
         prompt_normed = self._prompt_norm_1(prompt)
 
-        spatial_attn, prompt_attn = self._dual_attn_block(
+        prompt_attn, spatial_attn = self._dual_attn_block(
             spatial=spatial_normed,
             prompt=prompt_normed,
             spatial_gate=spatial_gate_dual_attn,

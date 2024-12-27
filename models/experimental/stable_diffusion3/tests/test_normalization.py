@@ -1,15 +1,12 @@
-import logging
-
 import pytest
 import torch
+from loguru import logger
 
 import ttnn
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from ..reference.normalization import RmsNorm
 from ..tt.normalization import TtLayerNorm, TtLayerNormParameters, TtRmsNorm, TtRmsNormParameters
-
-logger = logging.getLogger(__name__)
 
 
 @pytest.mark.parametrize(
@@ -48,6 +45,11 @@ def test_layer_norm(
     tt_output = tt_model(tt_input_tensor)
     tt_output_torch = ttnn.to_torch(tt_output)
 
+    mse = torch.nn.functional.mse_loss(
+        torch_output.to(dtype=torch.float32),
+        tt_output_torch.to(dtype=torch.float32),
+    ).item()
+    logger.info(f"mse: {mse}")
     assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_950)
 
 
@@ -88,4 +90,9 @@ def test_rms_norm(
     tt_output = tt_model(tt_input_tensor)
     tt_output_torch = ttnn.to_torch(tt_output)
 
+    mse = torch.nn.functional.mse_loss(
+        torch_output.to(dtype=torch.float32),
+        tt_output_torch.to(dtype=torch.float32),
+    ).item()
+    logger.info(f"mse: {mse}")
     assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_999)

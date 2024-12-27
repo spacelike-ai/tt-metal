@@ -24,8 +24,8 @@ class TtAttentionPartParameters:
 
 @dataclass
 class TtAttentionParameters:
-    part_a: TtAttentionPartParameters
-    part_b: TtAttentionPartParameters | None
+    spatial: TtAttentionPartParameters
+    prompt: TtAttentionPartParameters | None
 
     @classmethod
     def from_torch(
@@ -36,7 +36,7 @@ class TtAttentionParameters:
         device: ttnn.Device,
     ) -> TtAttentionParameters:
         return cls(
-            part_a=TtAttentionPartParameters(
+            spatial=TtAttentionPartParameters(
                 q_proj=TtLinearParameters.from_torch(substate(state, "to_q"), dtype=dtype, device=device),
                 k_proj=TtLinearParameters.from_torch(substate(state, "to_k"), dtype=dtype, device=device),
                 v_proj=TtLinearParameters.from_torch(substate(state, "to_v"), dtype=dtype, device=device),
@@ -44,7 +44,7 @@ class TtAttentionParameters:
                 norm_k=TtRmsNormParameters.from_torch(substate(state, "norm_k"), dtype=dtype, device=device),
                 out_proj=TtLinearParameters.from_torch(substate(state, "to_out.0"), dtype=dtype, device=device),
             ),
-            part_b=TtAttentionPartParameters(
+            prompt=TtAttentionPartParameters(
                 q_proj=TtLinearParameters.from_torch(substate(state, "add_q_proj"), dtype=dtype, device=device),
                 k_proj=TtLinearParameters.from_torch(substate(state, "add_k_proj"), dtype=dtype, device=device),
                 v_proj=TtLinearParameters.from_torch(substate(state, "add_v_proj"), dtype=dtype, device=device),
@@ -59,7 +59,7 @@ class TtAttentionParameters:
         )
 
     def head_dim(self, *, num_heads: int) -> int:
-        return self.part_a.q_proj.out_channels // num_heads
+        return self.spatial.q_proj.out_channels // num_heads
 
 
 class TtAttentionPart:
@@ -83,8 +83,8 @@ class TtAttention:
         self._num_heads = num_heads
         self._head_dim = parameters.head_dim(num_heads=num_heads)
 
-        self._spatial_attn = TtAttentionPart(parameters.part_a)
-        self._prompt_attn = TtAttentionPart(parameters.part_b) if parameters.part_b is not None else None
+        self._spatial_attn = TtAttentionPart(parameters.spatial)
+        self._prompt_attn = TtAttentionPart(parameters.prompt) if parameters.prompt is not None else None
 
     def __call__(
         self, *, spatial: ttnn.Tensor, prompt: ttnn.Tensor | None = None

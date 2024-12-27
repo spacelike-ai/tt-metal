@@ -70,9 +70,9 @@ class TransformerBlock(torch.nn.Module):
     ) -> torch.Tensor:
         assert self.attn2 is not None
 
-        scaled = inp * (1 + scale[:, None]) + shift[:, None]
+        scaled = inp * (1 + scale) + shift
         attn, _ = self.attn2(spatial=scaled)
-        return gate.unsqueeze(1) * attn
+        return gate * attn
 
     def _dual_attn_block(
         self,
@@ -85,16 +85,16 @@ class TransformerBlock(torch.nn.Module):
         prompt_shift: torch.Tensor,
         spatial_scale: torch.Tensor,
         spatial_shift: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        spatial_scaled = spatial * (1 + spatial_scale[:, None]) + spatial_shift[:, None]
-        prompt_scaled = prompt * (1 + prompt_scale[:, None]) + prompt_shift[:, None]
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        spatial_scaled = spatial * (1 + spatial_scale) + spatial_shift
+        prompt_scaled = prompt * (1 + prompt_scale) + prompt_shift
 
         spatial_attn, prompt_attn = self.attn(spatial=spatial_scaled, prompt=prompt_scaled)
 
-        spatial_attn = spatial_gate.unsqueeze(1) * spatial_attn
-        prompt_attn = prompt_gate.unsqueeze(1) * prompt_attn if prompt_gate is not None else None
+        spatial_attn = spatial_gate * spatial_attn
+        prompt_attn = prompt_gate * prompt_attn if prompt_gate is not None else None
 
-        return spatial_attn, prompt_attn
+        return prompt_attn, spatial_attn
 
     def _spatial_ff_block(
         self,
@@ -104,8 +104,8 @@ class TransformerBlock(torch.nn.Module):
         scale: torch.Tensor,
         shift: torch.Tensor,
     ) -> torch.Tensor:
-        scaled = inp * (1 + scale[:, None]) + shift[:, None]
-        return gate.unsqueeze(1) * self.ff(scaled)
+        scaled = inp * (1 + scale) + shift
+        return gate * self.ff(scaled)
 
     def _prompt_ff_block(
         self,
@@ -117,8 +117,8 @@ class TransformerBlock(torch.nn.Module):
     ) -> torch.Tensor:
         assert self.ff_context is not None
 
-        scaled = inp * (1 + scale[:, None]) + shift[:, None]
-        return gate.unsqueeze(1) * self.ff_context(scaled)
+        scaled = inp * (1 + scale) + shift
+        return gate * self.ff_context(scaled)
 
     def forward(
         self,
@@ -126,8 +126,10 @@ class TransformerBlock(torch.nn.Module):
         prompt: torch.Tensor,
         time_embed: torch.Tensor,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
-        time_embed1 = self.norm1.linear(torch.nn.functional.silu(time_embed))
-        time_embed2 = self.norm1_context.linear(torch.nn.functional.silu(time_embed))
+        time_embed = time_embed.unsqueeze(1)
+
+        spatial_time = self.norm1.linear(torch.nn.functional.silu(time_embed))
+        prompt_time = self.norm1_context.linear(torch.nn.functional.silu(time_embed))
 
         if self.attn2 is not None:
             (
@@ -140,7 +142,7 @@ class TransformerBlock(torch.nn.Module):
                 spatial_shift_attn,
                 spatial_scale_attn,
                 spatial_gate_attn,
-            ) = time_embed1.chunk(9, dim=1)
+            ) = spatial_time.chunk(9, dim=-1)
         else:
             (
                 spatial_shift_dual_attn,
@@ -149,7 +151,7 @@ class TransformerBlock(torch.nn.Module):
                 spatial_shift_ff,
                 spatial_scale_ff,
                 spatial_gate_ff,
-            ) = time_embed1.chunk(6, dim=1)
+            ) = spatial_time.chunk(6, dim=-1)
 
             spatial_gate_attn = None
             spatial_shift_attn = None
@@ -161,7 +163,7 @@ class TransformerBlock(torch.nn.Module):
             prompt_scale_ff = None
             prompt_gate_ff = None
 
-            prompt_scale_attn, prompt_shift_attn = torch.chunk(time_embed2, 2, dim=1)
+            prompt_scale_attn, prompt_shift_attn = torch.chunk(prompt_time, 2, dim=-1)
         else:
             (
                 prompt_shift_attn,
@@ -170,12 +172,12 @@ class TransformerBlock(torch.nn.Module):
                 prompt_shift_ff,
                 prompt_scale_ff,
                 prompt_gate_ff,
-            ) = time_embed2.chunk(6, dim=1)
+            ) = prompt_time.chunk(6, dim=-1)
 
         spatial_normed = self.norm1.norm(spatial)
         prompt_normed = self.norm1_context.norm(prompt)
 
-        spatial_attn, prompt_attn = self._dual_attn_block(
+        prompt_attn, spatial_attn = self._dual_attn_block(
             spatial=spatial_normed,
             prompt=prompt_normed,
             spatial_gate=spatial_gate_dual_attn,

@@ -1,7 +1,6 @@
-import logging
-
 import pytest
 import torch
+from loguru import logger
 
 import ttnn
 from tests.ttnn.utils_for_testing import assert_with_pcc
@@ -9,8 +8,6 @@ from tests.ttnn.utils_for_testing import assert_with_pcc
 from ..reference import SD3Transformer2DModel
 from ..reference.attention import Attention
 from ..tt.attention import TtAttention, TtAttentionParameters
-
-logger = logging.getLogger(__name__)
 
 
 @pytest.mark.parametrize(
@@ -59,5 +56,16 @@ def test_attention(
     tt_spatial_torch = ttnn.to_torch(tt_spatial)
     tt_prompt_embed_torch = ttnn.to_torch(tt_prompt_embed)
 
+    mse = torch.nn.functional.mse_loss(
+        spatial.to(dtype=torch.float32),
+        tt_spatial_torch.to(dtype=torch.float32),
+    ).item()
+    logger.info(f"spatial mse: {mse}")
     assert_with_pcc(spatial, tt_spatial_torch, pcc=0.999_999)
+
+    mse = torch.nn.functional.mse_loss(
+        prompt_embed.to(dtype=torch.float32),
+        tt_prompt_embed_torch.to(dtype=torch.float32),
+    ).item()
+    logger.info(f"prompt mse: {mse}")
     assert_with_pcc(prompt_embed, tt_prompt_embed_torch, pcc=0.999_999)

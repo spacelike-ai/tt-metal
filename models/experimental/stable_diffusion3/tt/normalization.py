@@ -96,20 +96,20 @@ class TtLayerNorm:
         #     x = ttnn.untilize(x)
         #     x = _tilize_with_zero_padding(x)
 
-        return ttnn.layer_norm(x, weight=self._weight, bias=self._bias, epsilon=self._eps)
+        # return ttnn.layer_norm(x, weight=self._weight, bias=self._bias, epsilon=self._eps)
 
-        # torch_x = ttnn.to_torch(x)
-        # torch_weight = ttnn.to_torch(self._weight).squeeze(0) if self._weight is not None else None
-        # torch_bias = ttnn.to_torch(self._bias).squeeze(0) if self._bias is not None else None
+        torch_x = ttnn.to_torch(x)
+        torch_weight = ttnn.to_torch(self._weight).squeeze(0) if self._weight is not None else None
+        torch_bias = ttnn.to_torch(self._bias).squeeze(0) if self._bias is not None else None
 
-        # torch_result = torch.nn.functional.layer_norm(
-        #     torch_x,
-        #     [torch_x.shape[-1]],
-        #     weight=torch_weight,
-        #     bias=torch_bias,
-        #     eps=self._eps,
-        # )
-        # return ttnn.from_torch(torch_result, device=x.device(), layout=ttnn.TILE_LAYOUT)
+        torch_result = torch.nn.functional.layer_norm(
+            torch_x,
+            [torch_x.shape[-1]],
+            weight=torch_weight,
+            bias=torch_bias,
+            eps=self._eps,
+        )
+        return ttnn.from_torch(torch_result, device=x.device(), layout=ttnn.TILE_LAYOUT)
 
 
 # def _increase_to_nearest_multiple(x, factor):

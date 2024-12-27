@@ -1,7 +1,6 @@
-import logging
-
 import pytest
 import torch
+from loguru import logger
 
 import ttnn
 from tests.ttnn.utils_for_testing import assert_with_pcc
@@ -12,8 +11,6 @@ from ..tt.timestep_embedding import (
     TtCombinedTimestepTextProjEmbeddings,
     TtCombinedTimestepTextProjEmbeddingsParameters,
 )
-
-logger = logging.getLogger(__name__)
 
 
 @pytest.mark.parametrize(
@@ -46,4 +43,9 @@ def test_timestep_embedding(
     tt_output = tt_model(torch_timestep=timestep, pooled_projection=tt_pooled_projection)
     tt_output_torch = ttnn.to_torch(tt_output)
 
+    mse = torch.nn.functional.mse_loss(
+        torch_output.to(dtype=torch.float32),
+        tt_output_torch.to(dtype=torch.float32),
+    ).item()
+    logger.info(f"mse: {mse}")
     assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_999_99)

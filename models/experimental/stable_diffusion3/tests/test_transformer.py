@@ -1,15 +1,12 @@
-import logging
-
 import pytest
 import torch
+from loguru import logger
 
 import ttnn
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
-from ..reference.transformer_sd3 import SD3Transformer2DModel
-from ..tt.transformer_sd3 import TtSD3Transformer2DModel, TtSD3Transformer2DModelParameters
-
-logger = logging.getLogger(__name__)
+from ..reference.transformer import SD3Transformer2DModel
+from ..tt.transformer import TtSD3Transformer2DModel, TtSD3Transformer2DModelParameters
 
 
 @pytest.mark.parametrize(
@@ -18,7 +15,7 @@ logger = logging.getLogger(__name__)
         (2, 333),
     ],
 )
-def test_transformer_sd3(
+def test_transformer(
     *,
     device: ttnn.Device,
     batch_size: int,
@@ -29,11 +26,7 @@ def test_transformer_sd3(
     )
     torch_model.eval()
 
-    parameters = TtSD3Transformer2DModelParameters.from_torch(
-        torch_model.state_dict(),
-        device=device,
-        dtype=ttnn.float32,
-    )
+    parameters = TtSD3Transformer2DModelParameters.from_torch(torch_model.state_dict(), device=device)
     tt_model = TtSD3Transformer2DModel(parameters, num_attention_heads=torch_model.num_attention_heads)
 
     for i in range(3):
@@ -45,37 +38,31 @@ def test_transformer_sd3(
         pooled_projection = torch.randn(batch_size, 2048)
         timestep = torch.randn(batch_size)
 
-        tt_spatial = ttnn.from_torch(
-            spatial,
-            dtype=ttnn.float32,
-            device=device,
-            layout=ttnn.ROW_MAJOR_LAYOUT,
-        )
-
-        tt_prompt_embed = ttnn.from_torch(
-            prompt_embed,
-            dtype=ttnn.float32,
-            device=device,
-            layout=ttnn.TILE_LAYOUT,
-        )
+        tt_spatial = ttnn.from_torch(spatial, device=device, layout=ttnn.ROW_MAJOR_LAYOUT)
+        tt_prompt_embed = ttnn.from_torch(prompt_embed, device=device, layout=ttnn.TILE_LAYOUT)
 
         tt_pooled_projection = ttnn.from_torch(pooled_projection, device=device)
 
         with torch.no_grad():
             print("torch...")
-            torch_result = torch_model(
+            torch_output = torch_model(
                 spatial=spatial, prompt_embed=prompt_embed, pooled_projections=pooled_projection, timestep=timestep
             )
             print("done")
 
         print("ttnn...")
-        tt_result = tt_model(
+        tt_output = tt_model(
             spatial=tt_spatial,
             prompt_embed=tt_prompt_embed,
             pooled_projection=tt_pooled_projection,
             torch_timestep=timestep,
         )
         print("done")
-        tt_result_torch = ttnn.to_torch(tt_result)
+        tt_output_torch = ttnn.to_torch(tt_output)
 
-        assert_with_pcc(torch_result, tt_result_torch, pcc=0.999_999_99)
+        mse = torch.nn.functional.mse_loss(
+            torch_output.to(dtype=torch.float32),
+            tt_output_torch.to(dtype=torch.float32),
+        ).item()
+        logger.info(f"mse: {mse}")
+        assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_999_99)

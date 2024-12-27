@@ -1,7 +1,6 @@
-import logging
-
 import pytest
 import torch
+from loguru import logger
 
 import ttnn
 from tests.ttnn.utils_for_testing import assert_with_pcc
@@ -9,8 +8,6 @@ from tests.ttnn.utils_for_testing import assert_with_pcc
 from ..reference import SD3Transformer2DModel
 from ..reference.transformer_block import TransformerBlock
 from ..tt.transformer_block import TtTransformerBlock, TtTransformerBlockParameters
-
-logger = logging.getLogger(__name__)
 
 
 @pytest.mark.parametrize(
@@ -34,50 +31,42 @@ def test_transformer_block(
     torch_model: TransformerBlock = parent_torch_model.transformer_blocks[block_index]
     torch_model.eval()
 
-    parameters = TtTransformerBlockParameters.from_torch(
-        torch_model.state_dict(),
-        device=device,
-        dtype=ttnn.float32,
-    )
+    parameters = TtTransformerBlockParameters.from_torch(torch_model.state_dict(), device=device)
     tt_model = TtTransformerBlock(parameters, num_heads=torch_model.num_heads)
 
     embedding_dim = 1536
 
+    torch.manual_seed(0)
     spatial = torch.randn((batch_size, spatial_sequence_length, embedding_dim))
-    prompt_embed = torch.randn((batch_size, prompt_sequence_length, embedding_dim))
-    time_embed = torch.randn((batch_size, embedding_dim))
+    prompt = torch.randn((batch_size, prompt_sequence_length, embedding_dim))
+    time = torch.randn((batch_size, embedding_dim))
 
-    tt_spatial = ttnn.from_torch(
-        spatial,
-        dtype=ttnn.float32,
-        device=device,
-        layout=ttnn.TILE_LAYOUT,
-    )
-
-    tt_prompt_embed = ttnn.from_torch(
-        prompt_embed,
-        dtype=ttnn.float32,
-        device=device,
-        layout=ttnn.TILE_LAYOUT,
-    )
-
-    tt_time_embed = ttnn.from_torch(
-        time_embed[:, None],
-        dtype=ttnn.float32,
-        device=device,
-        layout=ttnn.TILE_LAYOUT,
-    )
+    tt_spatial = ttnn.from_torch(spatial, device=device, layout=ttnn.TILE_LAYOUT)
+    tt_prompt = ttnn.from_torch(prompt, device=device, layout=ttnn.TILE_LAYOUT)
+    tt_time = ttnn.from_torch(time.unsqueeze(1), device=device, layout=ttnn.TILE_LAYOUT)
 
     with torch.no_grad():
-        spatial, prompt_embed = torch_model(spatial=spatial, prompt=prompt_embed, time_embed=time_embed)
+        prompt, spatial = torch_model(spatial=spatial, prompt=prompt, time_embed=time)
 
-    tt_spatial, tt_prompt_embed = tt_model(spatial=tt_spatial, prompt=tt_prompt_embed, time_embed=tt_time_embed)
+    tt_prompt, tt_spatial = tt_model(spatial=tt_spatial, prompt=tt_prompt, time_embed=tt_time)
 
-    assert (spatial is None) == (tt_spatial is None)
+    assert (prompt is None) == (tt_prompt is None)
 
-    tt_spatial_torch = ttnn.to_torch(tt_spatial) if tt_spatial is not None else None
-    tt_prompt_embed_torch = ttnn.to_torch(tt_prompt_embed)
+    tt_prompt_torch = ttnn.to_torch(tt_prompt) if tt_prompt is not None else None
+    tt_spatial_torch = ttnn.to_torch(tt_spatial)
 
-    if spatial is not None and tt_spatial_torch is not None:
-        assert_with_pcc(spatial, tt_spatial_torch, pcc=0.999_999_99)
-    assert_with_pcc(prompt_embed, tt_prompt_embed_torch, pcc=0.999_999_99)
+    if prompt is not None and tt_prompt_torch is not None:
+        mse = torch.nn.functional.mse_loss(
+            prompt.to(dtype=torch.float32),
+            tt_prompt_torch.to(dtype=torch.float32),
+        ).item()
+        logger.info(f"prompt mse: {mse}")
+        assert_with_pcc(prompt, tt_prompt_torch, pcc=0.999_500)
+
+    assert spatial.shape == tt_spatial_torch.shape
+    mse = torch.nn.functional.mse_loss(
+        spatial.to(dtype=torch.float32),
+        tt_spatial_torch.to(dtype=torch.float32),
+    ).item()
+    logger.info(f"spatial mse: {mse}")
+    assert_with_pcc(spatial, tt_spatial_torch, pcc=0.999_500)

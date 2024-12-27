@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import logging
-
 import pytest
 import torch
+from loguru import logger
 
 import ttnn
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from ..tt.patch_embedding import TtConv2d, TtConv2dParameters
-
-logger = logging.getLogger(__name__)
 
 
 @pytest.mark.parametrize(
@@ -20,7 +17,7 @@ logger = logging.getLogger(__name__)
         # (10, 20, 15, (3, 5), (1, 2), 128, 256),
     ],
 )
-def test_patch_embedding(
+def test_conv2d(
     *,
     device: ttnn.Device,
     batch_size: int,
@@ -57,4 +54,9 @@ def test_patch_embedding(
     tt_output = tt_model(tt_input_tensor)
     tt_output_torch = ttnn.to_torch(tt_output)
 
+    mse = torch.nn.functional.mse_loss(
+        torch_output.to(dtype=torch.float32),
+        tt_output_torch.to(dtype=torch.float32),
+    ).item()
+    logger.info(f"mse: {mse}")
     assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_999_99)
