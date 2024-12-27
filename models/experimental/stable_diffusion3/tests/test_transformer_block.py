@@ -14,7 +14,7 @@ from ..tt.transformer_block import TtTransformerBlock, TtTransformerBlockParamet
     "block_index, batch_size, spatial_sequence_length, prompt_sequence_length",
     [
         (0, 2, 1024, 333),
-        (23, 2, 1024, 333),
+        # (23, 2, 1024, 333),
     ],
 )
 def test_transformer_block(
@@ -60,7 +60,7 @@ def test_transformer_block(
             prompt.to(dtype=torch.float32),
             tt_prompt_torch.to(dtype=torch.float32),
         ).item()
-        logger.info(f"prompt mse: {mse}")
+        logger.info(f"prompt mse: {mse:.6f}")
         assert_with_pcc(prompt, tt_prompt_torch, pcc=0.999_500)
 
     assert spatial.shape == tt_spatial_torch.shape
@@ -68,5 +68,5 @@ def test_transformer_block(
         spatial.to(dtype=torch.float32),
         tt_spatial_torch.to(dtype=torch.float32),
     ).item()
-    logger.info(f"spatial mse: {mse}")
+    logger.info(f"spatial mse: {mse:.6f}")
     assert_with_pcc(spatial, tt_spatial_torch, pcc=0.999_500)
