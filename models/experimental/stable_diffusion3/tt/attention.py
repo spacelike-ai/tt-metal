@@ -100,18 +100,9 @@ class TtAttention:
         k = self._spatial_attn.k_proj(spatial)  # N ⊗ S1 ⊗ (H * Eq)
         v = self._spatial_attn.v_proj(spatial)  # N ⊗ S1 ⊗ (H * Ev)
 
-        q = ttnn.to_torch(q)
-        k = ttnn.to_torch(k)
-        v = ttnn.to_torch(v)
-
-        # TODO: port to ttnn
-        q = q.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H ⊗ S1 ⊗ Eq
-        k = k.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H ⊗ S1 ⊗ Eq
-        v = v.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H ⊗ S1 ⊗ Ev
-
-        q = ttnn.from_torch(q, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-        k = ttnn.from_torch(k, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-        v = ttnn.from_torch(v, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+        q = ttnn.transpose(ttnn.reshape(q, (batch_size, -1, self._num_heads, self._head_dim)), 1, 2)  # N ⊗ H ⊗ S1 ⊗ Eq
+        k = ttnn.transpose(ttnn.reshape(k, (batch_size, -1, self._num_heads, self._head_dim)), 1, 2)  # N ⊗ H ⊗ S1 ⊗ Eq
+        v = ttnn.transpose(ttnn.reshape(v, (batch_size, -1, self._num_heads, self._head_dim)), 1, 2)  # N ⊗ H ⊗ S1 ⊗ Ev
 
         q = self._spatial_attn.norm_q(q)
         k = self._spatial_attn.norm_k(k)
@@ -123,41 +114,22 @@ class TtAttention:
             k2 = self._prompt_attn.k_proj(prompt)
             v2 = self._prompt_attn.v_proj(prompt)
 
-            q2 = ttnn.to_torch(q2)
-            k2 = ttnn.to_torch(k2)
-            v2 = ttnn.to_torch(v2)
-
-            # TODO: port to ttnn
-            q2 = q2.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H ⊗ S2 ⊗ Eq
-            k2 = k2.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H ⊗ S2 ⊗ Eq
-            v2 = v2.view(batch_size, -1, self._num_heads, self._head_dim).transpose(1, 2)  # N ⊗ H ⊗ S2 ⊗ Ev
-
-            q2 = ttnn.from_torch(q2, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-            k2 = ttnn.from_torch(k2, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-            v2 = ttnn.from_torch(v2, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+            q2 = ttnn.transpose(
+                ttnn.reshape(q2, (batch_size, -1, self._num_heads, self._head_dim)), 1, 2
+            )  # N ⊗ H ⊗ S2 ⊗ Eq
+            k2 = ttnn.transpose(
+                ttnn.reshape(k2, (batch_size, -1, self._num_heads, self._head_dim)), 1, 2
+            )  # N ⊗ H ⊗ S2 ⊗ Eq
+            v2 = ttnn.transpose(
+                ttnn.reshape(v2, (batch_size, -1, self._num_heads, self._head_dim)), 1, 2
+            )  # N ⊗ H ⊗ S2 ⊗ Ev
 
             q2 = self._prompt_attn.norm_q(q2)
             k2 = self._prompt_attn.norm_k(k2)
 
-            # TODO: `concat` does not work correctly with tilized tensors and `tilize` does not yield the correct result
-            k = ttnn.from_torch(
-                torch.cat([ttnn.to_torch(k), ttnn.to_torch(k2)], dim=2),
-                device=spatial.device(),
-                layout=ttnn.TILE_LAYOUT,
-            )
-            q = ttnn.from_torch(
-                torch.cat([ttnn.to_torch(q), ttnn.to_torch(q2)], dim=2),
-                device=spatial.device(),
-                layout=ttnn.TILE_LAYOUT,
-            )
-            v = ttnn.from_torch(
-                torch.cat([ttnn.to_torch(v), ttnn.to_torch(v2)], dim=2),
-                device=spatial.device(),
-                layout=ttnn.TILE_LAYOUT,
-            )
-            # q = ttnn.concat([q, q2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Eq
-            # k = ttnn.concat([k, k2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Eq
-            # v = ttnn.concat([v, v2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Ev
+            q = ttnn.concat([q, q2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Eq
+            k = ttnn.concat([k, k2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Eq
+            v = ttnn.concat([v, v2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Ev
 
         k = ttnn.transpose(k, 2, 3)
 
@@ -181,13 +153,13 @@ class TtAttention:
         # )
         attention_probs = ttnn.transformer.attention_softmax(
             attention_scores, attention_mask=None, head_size=self._head_dim
-        )  # imprecise
+        )  # not very precise
         ttnn.deallocate(attention_scores)
 
         # attn = ttnn.from_torch(
         #     ttnn.to_torch(attention_probs) @ ttnn.to_torch(v), device=v.device(), layout=ttnn.TILE_LAYOUT
         # )
-        attn = ttnn.matmul(attention_probs, v)  # imprecise
+        attn = ttnn.matmul(attention_probs, v)  # not very precise
         ttnn.deallocate(attention_probs)
         ttnn.deallocate(v)
 
@@ -196,10 +168,8 @@ class TtAttention:
 
         if prompt is not None:
             torch_concatenated_attn = ttnn.to_torch(concatenated_attn)
-            torch_spatial, torch_prompt = (
-                torch_concatenated_attn[:, :spatial_sequence_length],
-                torch_concatenated_attn[:, spatial_sequence_length:],
-            )
+            torch_spatial = torch_concatenated_attn[:, :spatial_sequence_length]
+            torch_prompt = torch_concatenated_attn[:, spatial_sequence_length:]
             spatial = ttnn.from_torch(torch_spatial, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
             prompt = ttnn.from_torch(torch_prompt, device=prompt.device(), layout=ttnn.TILE_LAYOUT)
 
