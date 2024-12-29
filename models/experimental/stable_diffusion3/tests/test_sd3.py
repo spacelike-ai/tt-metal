@@ -258,13 +258,7 @@ def _get_clip_prompt_embeds(
         return_tensors="pt",
     )
 
-    text_input_ids = text_inputs.input_ids
-    untruncated_ids = tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
-
-    if untruncated_ids.shape[-1] >= text_input_ids.shape[-1]:
-        logger.warning("CLIP input text was truncated")
-
-    prompt_embeds = text_encoder(text_input_ids, output_hidden_states=True)
+    prompt_embeds = text_encoder(text_inputs.input_ids, output_hidden_states=True)
     pooled_prompt_embeds = prompt_embeds[0]
     prompt_embeds = prompt_embeds.hidden_states[-2]
 
@@ -298,13 +292,8 @@ def _get_t5_prompt_embeds(
         add_special_tokens=True,
         return_tensors="pt",
     )
-    text_input_ids = text_inputs.input_ids
-    untruncated_ids = tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
 
-    if untruncated_ids.shape[-1] >= text_input_ids.shape[-1]:
-        logger.warning("CLIP input text was truncated")
-
-    prompt_embeds = text_encoder.forward(text_input_ids)[0]
+    prompt_embeds = text_encoder.forward(text_inputs.input_ids)[0]
 
     dtype = text_encoder.dtype
     prompt_embeds = prompt_embeds.to(dtype=dtype)
