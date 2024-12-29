@@ -75,8 +75,6 @@ class SD3Transformer2DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         pooled_projections: torch.Tensor,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
-        height, width = spatial.shape[-2:]
-
         spatial = self.pos_embed(spatial)
         time_embed = self.time_text_embed(timestep, pooled_projections)
         prompt_embed = self.context_embedder(prompt_embed)

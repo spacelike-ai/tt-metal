@@ -46,7 +46,7 @@ class TtPatchEmbed:
         self._proj = TtConv2d(parameters.proj, stride=(parameters.patch_size, parameters.patch_size))
         self._pos_embed = parameters.pos_embed
 
-    def __call__(self, latent: torch.Tensor) -> torch.Tensor:
+    def __call__(self, latent: ttnn.Tensor) -> ttnn.Tensor:
         latent = self._proj(latent)
 
         batch_size, c, height, width = list(latent.shape)
