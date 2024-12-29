@@ -81,7 +81,6 @@ class TtSD3Transformer2DModel:
         self._norm_out = TtLayerNorm(parameters.norm_out, eps=1e-6)
         self._proj_out = TtLinear(parameters.proj_out)
 
-        # self._out_channels = out_channels
         self._patch_size = parameters.pos_embed.patch_size
 
     def __call__(
@@ -125,3 +124,7 @@ class TtSD3Transformer2DModel:
         spatial = self._norm_out(spatial) * (1 + scale) + shift
 
         return self._proj_out(spatial)
+
+    @property
+    def patch_size(self) -> int:
+        return self._patch_size

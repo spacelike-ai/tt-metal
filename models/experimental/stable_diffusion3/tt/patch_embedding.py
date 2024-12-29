@@ -35,7 +35,7 @@ class TtPatchEmbedParameters:
 
     @property
     def patch_size(self) -> int:
-        return list(self.proj.weight.shape)[-2:]
+        return list(self.proj.weight.shape)[-1]
 
 
 class TtPatchEmbed:
@@ -43,7 +43,7 @@ class TtPatchEmbed:
         super().__init__()
 
         self._pos_embed_max_size = parameters.pos_embed_max_size
-        self._proj = TtConv2d(parameters.proj, stride=parameters.patch_size)
+        self._proj = TtConv2d(parameters.proj, stride=(parameters.patch_size, parameters.patch_size))
         self._pos_embed = parameters.pos_embed
 
     def __call__(self, latent: torch.Tensor) -> torch.Tensor:

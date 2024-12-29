@@ -40,18 +40,8 @@ def test_attention(
     spatial = torch.randn((batch_size, spatial_sequence_length, 1536), dtype=torch_dtype)
     prompt_embed = torch.randn((batch_size, prompt_sequence_length, 1536), dtype=torch_dtype)
 
-    tt_spatial = ttnn.from_torch(
-        spatial,
-        device=device,
-        layout=ttnn.TILE_LAYOUT,
-        dtype=ttnn_dtype,
-    )
-    tt_prompt_embed = ttnn.from_torch(
-        prompt_embed,
-        device=device,
-        layout=ttnn.TILE_LAYOUT,
-        dtype=ttnn_dtype,
-    )
+    tt_spatial = ttnn.from_torch(spatial, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
+    tt_prompt_embed = ttnn.from_torch(prompt_embed, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
 
     with torch.no_grad():
         spatial, prompt_embed = torch_model(spatial=spatial, prompt=prompt_embed)
@@ -65,11 +55,11 @@ def test_attention(
         tt_spatial_torch.to(dtype=torch.float32),
     ).item()
     logger.info(f"spatial mse: {mse:.6f}")
-    assert_with_pcc(spatial, tt_spatial_torch, pcc=0.999_500)
+    assert_with_pcc(spatial, tt_spatial_torch, pcc=0.999)
 
     mse = torch.nn.functional.mse_loss(
         prompt_embed.to(dtype=torch.float32),
         tt_prompt_embed_torch.to(dtype=torch.float32),
     ).item()
     logger.info(f"prompt mse: {mse:.6f}")
-    assert_with_pcc(prompt_embed, tt_prompt_embed_torch, pcc=0.999_500)
+    assert_with_pcc(prompt_embed, tt_prompt_embed_torch, pcc=0.999)

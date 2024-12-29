@@ -44,11 +44,7 @@ def test_conv2d(
 
     torch_input_tensor = torch.randn((batch_size, in_channels, height, width), dtype=dtype)
 
-    tt_input_tensor = ttnn.from_torch(
-        torch_input_tensor,
-        device=device,
-        layout=ttnn.TILE_LAYOUT,
-    )
+    tt_input_tensor = ttnn.from_torch(torch_input_tensor, device=device, layout=ttnn.TILE_LAYOUT)
 
     with torch.no_grad():
         torch_output = torch_model(torch_input_tensor)

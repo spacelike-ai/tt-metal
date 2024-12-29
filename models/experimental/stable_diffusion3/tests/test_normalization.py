@@ -74,16 +74,9 @@ def test_rms_norm(
     parameters = TtRmsNormParameters.from_torch(torch_model.state_dict(), device=device)
     tt_model = TtRmsNorm(parameters, eps=torch_model.eps)
 
-    torch_input_tensor = torch.randn(
-        (batch_size, input_dim),
-        dtype=dtype,
-    )
+    torch_input_tensor = torch.randn((batch_size, input_dim), dtype=dtype)
 
-    tt_input_tensor = ttnn.from_torch(
-        torch_input_tensor,
-        device=device,
-        layout=ttnn.TILE_LAYOUT,
-    )
+    tt_input_tensor = ttnn.from_torch(torch_input_tensor, device=device, layout=ttnn.TILE_LAYOUT)
 
     torch_output = torch_model(torch_input_tensor)
 

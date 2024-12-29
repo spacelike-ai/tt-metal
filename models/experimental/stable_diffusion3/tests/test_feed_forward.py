@@ -34,11 +34,7 @@ def test_feed_forward(
 
     torch_input_tensor = torch.randn((batch_size, input_dim), dtype=dtype)
 
-    tt_input_tensor = ttnn.from_torch(
-        torch_input_tensor,
-        device=device,
-        layout=ttnn.TILE_LAYOUT,
-    )
+    tt_input_tensor = ttnn.from_torch(torch_input_tensor, device=device, layout=ttnn.TILE_LAYOUT)
 
     with torch.no_grad():
         torch_output = torch_model(torch_input_tensor)

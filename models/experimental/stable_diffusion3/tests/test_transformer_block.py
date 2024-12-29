@@ -44,24 +44,9 @@ def test_transformer_block(
     prompt = torch.randn((batch_size, prompt_sequence_length, embedding_dim), dtype=torch_dtype)
     time = torch.randn((batch_size, embedding_dim))
 
-    tt_spatial = ttnn.from_torch(
-        spatial,
-        device=device,
-        layout=ttnn.TILE_LAYOUT,
-        dtype=ttnn_dtype,
-    )
-    tt_prompt = ttnn.from_torch(
-        prompt,
-        device=device,
-        layout=ttnn.TILE_LAYOUT,
-        dtype=ttnn_dtype,
-    )
-    tt_time = ttnn.from_torch(
-        time.unsqueeze(1),
-        device=device,
-        layout=ttnn.TILE_LAYOUT,
-        dtype=ttnn_dtype,
-    )
+    tt_spatial = ttnn.from_torch(spatial, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
+    tt_prompt = ttnn.from_torch(prompt, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
+    tt_time = ttnn.from_torch(time.unsqueeze(1), device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
 
     with torch.no_grad():
         spatial, prompt = torch_model(spatial=spatial, prompt=prompt, time_embed=time)

@@ -60,9 +60,10 @@ def test_transformer(*, device: ttnn.Device):
 
     logger.info("creating tt transformer")
     parameters = TtSD3Transformer2DModelParameters.from_torch(torch_transformer.state_dict(), device=device)
-    tt_transformer = TtSD3Transformer2DModel(parameters, num_attention_heads=torch_transformer.num_attention_heads)
+    tt_transformer = TtSD3Transformer2DModel(
+        parameters, num_attention_heads=torch_transformer.config.num_attention_heads
+    )
     num_channels_latents = torch_transformer.in_channels
-    patch_size = torch_transformer.patch_size
     logger.info("done")
 
     block_out_channels = vae.config.block_out_channels  # type: ignore  # noqa: PGH003
@@ -72,8 +73,8 @@ def test_transformer(*, device: ttnn.Device):
     vae_scale_factor = 2 ** (len(block_out_channels) - 1)
     image_processor = VaeImageProcessor(vae_scale_factor=vae_scale_factor)
 
-    assert model_input["height"] % (vae_scale_factor * patch_size) == 0
-    assert model_input["width"] % (vae_scale_factor * patch_size) == 0
+    assert model_input["height"] % (vae_scale_factor * tt_transformer.patch_size) == 0
+    assert model_input["width"] % (vae_scale_factor * tt_transformer.patch_size) == 0
     assert model_input["max_t5_sequence_length"] <= 512  # noqa: PLR2004
 
     batch_size = len(model_input["prompt_1"])
@@ -162,14 +163,9 @@ def test_transformer(*, device: ttnn.Device):
         prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
         pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
 
-    # tt_prompt_embeds = prompt_embeds.to(torch.bfloat16)
-    # timestep=timestep,
-    # encoder_hidden_states=prompt_embeds,
-    # pooled_projections=pooled_prompt_embeds,
-
     logger.info("prepare timesteps")
 
-    scheduler.set_timesteps(model_input["num_inference_steps"], device=device)
+    scheduler.set_timesteps(model_input["num_inference_steps"])
     timesteps = scheduler.timesteps
 
     logger.info("prepare latents")
@@ -177,11 +173,16 @@ def test_transformer(*, device: ttnn.Device):
     latents_shape = (
         batch_size * model_input["num_images_per_prompt"],
         num_channels_latents,
-        int(model_input["height"]) // vae_scale_factor,
-        int(model_input["width"]) // vae_scale_factor,
+        model_input["height"] // vae_scale_factor,
+        model_input["width"] // vae_scale_factor,
     )
     torch.manual_seed(model_input["seed"])
-    latents = torch.randn(latents_shape, dtype=prompt_embeds.dtype, device=device)
+    latents = torch.randn(latents_shape, dtype=prompt_embeds.dtype)
+
+    tt_prompt_embeds = ttnn.from_torch(prompt_embeds, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+    tt_pooled_prompt_embeds = ttnn.from_torch(
+        pooled_prompt_embeds, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+    )
 
     logger.info("denoising loop")
 
@@ -190,12 +191,31 @@ def test_transformer(*, device: ttnn.Device):
 
         timestep = t.expand(latent_model_input.shape[0])
 
-        noise_pred = tt_transformer.forward(
-            hidden_states=latent_model_input,
-            timestep=timestep,
-            encoder_hidden_states=prompt_embeds,
-            pooled_projections=pooled_prompt_embeds,
+        tt_latent_model_input = ttnn.from_torch(latent_model_input, device=device, dtype=ttnn.bfloat16)
+
+        tt_noise_pred = tt_transformer(
+            spatial=tt_latent_model_input,
+            prompt_embed=tt_prompt_embeds,
+            pooled_projection=tt_pooled_prompt_embeds,
+            torch_timestep=timestep,
         )
+        noise_pred = ttnn.to_torch(tt_noise_pred)
+
+        patch_count_y = latent_model_input.shape[-2] // tt_transformer.patch_size
+        patch_count_x = latent_model_input.shape[-1] // tt_transformer.patch_size
+
+        noise_pred = noise_pred.reshape(
+            (
+                noise_pred.shape[0],
+                patch_count_y,
+                patch_count_x,
+                tt_transformer.patch_size,
+                tt_transformer.patch_size,
+                -1,
+            )
+        )
+        noise_pred = torch.einsum("nhwpqc->nchpwq", noise_pred)
+        noise_pred = noise_pred.reshape(latent_model_input.shape)
 
         if do_classifier_free_guidance:
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
