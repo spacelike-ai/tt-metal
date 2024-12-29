@@ -33,6 +33,8 @@ def test_transformer(*, device: ttnn.Device):
         "seed": 1,
     }
 
+    torch.set_grad_enabled(False)
+
     logger.info("loading models")
     tokenizer_1 = CLIPTokenizer.from_pretrained(CHECKPOINT, subfolder="tokenizer")
     tokenizer_2 = CLIPTokenizer.from_pretrained(CHECKPOINT, subfolder="tokenizer_2")
