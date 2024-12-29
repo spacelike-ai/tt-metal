@@ -78,12 +78,7 @@ class _TimestepEmbedding:
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         x = self._linear_1(x)
-        # x = ttnn.silu(x) # imprecise
-        x = ttnn.from_torch(
-            torch.nn.functional.silu(ttnn.to_torch(x)),
-            device=x.device(),
-            layout=x.layout,
-        )
+        x = ttnn.silu(x)
         return self._linear_2(x)
 
 
