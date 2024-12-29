@@ -199,23 +199,14 @@ def test_transformer(*, device: ttnn.Device):
             pooled_projection=tt_pooled_prompt_embeds,
             torch_timestep=timestep,
         )
-        noise_pred = ttnn.to_torch(tt_noise_pred)
+        noise_pred = ttnn.to_torch(tt_noise_pred).to(dtype=torch.float32)
 
-        patch_count_y = latent_model_input.shape[-2] // tt_transformer.patch_size
-        patch_count_x = latent_model_input.shape[-1] // tt_transformer.patch_size
-
-        noise_pred = noise_pred.reshape(
-            (
-                noise_pred.shape[0],
-                patch_count_y,
-                patch_count_x,
-                tt_transformer.patch_size,
-                tt_transformer.patch_size,
-                -1,
-            )
+        noise_pred = _reshape_noise_pred(
+            noise_pred,
+            height=latent_model_input.shape[-2],
+            width=latent_model_input.shape[-1],
+            patch_size=tt_transformer.patch_size,
         )
-        noise_pred = torch.einsum("nhwpqc->nchpwq", noise_pred)
-        noise_pred = noise_pred.reshape(latent_model_input.shape)
 
         if do_classifier_free_guidance:
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -303,3 +294,34 @@ def _get_t5_prompt_embeds(
     # duplicate text embeddings and attention mask for each generation per prompt, using mps friendly method
     prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
     return prompt_embeds.view(prompt_count * num_images_per_prompt, seq_len, -1)
+
+
+def _reshape_noise_pred(
+    noise_pred: torch.Tensor,
+    *,
+    height: int,
+    width: int,
+    patch_size: int,
+) -> torch.Tensor:
+    patch_count_y = height // patch_size
+    patch_count_x = width // patch_size
+
+    shape1 = (
+        noise_pred.shape[0],
+        patch_count_y,
+        patch_count_x,
+        patch_size,
+        patch_size,
+        -1,
+    )
+
+    shape2 = (
+        noise_pred.shape[0],
+        -1,
+        patch_count_y * patch_size,
+        patch_count_x * patch_size,
+    )
+
+    noise_pred = noise_pred.reshape(shape1)
+    noise_pred = torch.einsum("nhwpqc->nchpwq", noise_pred)
+    return noise_pred.reshape(shape2)
