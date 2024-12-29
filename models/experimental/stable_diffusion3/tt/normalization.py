@@ -127,6 +127,12 @@ def _tilize_with_zero_padding(x: ttnn.Tensor) -> ttnn.Tensor:
     if x.dtype != ttnn.bfloat16:
         logger.warning("tilize_with_val_padding expects bfloat16 input")
 
-    padded_shape = [_increase_to_nearest_multiple(s, 32) for s in x.shape]
+    shape = list(x.shape)
+    padded_shape = [
+        *shape[:-2],
+        _increase_to_nearest_multiple(shape[-2], 32),
+        _increase_to_nearest_multiple(shape[-1], 32),
+    ]
 
-    return ttnn.tilize_with_val_padding(x, output_tensor_shape=padded_shape, pad_value=0.0)
+    result = ttnn.tilize_with_val_padding(x, output_tensor_shape=padded_shape, pad_value=0.0)
+    return ttnn.reshape(result, ttnn.Shape(shape, padded_shape))
