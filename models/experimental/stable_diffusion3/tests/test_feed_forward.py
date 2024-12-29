@@ -24,13 +24,15 @@ def test_feed_forward(
     output_dim: int,
     approximate: str,
 ):
-    torch_model = FeedForward(dim=input_dim, dim_out=output_dim, approximate=approximate)
+    dtype = torch.bfloat16
+
+    torch_model = FeedForward(dim=input_dim, dim_out=output_dim, approximate=approximate).to(dtype=dtype)
     torch_model.eval()
 
     parameters = TtFeedForwardParameters.from_torch(torch_model.state_dict(), device=device)
     tt_model = TtFeedForward(parameters, approximate=approximate)
 
-    torch_input_tensor = torch.randn((batch_size, input_dim))
+    torch_input_tensor = torch.randn((batch_size, input_dim), dtype=dtype)
 
     tt_input_tensor = ttnn.from_torch(
         torch_input_tensor,
@@ -49,4 +51,4 @@ def test_feed_forward(
         tt_output_torch.to(dtype=torch.float32),
     ).item()
     logger.info(f"mse: {mse:.6f}")
-    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_999_500)
+    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_950)

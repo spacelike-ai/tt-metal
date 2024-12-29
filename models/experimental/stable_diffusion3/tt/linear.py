@@ -86,7 +86,7 @@ class TtLinear:
             )
         except Exception:
             logger.warning("fallback linear operation")
-            result = ttnn.to_torch(x) @ ttnn.to_torch(self._weight)
+            result = ttnn.to_torch(x).to(torch.float32) @ ttnn.to_torch(self._weight).to(torch.float32)
             if self._bias is not None:
-                result += ttnn.to_torch(self._bias)
+                result += ttnn.to_torch(self._bias).to(torch.float32)
             return ttnn.from_torch(result, device=x.device(), layout=ttnn.TILE_LAYOUT, dtype=x.dtype)

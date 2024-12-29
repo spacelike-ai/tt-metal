@@ -71,10 +71,14 @@ class TtRmsNorm:
         self._weight = parameters.weight
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        x32 = ttnn.clone(x, dtype=ttnn.float32)
-        variance = ttnn.mean(ttnn.pow(x32, 2), -1, keepdim=True)
+        variance = ttnn.mean(ttnn.pow(x, 2), -1, keepdim=True)
         x *= ttnn.rsqrt(variance + self._eps)
-        return ttnn.clone(x, dtype=x.dtype) * self._weight
+        return x * self._weight
+
+        # x32 = ttnn.clone(x, dtype=ttnn.float32)
+        # variance = ttnn.mean(ttnn.pow(x32, 2), -1, keepdim=True)
+        # x *= ttnn.rsqrt(variance + self._eps)
+        # return ttnn.clone(x, dtype=x.dtype) * self._weight
 
         # torch_x = ttnn.to_torch(x)
         # dtype = torch_x.dtype

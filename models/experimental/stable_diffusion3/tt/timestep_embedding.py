@@ -62,7 +62,9 @@ class TtCombinedTimestepTextProjEmbeddings:
 
     def __call__(self, *, torch_timestep: torch.Tensor, pooled_projection: ttnn.Tensor) -> ttnn.Tensor:
         torch_timesteps_proj = _time_proj(num_channels=256, timesteps=torch_timestep)
-        timesteps_proj = ttnn.from_torch(torch_timesteps_proj, device=pooled_projection.device())
+        timesteps_proj = ttnn.from_torch(
+            torch_timesteps_proj, device=pooled_projection.device(), dtype=pooled_projection.dtype
+        )
 
         return self._timestep_embedder(timesteps_proj) + self._text_embedder(pooled_projection)
 

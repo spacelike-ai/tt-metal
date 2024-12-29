@@ -17,8 +17,6 @@ CHECKPOINT = "stabilityai/stable-diffusion-3.5-medium"
 
 
 def test_transformer(*, device: ttnn.Device):
-    dtype = torch.bfloat16
-
     model_input = {
         "prompt_1": ["cat"],
         "prompt_2": ["cat"],
@@ -39,17 +37,15 @@ def test_transformer(*, device: ttnn.Device):
     tokenizer_1 = CLIPTokenizer.from_pretrained(CHECKPOINT, subfolder="tokenizer")
     tokenizer_2 = CLIPTokenizer.from_pretrained(CHECKPOINT, subfolder="tokenizer_2")
     tokenizer_3 = T5TokenizerFast.from_pretrained(CHECKPOINT, subfolder="tokenizer_3")
-    text_encoder_1 = CLIPTextModelWithProjection.from_pretrained(
-        CHECKPOINT, subfolder="text_encoder", torch_dtype=dtype
-    )
-    text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
-        CHECKPOINT, subfolder="text_encoder_2", torch_dtype=dtype
-    )
-    text_encoder_3 = T5EncoderModel.from_pretrained(CHECKPOINT, subfolder="text_encoder_3", torch_dtype=dtype)
-    scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(CHECKPOINT, subfolder="scheduler", torch_dtype=dtype)
-    vae = AutoencoderKL.from_pretrained(CHECKPOINT, subfolder="vae", torch_dtype=dtype)
+    text_encoder_1 = CLIPTextModelWithProjection.from_pretrained(CHECKPOINT, subfolder="text_encoder")
+    text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(CHECKPOINT, subfolder="text_encoder_2")
+    text_encoder_3 = T5EncoderModel.from_pretrained(CHECKPOINT, subfolder="text_encoder_3")
+    scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(CHECKPOINT, subfolder="scheduler")
+    vae = AutoencoderKL.from_pretrained(CHECKPOINT, subfolder="vae")
     logger.info("loading transformer")
-    torch_transformer = SD3Transformer2DModel.from_pretrained(CHECKPOINT, subfolder="transformer", torch_dtype=dtype)
+    torch_transformer = SD3Transformer2DModel.from_pretrained(
+        CHECKPOINT, subfolder="transformer", torch_dtype=torch.bfloat16
+    )
     logger.info("loading done")
 
     assert isinstance(torch_transformer, SD3Transformer2DModel)
@@ -165,6 +161,11 @@ def test_transformer(*, device: ttnn.Device):
 
         prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
         pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
+
+    # tt_prompt_embeds = prompt_embeds.to(torch.bfloat16)
+    # timestep=timestep,
+    # encoder_hidden_states=prompt_embeds,
+    # pooled_projections=pooled_prompt_embeds,
 
     logger.info("prepare timesteps")
 

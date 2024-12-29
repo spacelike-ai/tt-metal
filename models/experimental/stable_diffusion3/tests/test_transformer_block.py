@@ -25,25 +25,43 @@ def test_transformer_block(
     spatial_sequence_length: int,
     prompt_sequence_length: int,
 ):
+    torch_dtype = torch.float32
+    ttnn_dtype = ttnn.bfloat16
+
     parent_torch_model = SD3Transformer2DModel.from_pretrained(
-        "stabilityai/stable-diffusion-3.5-medium", subfolder="transformer"
+        "stabilityai/stable-diffusion-3.5-medium", subfolder="transformer", torch_dtype=torch_dtype
     )
     torch_model: TransformerBlock = parent_torch_model.transformer_blocks[block_index]
     torch_model.eval()
 
-    parameters = TtTransformerBlockParameters.from_torch(torch_model.state_dict(), device=device)
+    parameters = TtTransformerBlockParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn_dtype)
     tt_model = TtTransformerBlock(parameters, num_heads=torch_model.num_heads)
 
     embedding_dim = 1536
 
     torch.manual_seed(0)
-    spatial = torch.randn((batch_size, spatial_sequence_length, embedding_dim))
-    prompt = torch.randn((batch_size, prompt_sequence_length, embedding_dim))
+    spatial = torch.randn((batch_size, spatial_sequence_length, embedding_dim), dtype=torch_dtype)
+    prompt = torch.randn((batch_size, prompt_sequence_length, embedding_dim), dtype=torch_dtype)
     time = torch.randn((batch_size, embedding_dim))
 
-    tt_spatial = ttnn.from_torch(spatial, device=device, layout=ttnn.TILE_LAYOUT)
-    tt_prompt = ttnn.from_torch(prompt, device=device, layout=ttnn.TILE_LAYOUT)
-    tt_time = ttnn.from_torch(time.unsqueeze(1), device=device, layout=ttnn.TILE_LAYOUT)
+    tt_spatial = ttnn.from_torch(
+        spatial,
+        device=device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn_dtype,
+    )
+    tt_prompt = ttnn.from_torch(
+        prompt,
+        device=device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn_dtype,
+    )
+    tt_time = ttnn.from_torch(
+        time.unsqueeze(1),
+        device=device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn_dtype,
+    )
 
     with torch.no_grad():
         spatial, prompt = torch_model(spatial=spatial, prompt=prompt, time_embed=time)

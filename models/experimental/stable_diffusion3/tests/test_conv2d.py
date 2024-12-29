@@ -28,19 +28,21 @@ def test_conv2d(
     height: int,
     width: int,
 ):
+    dtype = torch.bfloat16
+
     torch_model = torch.nn.Conv2d(
         in_channels=in_channels,
         out_channels=out_channels,
         kernel_size=kernel_size,
         stride=stride,
-        dtype=torch.bfloat16,
+        dtype=dtype,
     )
     torch_model.eval()
 
     parameters = TtConv2dParameters.from_torch(torch_model.state_dict(), device=device)
     tt_model = TtConv2d(parameters, stride=stride)
 
-    torch_input_tensor = torch.randn((batch_size, in_channels, height, width), dtype=torch.bfloat16)
+    torch_input_tensor = torch.randn((batch_size, in_channels, height, width), dtype=dtype)
 
     tt_input_tensor = ttnn.from_torch(
         torch_input_tensor,
