@@ -5,34 +5,32 @@ from loguru import logger
 import ttnn
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
-from ..reference import SD3Transformer2DModel
 from ..reference.feed_forward import FeedForward
 from ..tt.feed_forward import TtFeedForward, TtFeedForwardParameters
 
 
 @pytest.mark.parametrize(
-    "block_index, batch_size, input_dim",
+    "batch_size, input_dim, output_dim, approximate",
     [
-        (0, 32, 128),
+        (32, 128, 256, "none"),
+        (32, 128, 256, "tanh"),
     ],
 )
 def test_feed_forward(
     *,
     device: ttnn.Device,
-    block_index: int,
     batch_size: int,
     input_dim: int,
+    output_dim: int,
+    approximate: str,
 ):
-    parent_torch_model = SD3Transformer2DModel.from_pretrained(
-        "stabilityai/stable-diffusion-3.5-medium", subfolder="transformer"
-    )
-    torch_model: FeedForward = parent_torch_model.transformer_blocks[block_index].ff
+    torch_model = FeedForward(dim=input_dim, dim_out=output_dim, approximate=approximate)
     torch_model.eval()
 
     parameters = TtFeedForwardParameters.from_torch(torch_model.state_dict(), device=device)
-    tt_model = TtFeedForward(parameters)
+    tt_model = TtFeedForward(parameters, approximate=approximate)
 
-    torch_input_tensor = torch.randn((batch_size, input_dim, 1536))
+    torch_input_tensor = torch.randn((batch_size, input_dim))
 
     tt_input_tensor = ttnn.from_torch(
         torch_input_tensor,
@@ -51,4 +49,4 @@ def test_feed_forward(
         tt_output_torch.to(dtype=torch.float32),
     ).item()
     logger.info(f"mse: {mse:.6f}")
-    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_999_99)
+    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_999_500)

@@ -4,6 +4,7 @@ import itertools
 from dataclasses import dataclass
 
 import torch
+from loguru import logger
 
 import ttnn
 from models.experimental.stable_diffusion3.tt.linear import TtLinear, TtLinearParameters
@@ -106,7 +107,8 @@ class TtSD3Transformer2DModel:
         # time_embed = time_embed.reshape([time_embed.shape[0], 1, time_embed.shape[1]])
         # time_embed = ttnn.tilize(time_embed)
 
-        for block in self._transformer_blocks:
+        for i, block in enumerate(self._transformer_blocks):
+            logger.info(f"running transformer block {i}...")
             spatial, prompt_embed = block(
                 spatial=spatial,
                 prompt=prompt_embed,
