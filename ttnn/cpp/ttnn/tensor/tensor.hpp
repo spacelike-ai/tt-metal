@@ -15,6 +15,7 @@
 #include "common/bfloat8.hpp"
 #include "common/test_tiles.hpp"
 #include "common/tt_backend_api_types.hpp"
+#include "ttnn/any_device.hpp"
 #include "ttnn/common/constants.hpp"
 #include "ttnn/distributed/distributed_tensor_config.hpp"
 #include "ttnn/tensor/types.hpp"
@@ -131,13 +132,40 @@ struct Tensor {
 
     void perform_cleanup_for_async_mode();
 
-    void deepcopy(const Tensor& other);
-
     void populate_buffers_and_metadata(const Tensor& other);
 
     void deallocate(bool force = false);
 
     std::vector<Device*> get_workers(bool blocking = false) const;
+
+    // Converts a buffer of elements of type `T` to a `Tensor`.
+    // Elements in the buffer are assumed to be stored in row-major order. The size of the buffer and the type of the
+    // elements have to match `spec`; block float formats such as BFLOAT8_B and BFLOAT4_B require `T` equal `float`.
+    //
+    // The data in the buffer is copied into a tensor with an owned storage.
+    //
+    // TODO: add support for returning a tensor with borrowed storage based off the buffer.
+    // TODO: handle tilization and padding in face of sharding.
+    template <typename T>
+    static Tensor from_span(
+        tt::stl::Span<const T> buffer, const TensorSpec& spec, std::optional<ttnn::AnyDevice> device = std::nullopt);
+
+    // Same as `from_span`, but takes a vector instead.
+    template <typename T>
+    static Tensor from_vector(
+        const std::vector<T>& buffer, const TensorSpec& spec, std::optional<ttnn::AnyDevice> device = std::nullopt) {
+        return from_span(tt::stl::Span<const T>(buffer.data(), buffer.size()), spec, device);
+    }
+
+    // Converts a `Tensor` to a `std::vector<T>`.
+    // Elements in the vector will be stored in row-major order. The type of the requested vector has to match that of
+    // the `Tensor`; block float formats such as BFLOAT8_B and BFLOAT4_B require `T` equal `float`.
+    //
+    // If the tensor resides on a device, it will be brough back to host.
+    //
+    // TODO: handle tilization and padding in face of sharding.
+    template <typename T>
+    std::vector<T> to_vector() const;
 
     Tensor to(
         Device* target_device,
@@ -170,8 +198,6 @@ struct Tensor {
         bool blocking = true,
         uint8_t cq_id = ttnn::DefaultQueueId,
         const std::vector<SubDeviceId>& sub_device_ids = {}) const;
-
-    Tensor cpu_sharded() const;
 
     Tensor unpad(const ttnn::SimpleShape& output_tensor_start, const ttnn::SimpleShape& output_tensor_end) const;
 
