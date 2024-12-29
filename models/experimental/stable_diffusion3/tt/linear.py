@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+from loguru import logger
 
 import ttnn
 
@@ -84,6 +85,7 @@ class TtLinear:
                 dtype=self._output_dtype,
             )
         except Exception:
+            logger.warning("fallback linear operation")
             result = ttnn.to_torch(x) @ ttnn.to_torch(self._weight)
             if self._bias is not None:
                 result += ttnn.to_torch(self._bias)
