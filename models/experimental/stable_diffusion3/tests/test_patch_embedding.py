@@ -34,7 +34,7 @@ def test_patch_embedding(
 
     torch_input_tensor = torch.randn((batch_size, 16, 64, 64), dtype=dtype)
 
-    tt_input_tensor = ttnn.from_torch(torch_input_tensor, device=device)
+    tt_input_tensor = ttnn.from_torch(torch_input_tensor, device=device, layout=ttnn.TILE_LAYOUT)
 
     torch_output = torch_model(torch_input_tensor)
 

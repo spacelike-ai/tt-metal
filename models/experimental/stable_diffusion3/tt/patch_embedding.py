@@ -51,26 +51,17 @@ class TtPatchEmbed:
 
         batch_size, c, height, width = list(latent.shape)
 
-        assert latent.layout == ttnn.ROW_MAJOR_LAYOUT
+        latent = ttnn.untilize(latent)
         latent = latent.reshape([batch_size, c, height * width])
 
+        # TODO: this gives the wrong result
         # latent = ttnn.transpose(latent, 1, 2)
-        latent = ttnn.from_torch(ttnn.to_torch(latent).transpose(1, 2), device=latent.device())
+        # latent = ttnn.tilize(latent)
+        latent = ttnn.from_torch(ttnn.to_torch(latent).transpose(1, 2), device=latent.device(), layout=ttnn.TILE_LAYOUT)
 
         pos_embed = self._cropped_pos_embed(height, width)
+        pos_embed = ttnn.tilize(pos_embed)
 
-        latent = ttnn.from_torch(
-            ttnn.to_torch(latent),
-            device=latent.device(),
-            layout=ttnn.TILE_LAYOUT,
-        )
-        pos_embed = ttnn.from_torch(
-            ttnn.to_torch(pos_embed),
-            device=pos_embed.device(),
-            layout=ttnn.TILE_LAYOUT,
-        )
-        # latent = ttnn.tilize(latent)  # imprecise
-        # pos_embed = ttnn.tilize(pos_embed)  # imprecise
         return latent + pos_embed
 
     def _cropped_pos_embed(self, height: int, width: int) -> ttnn.Tensor:

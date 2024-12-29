@@ -38,7 +38,7 @@ def test_transformer(
     pooled_projection = torch.randn((batch_size, 2048), dtype=torch_dtype)
     timestep = torch.randn(batch_size, dtype=torch_dtype)
 
-    tt_spatial = ttnn.from_torch(spatial, device=device, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn_dtype)
+    tt_spatial = ttnn.from_torch(spatial, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
     tt_prompt_embed = ttnn.from_torch(prompt_embed, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
 
     tt_pooled_projection = ttnn.from_torch(pooled_projection, device=device, dtype=ttnn_dtype)
