@@ -81,44 +81,18 @@ class SD3Transformer2DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         time_embed = self.time_text_embed(timestep, pooled_projections)
         prompt_embed = self.context_embedder(prompt_embed)
 
-        for block in self.transformer_blocks[0:1]:
+        for block in self.transformer_blocks:
             spatial, prompt_embed = block(
                 spatial=spatial,
                 prompt=prompt_embed,
                 time_embed=time_embed,
             )
-            return prompt_embed
 
-        time_embed = self.norm_out.linear(torch.nn.functional.silu(time_embed))
-        scale, shift = torch.chunk(time_embed, 2, dim=1)
-        spatial = self.norm_out.norm(spatial) * (1 + scale)[:, None, :] + shift[:, None, :]
+        spatial_time = self.norm_out.linear(torch.nn.functional.silu(time_embed.unsqueeze(1)))
+        scale, shift = torch.chunk(spatial_time, 2, dim=-1)
+        spatial = self.norm_out.norm(spatial) * (1 + scale) + shift
 
-        spatial = self.proj_out(spatial)
-
-        patch_count_y = height // self._patch_size
-        patch_count_x = width // self._patch_size
-
-        spatial = spatial.reshape(
-            shape=(
-                spatial.shape[0],
-                patch_count_y,
-                patch_count_x,
-                self._patch_size,
-                self._patch_size,
-                self._out_channels,
-            )
-        )
-
-        spatial = torch.einsum("nhwpqc->nchpwq", spatial)
-
-        return spatial.reshape(
-            shape=(
-                spatial.shape[0],
-                self._out_channels,
-                patch_count_y * self._patch_size,
-                patch_count_x * self._patch_size,
-            )
-        )
+        return self.proj_out(spatial)
 
     @property
     def in_channels(self) -> int:

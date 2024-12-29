@@ -189,7 +189,7 @@ class TtTransformerBlock:
         return result
 
     def __call__(
-        self, spatial: ttnn.Tensor, prompt: ttnn.Tensor, time_embed: ttnn.Tensor
+        self, *, spatial: ttnn.Tensor, prompt: ttnn.Tensor, time_embed: ttnn.Tensor
     ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
         t = ttnn.silu(time_embed)
         spatial_time = self._spatial_time_embed(t)

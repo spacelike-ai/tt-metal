@@ -21,6 +21,7 @@ class TtSD3Transformer2DModelParameters:
     time_text_embed: TtCombinedTimestepTextProjEmbeddingsParameters
     context_embedder: TtLinearParameters
     transformer_blocks: list[TtTransformerBlockParameters]
+    time_embed_out: TtLinearParameters
     norm_out: TtLayerNormParameters
     proj_out: TtLinearParameters
 
@@ -42,9 +43,6 @@ class TtSD3Transformer2DModelParameters:
                 TtTransformerBlockParameters.from_torch(substate(state, key), dtype=dtype, device=device)
             )
 
-            if i == 2:
-                break  # TODO: remove
-
         return cls(
             pos_embed=TtPatchEmbedParameters.from_torch(substate(state, "pos_embed"), dtype=dtype, device=device),
             time_text_embed=TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(
@@ -54,7 +52,10 @@ class TtSD3Transformer2DModelParameters:
                 substate(state, "context_embedder"), dtype=dtype, device=device
             ),
             transformer_blocks=transformer_blocks,
-            norm_out=TtLayerNormParameters.from_torch(substate(state, "norm_out"), dtype=dtype, device=device),
+            time_embed_out=TtLinearParameters.from_torch(
+                substate(state, "norm_out.linear"), dtype=dtype, device=device
+            ),
+            norm_out=TtLayerNormParameters.from_torch(substate(state, "norm_out.norm"), dtype=dtype, device=device),
             proj_out=TtLinearParameters.from_torch(substate(state, "proj_out"), dtype=dtype, device=device),
         )
 
@@ -75,6 +76,7 @@ class TtSD3Transformer2DModel:
         self._transformer_blocks = [
             TtTransformerBlock(block, num_heads=num_attention_heads) for block in parameters.transformer_blocks
         ]
+        self._time_embed_out = TtLinear(parameters.time_embed_out)
         self._norm_out = TtLayerNorm(parameters.norm_out, eps=1e-6)
         self._proj_out = TtLinear(parameters.proj_out)
 
@@ -104,41 +106,20 @@ class TtSD3Transformer2DModel:
         # time_embed = time_embed.reshape([time_embed.shape[0], 1, time_embed.shape[1]])
         # time_embed = ttnn.tilize(time_embed)
 
-        for block in self._transformer_blocks[0:1]:  # TODO: remove range
+        for block in self._transformer_blocks:
             spatial, prompt_embed = block(
                 spatial=spatial,
                 prompt=prompt_embed,
                 time_embed=time_embed,
             )
-            return prompt_embed
 
-        time_embed = self._norm_out.linear(torch.nn.functional.silu(time_embed))
-        scale, shift = torch.chunk(time_embed, 2, dim=1)
-        spatial = self._norm_out.norm(spatial) * (1 + scale)[:, None, :] + shift[:, None, :]
+        spatial_time = self._time_embed_out(ttnn.silu(time_embed))
 
-        spatial = self._proj_out(spatial)
+        torch_spatial_time = ttnn.to_torch(spatial_time)
+        (torch_scale, torch_shift) = torch_spatial_time.chunk(2, dim=-1)
+        scale = ttnn.from_torch(torch_scale, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+        shift = ttnn.from_torch(torch_shift, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
 
-        patch_count_y = height // self._patch_size[0]
-        patch_count_x = width // self._patch_size[1]
+        spatial = self._norm_out(spatial) * (1 + scale) + shift
 
-        spatial = spatial.reshape(
-            shape=(
-                spatial.shape[0],
-                patch_count_y,
-                patch_count_x,
-                self._patch_size[0],
-                self._patch_size[1],
-                self._out_channels,
-            )
-        )
-
-        spatial = torch.einsum("nhwpqc->nchpwq", spatial)
-
-        return spatial.reshape(
-            shape=(
-                spatial.shape[0],
-                self._out_channels,
-                patch_count_y * self._patch_size,
-                patch_count_x * self._patch_size,
-            )
-        )
+        return self._proj_out(spatial)
