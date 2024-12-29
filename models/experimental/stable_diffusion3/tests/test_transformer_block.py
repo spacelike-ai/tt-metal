@@ -14,7 +14,7 @@ from ..tt.transformer_block import TtTransformerBlock, TtTransformerBlockParamet
     "block_index, batch_size, spatial_sequence_length, prompt_sequence_length",
     [
         (0, 2, 1024, 333),
-        # (23, 2, 1024, 333),
+        (23, 2, 1024, 333),
     ],
 )
 def test_transformer_block(

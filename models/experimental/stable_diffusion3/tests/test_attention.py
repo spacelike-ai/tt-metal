@@ -14,6 +14,7 @@ from ..tt.attention import TtAttention, TtAttentionParameters
     "block_index, batch_size, spatial_sequence_length, prompt_sequence_length",
     [
         (0, 4, 1024, 333),
+        (23, 4, 1024, 333),
     ],
 )
 def test_attention(

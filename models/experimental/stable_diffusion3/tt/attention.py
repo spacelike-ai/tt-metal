@@ -167,11 +167,8 @@ class TtAttention:
         ttnn.deallocate(attn)
 
         if prompt is not None:
-            torch_concatenated_attn = ttnn.to_torch(concatenated_attn)
-            torch_spatial = torch_concatenated_attn[:, :spatial_sequence_length]
-            torch_prompt = torch_concatenated_attn[:, spatial_sequence_length:]
-            spatial = ttnn.from_torch(torch_spatial, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-            prompt = ttnn.from_torch(torch_prompt, device=prompt.device(), layout=ttnn.TILE_LAYOUT)
+            spatial = concatenated_attn[:, :spatial_sequence_length]
+            prompt = concatenated_attn[:, spatial_sequence_length:]
 
             if self._prompt_attn.out_proj is not None:
                 prompt = self._prompt_attn.out_proj(prompt)
@@ -182,12 +179,3 @@ class TtAttention:
             spatial = self._spatial_attn.out_proj(spatial)
 
         return spatial, prompt
-
-
-# def _concat(tensors: list[ttnn.Tensor], dim: int) -> ttnn.Tensor:
-#     shape = list(tensors[0].shape)
-#     for t in tensors[1:]:
-#         shape[dim] += t.shape[dim]
-
-#     result = ttnn.concat(tensors, dim=dim)
-#     return ttnn.reshape(result, ttnn.Shape(shape, result.shape.with_tile_padding()))
