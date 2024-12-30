@@ -322,6 +322,7 @@ class TtTransformerBlock:
 
 
 def chunk_time(t: ttnn.Tensor, count: int) -> list[ttnn.Tensor]:
+    # TODO: the ttnn implementation does not give the correct result
     torch_chunks = ttnn.to_torch(t).chunk(count, dim=-1)
     return [ttnn.from_torch(x, device=t.device(), layout=ttnn.TILE_LAYOUT) for x in torch_chunks]
 

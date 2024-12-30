@@ -7,6 +7,7 @@ import torch
 
 import ttnn
 
+from . import utils
 from .conv2d import TtConv2d, TtConv2dParameters
 from .substate import substate
 
@@ -51,16 +52,13 @@ class TtPatchEmbed:
 
         batch_size, c, height, width = list(latent.shape)
 
-        latent = ttnn.untilize(latent)
-        latent = latent.reshape([batch_size, c, height * width])
-
-        # TODO: this gives the wrong result
-        # latent = ttnn.transpose(latent, 1, 2)
-        # latent = ttnn.tilize(latent)
-        latent = ttnn.from_torch(ttnn.to_torch(latent).transpose(1, 2), device=latent.device(), layout=ttnn.TILE_LAYOUT)
+        latent = utils.untilize(latent)
+        latent = ttnn.reshape(latent, [batch_size, c, height * width])
+        latent = ttnn.transpose(latent, 1, 2)
+        latent = utils.tilize(latent)
 
         pos_embed = self._cropped_pos_embed(height, width)
-        pos_embed = ttnn.tilize(pos_embed)
+        pos_embed = utils.tilize(pos_embed)
 
         return latent + pos_embed
 
