@@ -139,6 +139,7 @@ class TtTransformerBlock:
         # prompt_scaled = ttnn.from_torch(torch.load("prompt_scaled.pt"), device=prompt.device(), layout=ttnn.TILE_LAYOUT)
         spatial_attn, prompt_attn = self._dual_attn(spatial=spatial_scaled, prompt=prompt_scaled)
 
+        # TODO
         spatial_attn_scaled = ttnn.from_torch(
             ttnn.to_torch(spatial_gate) * ttnn.to_torch(spatial_attn),
             device=spatial.device(),
@@ -196,106 +197,51 @@ class TtTransformerBlock:
         prompt_time = self._prompt_time_embed(t)
         ttnn.deallocate(t)
 
-        torch_spatial_time = ttnn.to_torch(spatial_time)
-        torch_prompt_time = ttnn.to_torch(prompt_time)
-        ttnn.deallocate(spatial_time)
-        ttnn.deallocate(prompt_time)
-
         if self._spatial_attn is not None:
-            (
-                torch_spatial_shift_dual_attn,
-                torch_spatial_scale_dual_attn,
-                torch_spatial_gate_dual_attn,
-                torch_spatial_shift_ff,
-                torch_spatial_scale_ff,
-                torch_spatial_gate_ff,
-                torch_spatial_shift_attn,
-                torch_spatial_scale_attn,
-                torch_spatial_gate_attn,
-            ) = torch_spatial_time.chunk(9, dim=-1)
-
-            spatial_shift_dual_attn = ttnn.from_torch(
-                torch_spatial_shift_dual_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
-            )
-            spatial_scale_dual_attn = ttnn.from_torch(
-                torch_spatial_scale_dual_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
-            )
-            spatial_gate_dual_attn = ttnn.from_torch(
-                torch_spatial_gate_dual_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
-            )
-            spatial_shift_ff = ttnn.from_torch(torch_spatial_shift_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-            spatial_scale_ff = ttnn.from_torch(torch_spatial_scale_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-            spatial_gate_ff = ttnn.from_torch(torch_spatial_gate_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-            spatial_shift_attn = ttnn.from_torch(
-                torch_spatial_shift_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
-            )
-            spatial_scale_attn = ttnn.from_torch(
-                torch_spatial_scale_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
-            )
-            spatial_gate_attn = ttnn.from_torch(
-                torch_spatial_gate_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
-            )
+            [
+                spatial_shift_dual_attn,
+                spatial_scale_dual_attn,
+                spatial_gate_dual_attn,
+                spatial_shift_ff,
+                spatial_scale_ff,
+                spatial_gate_ff,
+                spatial_shift_attn,
+                spatial_scale_attn,
+                spatial_gate_attn,
+            ] = _chunk(spatial_time, 9)
         else:
-            (
-                torch_spatial_shift_dual_attn,
-                torch_spatial_scale_dual_attn,
-                torch_spatial_gate_dual_attn,
-                torch_spatial_shift_ff,
-                torch_spatial_scale_ff,
-                torch_spatial_gate_ff,
-            ) = torch_spatial_time.chunk(6, dim=-1)
-
-            spatial_shift_dual_attn = ttnn.from_torch(
-                torch_spatial_shift_dual_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
-            )
-            spatial_scale_dual_attn = ttnn.from_torch(
-                torch_spatial_scale_dual_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
-            )
-            spatial_gate_dual_attn = ttnn.from_torch(
-                torch_spatial_gate_dual_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
-            )
-            spatial_shift_ff = ttnn.from_torch(torch_spatial_shift_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-            spatial_scale_ff = ttnn.from_torch(torch_spatial_scale_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-            spatial_gate_ff = ttnn.from_torch(torch_spatial_gate_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+            [
+                spatial_shift_dual_attn,
+                spatial_scale_dual_attn,
+                spatial_gate_dual_attn,
+                spatial_shift_ff,
+                spatial_scale_ff,
+                spatial_gate_ff,
+            ] = _chunk(spatial_time, 6)
 
             spatial_gate_attn = None
             spatial_shift_attn = None
             spatial_scale_attn = None
 
         if self._context_pre_only:
+            [
+                prompt_scale_attn,
+                prompt_shift_attn,
+            ] = _chunk(prompt_time, 2)
+
             prompt_gate_attn = None
             prompt_shift_ff = None
             prompt_scale_ff = None
             prompt_gate_ff = None
-
-            torch_prompt_scale_attn, torch_prompt_shift_attn = torch.chunk(torch_prompt_time, 2, dim=-1)
-
-            prompt_scale_attn = ttnn.from_torch(
-                torch_prompt_scale_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
-            )
-            prompt_shift_attn = ttnn.from_torch(
-                torch_prompt_shift_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
-            )
         else:
-            (
-                torch_prompt_shift_attn,
-                torch_prompt_scale_attn,
-                torch_prompt_gate_attn,
-                torch_prompt_shift_ff,
-                torch_prompt_scale_ff,
-                torch_prompt_gate_ff,
-            ) = torch_prompt_time.chunk(6, dim=-1)
-
-            prompt_shift_attn = ttnn.from_torch(
-                torch_prompt_shift_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
-            )
-            prompt_scale_attn = ttnn.from_torch(
-                torch_prompt_scale_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT
-            )
-            prompt_gate_attn = ttnn.from_torch(torch_prompt_gate_attn, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-            prompt_shift_ff = ttnn.from_torch(torch_prompt_shift_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-            prompt_scale_ff = ttnn.from_torch(torch_prompt_scale_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-            prompt_gate_ff = ttnn.from_torch(torch_prompt_gate_ff, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
+            [
+                prompt_shift_attn,
+                prompt_scale_attn,
+                prompt_gate_attn,
+                prompt_shift_ff,
+                prompt_scale_ff,
+                prompt_gate_ff,
+            ] = _chunk(prompt_time, 6)
 
         spatial_normed = self._spatial_norm_1(spatial)
         prompt_normed = self._prompt_norm_1(prompt)
@@ -373,3 +319,19 @@ class TtTransformerBlock:
         ttnn.deallocate(prompt_shift_ff)
 
         return spatial, prompt
+
+
+def _chunk(t: ttnn.Tensor, count: int) -> list[ttnn.Tensor]:
+    torch_chunks = ttnn.to_torch(t).chunk(count, dim=-1)
+    return [ttnn.from_torch(x, device=t.device(), layout=ttnn.TILE_LAYOUT) for x in torch_chunks]
+
+    # s = t.shape
+    # batch_size = s[0]
+
+    # t = ttnn.untilize(t)
+    # t = ttnn.reshape(t, [s[0], s[1], count, s[2] // count])
+    # t = ttnn.permute(t, [2, 0, 1, 3])
+    # t = ttnn.reshape(t, [count * s[0], s[1], s[2] // count])
+    # t = ttnn.tilize(t)
+
+    # return [t[i * batch_size : (i + 1) * batch_size] for i in range(count)]
