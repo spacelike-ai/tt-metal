@@ -38,11 +38,11 @@ class TtConv2dParameters:
             if "bias" in state
             else None,
         )
- 
+
     @property
     def in_channels(self) -> int:
         return self.weight.shape[1]
- 
+
     @property
     def out_channels(self) -> int:
         return self.weight.shape[0]
@@ -72,11 +72,11 @@ class TtConv2d:
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         torch_result = torch.nn.functional.conv2d(
-            ttnn.to_torch(x),
+            ttnn.to_torch(x).permute([0, 3, 1, 2]),
             ttnn.to_torch(self._weight),
             bias=ttnn.to_torch(self._bias).squeeze(0) if self._bias is not None else None,
             stride=self._stride,
-        )
+        ).permute([0, 2, 3, 1])
         return ttnn.from_torch(torch_result, device=x.device(), layout=x.layout, dtype=x.dtype)
 
         # input_shape = x.shape

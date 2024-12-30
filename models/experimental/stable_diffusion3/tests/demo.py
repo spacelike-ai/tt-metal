@@ -194,7 +194,10 @@ def test_transformer(*, device: ttnn.Device):
         timestep = t.expand(latent_model_input.shape[0])
 
         tt_latent_model_input = ttnn.from_torch(
-            latent_model_input, layout=ttnn.TILE_LAYOUT, device=device, dtype=ttnn.bfloat16
+            latent_model_input.permute([0, 2, 3, 1]),  # BCYX -> BYXC
+            layout=ttnn.TILE_LAYOUT,
+            device=device,
+            dtype=ttnn.bfloat16,
         )
 
         tt_noise_pred = tt_transformer(

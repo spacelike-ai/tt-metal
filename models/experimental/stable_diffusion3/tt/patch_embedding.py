@@ -50,12 +50,10 @@ class TtPatchEmbed:
     def __call__(self, latent: ttnn.Tensor) -> ttnn.Tensor:
         latent = self._proj(latent)
 
-        batch_size, c, height, width = list(latent.shape)
+        assert list(latent.shape) == list(latent.shape.with_tile_padding())
 
-        latent = utils.untilize(latent)
-        latent = ttnn.reshape(latent, [batch_size, c, height * width])
-        latent = ttnn.transpose(latent, 1, 2)
-        latent = utils.tilize(latent)
+        batch_size, height, width, c = list(latent.shape)
+        latent = ttnn.reshape(latent, [batch_size, height * width, c])
 
         pos_embed = self._cropped_pos_embed(height, width)
         pos_embed = utils.tilize(pos_embed)

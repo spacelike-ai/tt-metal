@@ -44,13 +44,17 @@ def test_conv2d(
 
     torch_input_tensor = torch.randn((batch_size, in_channels, height, width), dtype=dtype)
 
-    tt_input_tensor = ttnn.from_torch(torch_input_tensor, device=device, layout=ttnn.TILE_LAYOUT)
+    tt_input_tensor = ttnn.from_torch(
+        torch_input_tensor.permute([0, 2, 3, 1]),  # BCYX -> BYXC
+        device=device,
+        layout=ttnn.TILE_LAYOUT,
+    )
 
     with torch.no_grad():
         torch_output = torch_model(torch_input_tensor)
 
     tt_output = tt_model(tt_input_tensor)
-    tt_output_torch = ttnn.to_torch(tt_output)
+    tt_output_torch = ttnn.to_torch(tt_output).permute([0, 3, 1, 2])
 
     mse = torch.nn.functional.mse_loss(
         torch_output.to(dtype=torch.float32),
