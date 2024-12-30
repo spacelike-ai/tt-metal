@@ -6,6 +6,8 @@ import torch
 
 import ttnn
 
+from . import utils
+
 
 @dataclass
 class TtConv2dParameters:
@@ -21,22 +23,8 @@ class TtConv2dParameters:
         device: ttnn.Device,
     ) -> TtConv2dParameters:
         return cls(
-            weight=ttnn.from_torch(
-                state["weight"],
-                layout=ttnn.TILE_LAYOUT,
-                dtype=dtype,
-                device=device,
-            ),
-            bias=(
-                ttnn.from_torch(
-                    state["bias"],
-                    layout=ttnn.TILE_LAYOUT,
-                    dtype=dtype,
-                    device=device,
-                )
-            )
-            if "bias" in state
-            else None,
+            weight=ttnn.from_torch(state["weight"], dtype=dtype),
+            bias=ttnn.from_torch(state["bias"].reshape((1, 1, 1, -1)), dtype=dtype) if "bias" in state else None,
         )
 
     @property
@@ -49,7 +37,7 @@ class TtConv2dParameters:
 
     @property
     def kernel_size(self) -> tuple[int, int]:
-        return list(self.weight.shape)[-2:]
+        return self.weight.shape[-2], self.weight.shape[-1]
 
 
 class TtConv2d:
@@ -70,41 +58,54 @@ class TtConv2d:
         self._weight = parameters.weight
         self._bias = parameters.bias
 
-    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        torch_result = torch.nn.functional.conv2d(
-            ttnn.to_torch(x).permute([0, 3, 1, 2]),
-            ttnn.to_torch(self._weight),
-            bias=ttnn.to_torch(self._bias).squeeze(0) if self._bias is not None else None,
-            stride=self._stride,
-        ).permute([0, 2, 3, 1])
-        return ttnn.from_torch(torch_result, device=x.device(), layout=x.layout, dtype=x.dtype)
-
-        # input_shape = x.shape
+    def call_without_reshape(self, x: ttnn.Tensor) -> tuple[ttnn.Tensor, list[int]]:
+        batch_size = x.shape[0]
+        device = x.device()
+        memory_config_in = ttnn.get_memory_config(x)
 
         # conv_config = ttnn.Conv2dConfig(
-        #     # dtype=x.dtype,
-        #     # weights_dtype=self._weight.dtype,
-        #     # activation="",
-        #     # shard_layout=self.conv1_shard_layout,
-        #     # input_channels_alignment=32,
-        #     # transpose_shards=False,
-        #     # reshard_if_not_optimal=False,
+        #     shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
         # )
 
-        # [result, _out_height, _out_width, self._weights, self._bias] = ttnn.conv2d(
-        #     input_tensor=x,
-        #     weight_tensor=self._weight,
-        #     bias_tensor=self._bias,
-        #     in_channels=self._in_channels,
-        #     out_channels=self._out_channels,
-        #     device=x.device(),
-        #     kernel_size=self._kernel_size,
-        #     stride=self._stride,
-        #     padding=self._padding,
-        #     batch_size=input_shape[0],
-        #     input_height=input_shape[1],
-        #     input_width=input_shape[2],
-        #     conv_config=conv_config,
-        # )
+        result, [output_height, output_width], [prepared_weight, prepared_bias] = ttnn.conv2d(
+            input_tensor=x,
+            weight_tensor=self._weight,
+            bias_tensor=self._bias,
+            in_channels=self._in_channels,
+            out_channels=self._out_channels,
+            device=device,
+            kernel_size=self._kernel_size,
+            stride=self._stride,
+            padding=self._padding,
+            batch_size=batch_size,
+            input_height=x.shape[1],
+            input_width=x.shape[2],
+            # conv_config=conv_config,
+            return_output_dim=True,
+            return_weights_and_bias=True,
+        )
 
-        # return result
+        result = ttnn.to_memory_config(result, memory_config=memory_config_in)
+
+        self._weight = prepared_weight
+        self._bias = prepared_bias
+
+        shape = [batch_size, output_height, output_width, self._out_channels]
+        return result, shape
+
+    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        result, shape = self.call_without_reshape(x)
+        result = utils.untilize(result)
+        return ttnn.reshape(result, shape)
+
+    @property
+    def in_channels(self) -> int:
+        return self._in_channels
+
+    @property
+    def out_channels(self) -> int:
+        return self._out_channels
+
+    @property
+    def kernel_size(self) -> tuple[int, int]:
+        return self._kernel_size

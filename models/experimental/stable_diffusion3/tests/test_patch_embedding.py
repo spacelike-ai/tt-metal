@@ -16,6 +16,7 @@ from ..tt.patch_embedding import TtPatchEmbed, TtPatchEmbedParameters
         2,
     ],
 )
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
 def test_patch_embedding(
     *,
     device: ttnn.Device,
@@ -50,4 +51,4 @@ def test_patch_embedding(
         tt_output_torch.to(dtype=torch.float32),
     ).item()
     logger.info(f"mse: {mse:.6f}")
-    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_995)
+    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_990)

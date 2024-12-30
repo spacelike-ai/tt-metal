@@ -13,10 +13,11 @@ from ..tt.patch_embedding import TtConv2d, TtConv2dParameters
 @pytest.mark.parametrize(
     "batch_size, in_channels, out_channels, kernel_size, stride, height, width",
     [
-        (2, 3, 4, (3, 5), (1, 2), 10, 10),
-        # (10, 20, 15, (3, 5), (1, 2), 128, 256),
+        (10, 32, 32, (2, 3), (2, 2), 64, 64),
+        (10, 20, 32, (3, 3), (2, 3), 128, 256),
     ],
 )
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
 def test_conv2d(
     *,
     device: ttnn.Device,
@@ -61,4 +62,4 @@ def test_conv2d(
         tt_output_torch.to(dtype=torch.float32),
     ).item()
     logger.info(f"mse: {mse:.6f}")
-    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_999_99)
+    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_900)

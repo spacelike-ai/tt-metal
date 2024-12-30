@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 import tqdm
 from diffusers.image_processor import VaeImageProcessor
@@ -16,7 +17,8 @@ from ..tt.transformer import TtSD3Transformer2DModel, TtSD3Transformer2DModelPar
 CHECKPOINT = "stabilityai/stable-diffusion-3.5-medium"
 
 
-def test_transformer(*, device: ttnn.Device):
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
+def test_sd3(*, device: ttnn.Device):
     model_input = {
         "prompt_1": ["cat"],
         "prompt_2": ["cat"],

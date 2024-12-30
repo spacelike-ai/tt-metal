@@ -15,6 +15,7 @@ from ..tt.transformer import TtSD3Transformer2DModel, TtSD3Transformer2DModelPar
         (2, 333),
     ],
 )
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
 def test_transformer(
     *,
     device: ttnn.Device,
@@ -30,7 +31,7 @@ def test_transformer(
     torch_model.eval()
 
     parameters = TtSD3Transformer2DModelParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn_dtype)
-    tt_model = TtSD3Transformer2DModel(parameters, num_attention_heads=torch_model.num_attention_heads)
+    tt_model = TtSD3Transformer2DModel(parameters, num_attention_heads=torch_model.config.num_attention_heads)
 
     torch.manual_seed(0)
     spatial = torch.randn((batch_size, 16, 64, 64), dtype=torch_dtype)
