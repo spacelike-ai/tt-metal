@@ -9,6 +9,7 @@ from loguru import logger
 import ttnn
 from models.experimental.stable_diffusion3.tt.linear import TtLinear, TtLinearParameters
 
+from . import utils
 from .normalization import TtLayerNorm, TtLayerNormParameters
 from .patch_embedding import TtPatchEmbed, TtPatchEmbedParameters
 from .substate import has_substate, substate
@@ -97,14 +98,10 @@ class TtSD3Transformer2DModel:
         time_embed = self._time_text_embed(torch_timestep=torch_timestep, pooled_projection=pooled_projection)
         prompt_embed = self._context_embedder(prompt_embed)
 
-        time_embed = ttnn.from_torch(
-            ttnn.to_torch(time_embed).unsqueeze(1),
-            device=time_embed.device(),
-            layout=ttnn.TILE_LAYOUT,
-        )
-        # time_embed = ttnn.untilize(time_embed)
-        # time_embed = time_embed.reshape([time_embed.shape[0], 1, time_embed.shape[1]])
-        # time_embed = ttnn.tilize(time_embed)
+        # time_embed = time_embed.unsqueeze(1)
+        time_embed = utils.untilize(time_embed)
+        time_embed = time_embed.reshape([time_embed.shape[0], 1, time_embed.shape[1]])
+        time_embed = utils.tilize(time_embed)
 
         for i, block in enumerate(self._transformer_blocks):
             logger.info(f"running transformer block {i}...")

@@ -98,8 +98,8 @@ class TtLayerNorm:
         # ttnn.layer_norm currently requires padded tensors to only contain zeros in the padded area
         # if list(x.shape) != list(x.shape.with_tile_padding()):
         #     logger.warning("retilizing tensor for layer norm")
-        #     x = ttnn.untilize(x)
-        #     x = _tilize_with_zero_padding(x)
+        #     x = utils.untilize(x)
+        #     x = utils.tilize(x)
 
         return ttnn.layer_norm(x, weight=self._weight, bias=self._bias, epsilon=self._eps)
 
@@ -115,23 +115,3 @@ class TtLayerNorm:
         #     eps=self._eps,
         # )
         # return ttnn.from_torch(torch_result, device=x.device(), layout=ttnn.TILE_LAYOUT)
-
-
-# def _increase_to_nearest_multiple(x, factor):
-#     """Return smallest multiple of `factor` bigger or equal to `x`."""
-#     return (x + factor - 1) // factor * factor
-
-
-# def _tilize_with_zero_padding(x: ttnn.Tensor) -> ttnn.Tensor:
-#     if x.dtype != ttnn.bfloat16:
-#         logger.warning("tilize_with_val_padding expects bfloat16 input")
-
-#     shape = list(x.shape)
-#     padded_shape = [
-#         *shape[:-2],
-#         _increase_to_nearest_multiple(shape[-2], 32),
-#         _increase_to_nearest_multiple(shape[-1], 32),
-#     ]
-
-#     result = ttnn.tilize_with_val_padding(x, output_tensor_shape=padded_shape, pad_value=0.0)
-#     return ttnn.reshape(result, ttnn.Shape(shape, padded_shape))
