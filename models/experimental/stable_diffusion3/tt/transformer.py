@@ -13,7 +13,7 @@ from .normalization import TtLayerNorm, TtLayerNormParameters
 from .patch_embedding import TtPatchEmbed, TtPatchEmbedParameters
 from .substate import has_substate, substate
 from .timestep_embedding import TtCombinedTimestepTextProjEmbeddings, TtCombinedTimestepTextProjEmbeddingsParameters
-from .transformer_block import TtTransformerBlock, TtTransformerBlockParameters
+from .transformer_block import TtTransformerBlock, TtTransformerBlockParameters, chunk_time
 
 
 @dataclass
@@ -115,12 +115,7 @@ class TtSD3Transformer2DModel:
             )
 
         spatial_time = self._time_embed_out(ttnn.silu(time_embed))
-
-        torch_spatial_time = ttnn.to_torch(spatial_time)
-        (torch_scale, torch_shift) = torch_spatial_time.chunk(2, dim=-1)
-        scale = ttnn.from_torch(torch_scale, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-        shift = ttnn.from_torch(torch_shift, device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-
+        [scale, shift] = chunk_time(spatial_time, 2)
         spatial = self._norm_out(spatial) * (1 + scale) + shift
 
         return self._proj_out(spatial)

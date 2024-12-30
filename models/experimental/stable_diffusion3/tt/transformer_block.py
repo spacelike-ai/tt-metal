@@ -208,7 +208,7 @@ class TtTransformerBlock:
                 spatial_shift_attn,
                 spatial_scale_attn,
                 spatial_gate_attn,
-            ] = _chunk(spatial_time, 9)
+            ] = chunk_time(spatial_time, 9)
         else:
             [
                 spatial_shift_dual_attn,
@@ -217,7 +217,7 @@ class TtTransformerBlock:
                 spatial_shift_ff,
                 spatial_scale_ff,
                 spatial_gate_ff,
-            ] = _chunk(spatial_time, 6)
+            ] = chunk_time(spatial_time, 6)
 
             spatial_gate_attn = None
             spatial_shift_attn = None
@@ -227,7 +227,7 @@ class TtTransformerBlock:
             [
                 prompt_scale_attn,
                 prompt_shift_attn,
-            ] = _chunk(prompt_time, 2)
+            ] = chunk_time(prompt_time, 2)
 
             prompt_gate_attn = None
             prompt_shift_ff = None
@@ -241,7 +241,7 @@ class TtTransformerBlock:
                 prompt_shift_ff,
                 prompt_scale_ff,
                 prompt_gate_ff,
-            ] = _chunk(prompt_time, 6)
+            ] = chunk_time(prompt_time, 6)
 
         spatial_normed = self._spatial_norm_1(spatial)
         prompt_normed = self._prompt_norm_1(prompt)
@@ -321,7 +321,7 @@ class TtTransformerBlock:
         return spatial, prompt
 
 
-def _chunk(t: ttnn.Tensor, count: int) -> list[ttnn.Tensor]:
+def chunk_time(t: ttnn.Tensor, count: int) -> list[ttnn.Tensor]:
     torch_chunks = ttnn.to_torch(t).chunk(count, dim=-1)
     return [ttnn.from_torch(x, device=t.device(), layout=ttnn.TILE_LAYOUT) for x in torch_chunks]
 
