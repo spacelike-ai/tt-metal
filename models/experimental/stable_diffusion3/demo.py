@@ -11,8 +11,8 @@ from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderMo
 
 import ttnn
 
-from ..reference.transformer import SD3Transformer2DModel
-from ..tt.transformer import TtSD3Transformer2DModel, TtSD3Transformer2DModelParameters
+from .reference.transformer import SD3Transformer2DModel
+from .tt.transformer import TtSD3Transformer2DModel, TtSD3Transformer2DModelParameters
 
 CHECKPOINT = "stabilityai/stable-diffusion-3.5-medium"
 
