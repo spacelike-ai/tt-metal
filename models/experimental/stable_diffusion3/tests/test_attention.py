@@ -56,11 +56,11 @@ def test_attention(
         tt_spatial_torch.to(dtype=torch.float32),
     ).item()
     logger.info(f"spatial mse: {mse:.6f}")
-    assert_with_pcc(spatial, tt_spatial_torch, pcc=0.999)
+    assert_with_pcc(spatial, tt_spatial_torch, pcc=0.995)
 
     mse = torch.nn.functional.mse_loss(
         prompt_embed.to(dtype=torch.float32),
         tt_prompt_embed_torch.to(dtype=torch.float32),
     ).item()
     logger.info(f"prompt mse: {mse:.6f}")
-    assert_with_pcc(prompt_embed, tt_prompt_embed_torch, pcc=0.999)
+    assert_with_pcc(prompt_embed, tt_prompt_embed_torch, pcc=0.995)

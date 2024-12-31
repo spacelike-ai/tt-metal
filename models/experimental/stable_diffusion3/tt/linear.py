@@ -23,17 +23,9 @@ class TtLinearParameters:
     ) -> TtLinearParameters:
         return cls(
             weight=ttnn.from_torch(
-                state["weight"].transpose(0, 1),
-                layout=ttnn.TILE_LAYOUT,
-                dtype=dtype,
-                device=device,
+                state["weight"].transpose(0, 1), layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device
             ),
-            bias=ttnn.from_torch(
-                state["bias"],
-                layout=ttnn.TILE_LAYOUT,
-                dtype=dtype,
-                device=device,
-            )
+            bias=ttnn.from_torch(state["bias"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
             if "bias" in state
             else None,
         )
@@ -68,25 +60,19 @@ class TtLinear:
         self._compute_kernel_config = compute_kernel_config
         self._core_grid = core_grid
         self._output_tile = output_tile
+        self._output_dtype = output_dtype
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         assert x.shape[-1] == self._in_channels, "input tensor does not have the expected shape"
 
-        try:
-            return ttnn.linear(
-                x,
-                self._weight,
-                bias=self._bias,
-                memory_config=self._memory_config,
-                program_config=self._program_config,
-                compute_kernel_config=self._compute_kernel_config,
-                core_grid=self._core_grid,
-                output_tile=self._output_tile,
-                dtype=self._output_dtype,
-            )
-        except Exception:
-            logger.warning("fallback linear operation")
-            result = ttnn.to_torch(x).to(torch.float32) @ ttnn.to_torch(self._weight).to(torch.float32)
-            if self._bias is not None:
-                result += ttnn.to_torch(self._bias).to(torch.float32)
-            return ttnn.from_torch(result, device=x.device(), layout=ttnn.TILE_LAYOUT, dtype=x.dtype)
+        return ttnn.linear(
+            x,
+            self._weight,
+            bias=self._bias,
+            memory_config=self._memory_config,
+            program_config=self._program_config,
+            compute_kernel_config=self._compute_kernel_config,
+            core_grid=self._core_grid,
+            output_tile=self._output_tile,
+            dtype=self._output_dtype,
+        )

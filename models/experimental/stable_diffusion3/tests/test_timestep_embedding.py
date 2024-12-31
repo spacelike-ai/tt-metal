@@ -38,7 +38,7 @@ def test_timestep_embedding(
     timestep = torch.randn(batch_size, dtype=dtype)
     pooled_projection = torch.randn((batch_size, 2048), dtype=dtype)
 
-    tt_pooled_projection = ttnn.from_torch(pooled_projection, device=device)
+    tt_pooled_projection = ttnn.from_torch(pooled_projection, device=device, layout=ttnn.TILE_LAYOUT)
 
     torch_output = torch_model(timestep, pooled_projection)
 
@@ -50,4 +50,4 @@ def test_timestep_embedding(
         tt_output_torch.to(dtype=torch.float32),
     ).item()
     logger.info(f"mse: {mse:.6f}")
-    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_950)
+    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_900)

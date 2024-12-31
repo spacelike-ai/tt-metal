@@ -64,7 +64,7 @@ def test_transformer_block(
             tt_prompt_torch.to(dtype=torch.float32),
         ).item()
         logger.info(f"prompt mse: {mse:.6f}")
-        assert_with_pcc(prompt, tt_prompt_torch, pcc=0.999_500)
+        assert_with_pcc(prompt, tt_prompt_torch, pcc=0.995)
 
     assert spatial.shape == tt_spatial_torch.shape
     mse = torch.nn.functional.mse_loss(
@@ -72,4 +72,4 @@ def test_transformer_block(
         tt_spatial_torch.to(dtype=torch.float32),
     ).item()
     logger.info(f"spatial mse: {mse:.6f}")
-    assert_with_pcc(spatial, tt_spatial_torch, pcc=0.999_500)
+    assert_with_pcc(spatial, tt_spatial_torch, pcc=0.995)

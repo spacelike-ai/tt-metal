@@ -45,9 +45,18 @@ def test_transformer(
         layout=ttnn.TILE_LAYOUT,
         dtype=ttnn_dtype,
     )
-    tt_prompt_embed = ttnn.from_torch(prompt_embed, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
-
-    tt_pooled_projection = ttnn.from_torch(pooled_projection, device=device, dtype=ttnn_dtype)
+    tt_prompt_embed = ttnn.from_torch(
+        prompt_embed,
+        device=device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn_dtype,
+    )
+    tt_pooled_projection = ttnn.from_torch(
+        pooled_projection,
+        device=device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn_dtype,
+    )
 
     with torch.no_grad():
         torch_output = torch_model(

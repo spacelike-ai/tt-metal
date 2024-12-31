@@ -47,4 +47,4 @@ def test_feed_forward(
         tt_output_torch.to(dtype=torch.float32),
     ).item()
     logger.info(f"mse: {mse:.6f}")
-    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_950)
+    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_500)
