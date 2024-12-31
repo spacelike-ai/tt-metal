@@ -32,7 +32,7 @@ def test_sd3(*, device: ttnn.Device):
         "guidance_scale": 7.0,
         "num_images_per_prompt": 1,
         "max_t5_sequence_length": 256,
-        "seed": 1,
+        "seed": 0,
     }
 
     torch.set_grad_enabled(False)

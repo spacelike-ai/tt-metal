@@ -50,7 +50,7 @@ class TtLinear:
         core_grid: ttnn.CoreGrid | None = None,
         output_tile: list[int] | None = None,
         output_dtype: ttnn.DataType | None = None,
-        torch_fallback: bool = True,
+        torch_fallback: bool = False,
     ) -> None:
         self._in_channels = parameters.in_channels
         self._weight = parameters.weight

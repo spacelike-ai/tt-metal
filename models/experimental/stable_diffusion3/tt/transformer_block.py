@@ -81,8 +81,8 @@ class TtTransformerBlock:
             TtFeedForward(parameters.prompt_ff, approximate="tanh") if parameters.prompt_ff is not None else None
         )
 
-        self._spatial_time_embed = TtLinear(parameters.spatial_time_embed)
-        self._prompt_time_embed = TtLinear(parameters.prompt_time_embed)
+        self._spatial_time_embed = TtLinear(parameters.spatial_time_embed, torch_fallback=True)
+        self._prompt_time_embed = TtLinear(parameters.prompt_time_embed, torch_fallback=True)
 
         self._context_pre_only = self._prompt_ff is None
 
