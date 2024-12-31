@@ -37,7 +37,7 @@ def test_transformer(
     spatial = torch.randn((batch_size, 16, 64, 64), dtype=torch_dtype)
     prompt_embed = torch.randn((batch_size, prompt_sequence_length, 4096), dtype=torch_dtype)
     pooled_projection = torch.randn((batch_size, 2048), dtype=torch_dtype)
-    timestep = torch.randn(batch_size, dtype=torch_dtype)
+    timestep = torch.randint(1000, (batch_size,), dtype=torch.float32)
 
     tt_spatial = ttnn.from_torch(
         spatial.permute([0, 2, 3, 1]),  # BCYX -> BYXC
@@ -61,7 +61,6 @@ def test_transformer(
         timestep.unsqueeze(1),
         device=device,
         layout=ttnn.TILE_LAYOUT,
-        dtype=ttnn_dtype,
     )
 
     with torch.no_grad():

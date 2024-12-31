@@ -61,7 +61,7 @@ class TtCombinedTimestepTextProjEmbeddings:
         self._text_embedder = _TimestepEmbedding(parameters.text_embedder)
 
     def __call__(self, *, timestep: ttnn.Tensor, pooled_projection: ttnn.Tensor) -> ttnn.Tensor:
-        timesteps_proj = _time_proj(num_channels=256, timesteps=timestep)
+        timesteps_proj = _time_proj(num_channels=256, timesteps=timestep, dtype=pooled_projection.dtype)
 
         time_embed = self._timestep_embedder(timesteps_proj)
         text_embed = self._text_embedder(pooled_projection)
@@ -82,7 +82,9 @@ class _TimestepEmbedding:
         return self._linear_2(x)
 
 
-def _time_proj(*, num_channels: int, timesteps: ttnn.Tensor) -> ttnn.Tensor:
+def _time_proj(*, num_channels: int, timesteps: ttnn.Tensor, dtype: ttnn.DataType) -> ttnn.Tensor:
+    assert timesteps.dtype == ttnn.float32
+
     assert num_channels % 2 == 0
     half_dim = num_channels // 2
 
@@ -90,14 +92,24 @@ def _time_proj(*, num_channels: int, timesteps: ttnn.Tensor) -> ttnn.Tensor:
 
     exponent = -math.log(max_period) * torch.arange(start=0, end=half_dim, dtype=torch.float32)
     exponent = exponent / half_dim
+    factor = torch.exp(exponent).unsqueeze(0)
 
-    emb = torch.exp(exponent).unsqueeze(0)
-    emb = ttnn.to_torch(timesteps) * emb
-    result = torch.concat([torch.cos(emb), torch.sin(emb)], dim=-1)
-    return ttnn.from_torch(result, device=timesteps.device(), dtype=timesteps.dtype, layout=timesteps.layout)
+    # TODO: ttnn implementation is not precise enough
+    # emb = timesteps * ttnn.from_torch(
+    #     factor,
+    #     device=timesteps.device(),
+    #     dtype=ttnn.float32,
+    #     layout=ttnn.TILE_LAYOUT,
+    # )
+    emb = ttnn.from_torch(
+        ttnn.to_torch(timesteps) * factor,
+        device=timesteps.device(),
+        dtype=ttnn.float32,
+        layout=ttnn.TILE_LAYOUT,
+    )
 
-    # TODO
-    # torch_emb = torch.exp(exponent).unsqueeze(0)
-    # emb = ttnn.from_torch(torch_emb, device=timesteps.device(), dtype=timesteps.dtype, layout=timesteps.layout)
-    # emb = timesteps * emb
-    # return ttnn.concat([ttnn.cos(emb), ttnn.sin(emb)], dim=-1)
+    c = ttnn.cos(emb)
+    s = ttnn.sin(emb)
+
+    result = ttnn.concat([c, s], dim=-1)
+    return ttnn.clone(result, dtype=dtype)

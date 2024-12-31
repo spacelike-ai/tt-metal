@@ -205,7 +205,7 @@ def test_sd3(*, device: ttnn.Device):
             timestep.unsqueeze(1),
             layout=ttnn.TILE_LAYOUT,
             device=device,
-            dtype=ttnn.bfloat16,
+            dtype=ttnn.float32,
         )
 
         tt_noise_pred = tt_transformer(

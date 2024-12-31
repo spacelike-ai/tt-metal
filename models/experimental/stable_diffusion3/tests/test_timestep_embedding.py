@@ -16,7 +16,7 @@ from ..tt.timestep_embedding import (
 @pytest.mark.parametrize(
     "batch_size",
     [
-        2,
+        100,
     ],
 )
 def test_timestep_embedding(
@@ -35,7 +35,8 @@ def test_timestep_embedding(
     parameters = TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(torch_model.state_dict(), device=device)
     tt_model = TtCombinedTimestepTextProjEmbeddings(parameters)
 
-    timestep = torch.randn(batch_size, dtype=dtype)
+    torch.manual_seed(0)
+    timestep = torch.randint(1000, (batch_size,), dtype=torch.float32)
     pooled_projection = torch.randn((batch_size, 2048), dtype=dtype)
 
     tt_timestep = ttnn.from_torch(timestep.unsqueeze(1), device=device, layout=ttnn.TILE_LAYOUT)
