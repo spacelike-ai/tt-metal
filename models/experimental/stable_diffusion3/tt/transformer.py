@@ -74,13 +74,13 @@ class TtSD3Transformer2DModel:
 
         self._pos_embed = TtPatchEmbed(parameters.pos_embed)
         self._time_text_embed = TtCombinedTimestepTextProjEmbeddings(parameters.time_text_embed)
-        self._context_embedder = TtLinear(parameters.context_embedder, torch_fallback=True)  # fallback necessary?
+        self._context_embedder = TtLinear(parameters.context_embedder)
         self._transformer_blocks = [
             TtTransformerBlock(block, num_heads=num_attention_heads) for block in parameters.transformer_blocks
         ]
-        self._time_embed_out = TtLinear(parameters.time_embed_out, torch_fallback=True)  # fallback necessary?
+        self._time_embed_out = TtLinear(parameters.time_embed_out, torch_fallback=True)
         self._norm_out = TtLayerNorm(parameters.norm_out, eps=1e-6)
-        self._proj_out = TtLinear(parameters.proj_out, torch_fallback=True)  # fallback necessary?
+        self._proj_out = TtLinear(parameters.proj_out)
 
         self._patch_size = parameters.pos_embed.patch_size
 
