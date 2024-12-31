@@ -28,7 +28,7 @@ def test_sd3(*, device: ttnn.Device):
         "negative_prompt_3": ["mouse"],
         "width": 512,  # default = 1024, works with 512
         "height": 512,  # default = 1024
-        "num_inference_steps": 5,  # default = 50
+        "num_inference_steps": 50,  # default = 50
         "guidance_scale": 7.0,
         "num_images_per_prompt": 1,
         "max_t5_sequence_length": 256,
