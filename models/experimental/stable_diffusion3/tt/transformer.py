@@ -90,12 +90,12 @@ class TtSD3Transformer2DModel:
         spatial: ttnn.Tensor,
         prompt_embed: ttnn.Tensor,
         pooled_projection: ttnn.Tensor,
-        timestep: ttnn.Tensor,
+        torch_timestep: torch.Tensor,
     ) -> ttnn.Tensor:
         height, width = list(spatial.shape)[-2:]
 
         spatial = self._pos_embed(spatial)
-        time_embed = self._time_text_embed(timestep=timestep, pooled_projection=pooled_projection)
+        time_embed = self._time_text_embed(torch_timestep=torch_timestep, pooled_projection=pooled_projection)
         prompt_embed = self._context_embedder(prompt_embed)
 
         # time_embed = time_embed.unsqueeze(1)

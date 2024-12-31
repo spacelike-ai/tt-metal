@@ -201,18 +201,12 @@ def test_sd3(*, device: ttnn.Device):
             device=device,
             dtype=ttnn.bfloat16,
         )
-        tt_timestep = ttnn.from_torch(
-            timestep.unsqueeze(1),
-            layout=ttnn.TILE_LAYOUT,
-            device=device,
-            dtype=ttnn.bfloat16,
-        )
 
         tt_noise_pred = tt_transformer(
             spatial=tt_latent_model_input,
             prompt_embed=tt_prompt_embeds,
             pooled_projection=tt_pooled_prompt_embeds,
-            timestep=tt_timestep,
+            torch_timestep=timestep,
         )
         noise_pred = ttnn.to_torch(tt_noise_pred).to(dtype=torch.float32)
 

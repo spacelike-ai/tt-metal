@@ -38,12 +38,11 @@ def test_timestep_embedding(
     timestep = torch.randn(batch_size, dtype=dtype)
     pooled_projection = torch.randn((batch_size, 2048), dtype=dtype)
 
-    tt_timestep = ttnn.from_torch(timestep.unsqueeze(1), device=device, layout=ttnn.TILE_LAYOUT)
     tt_pooled_projection = ttnn.from_torch(pooled_projection, device=device, layout=ttnn.TILE_LAYOUT)
 
     torch_output = torch_model(timestep, pooled_projection)
 
-    tt_output = tt_model(timestep=tt_timestep, pooled_projection=tt_pooled_projection)
+    tt_output = tt_model(torch_timestep=timestep, pooled_projection=tt_pooled_projection)
     tt_output_torch = ttnn.to_torch(tt_output)
 
     mse = torch.nn.functional.mse_loss(

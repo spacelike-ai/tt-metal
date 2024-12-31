@@ -57,12 +57,6 @@ def test_transformer(
         layout=ttnn.TILE_LAYOUT,
         dtype=ttnn_dtype,
     )
-    tt_timestep = ttnn.from_torch(
-        timestep.unsqueeze(1),
-        device=device,
-        layout=ttnn.TILE_LAYOUT,
-        dtype=ttnn_dtype,
-    )
 
     with torch.no_grad():
         torch_output = torch_model(
@@ -73,7 +67,7 @@ def test_transformer(
         spatial=tt_spatial,
         prompt_embed=tt_prompt_embed,
         pooled_projection=tt_pooled_projection,
-        timestep=tt_timestep,
+        torch_timestep=timestep,
     )
     tt_output_torch = ttnn.to_torch(tt_output)
 
