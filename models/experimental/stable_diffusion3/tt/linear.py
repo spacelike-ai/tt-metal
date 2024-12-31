@@ -49,6 +49,7 @@ class TtLinear:
         core_grid: ttnn.CoreGrid | None = None,
         output_tile: list[int] | None = None,
         output_dtype: ttnn.DataType | None = None,
+        torch_fallback: bool = True,
     ) -> None:
         self._in_channels = parameters.in_channels
         self._weight = parameters.weight
@@ -60,14 +61,16 @@ class TtLinear:
         self._core_grid = core_grid
         self._output_tile = output_tile
         self._output_dtype = output_dtype
+        self._torch_fallback = torch_fallback
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         assert x.shape[-1] == self._in_channels, "input tensor does not have the expected shape"
 
-        # result = ttnn.to_torch(x).to(torch.float32) @ ttnn.to_torch(self._weight).to(torch.float32)
-        # if self._bias is not None:
-        #     result += ttnn.to_torch(self._bias).to(torch.float32)
-        # return ttnn.from_torch(result, device=x.device(), layout=ttnn.TILE_LAYOUT, dtype=x.dtype)
+        if self._torch_fallback:
+            result = ttnn.to_torch(x).to(torch.float32) @ ttnn.to_torch(self._weight).to(torch.float32)
+            if self._bias is not None:
+                result += ttnn.to_torch(self._bias).to(torch.float32)
+            return ttnn.from_torch(result, device=x.device(), layout=ttnn.TILE_LAYOUT, dtype=x.dtype)
 
         return ttnn.linear(
             x,
