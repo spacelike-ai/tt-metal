@@ -60,14 +60,8 @@ class TtCombinedTimestepTextProjEmbeddings:
         self._timestep_embedder = _TimestepEmbedding(parameters.timestep_embedder)
         self._text_embedder = _TimestepEmbedding(parameters.text_embedder)
 
-    def __call__(self, *, torch_timestep: torch.Tensor, pooled_projection: ttnn.Tensor) -> ttnn.Tensor:
-        torch_timesteps_proj = _time_proj(num_channels=256, timesteps=torch_timestep)
-        timesteps_proj = ttnn.from_torch(
-            torch_timesteps_proj,
-            device=pooled_projection.device(),
-            dtype=pooled_projection.dtype,
-            layout=ttnn.TILE_LAYOUT,
-        )
+    def __call__(self, *, timestep: ttnn.Tensor, pooled_projection: ttnn.Tensor) -> ttnn.Tensor:
+        timesteps_proj = _time_proj(num_channels=256, timesteps=timestep)
 
         time_embed = self._timestep_embedder(timesteps_proj)
         text_embed = self._text_embedder(pooled_projection)
@@ -88,17 +82,19 @@ class _TimestepEmbedding:
         return self._linear_2(x)
 
 
-# tensors involved here are so small, there is no real optimization potential by converting them to ttnn
-def _time_proj(*, num_channels: int, timesteps: torch.Tensor) -> torch.Tensor:
+def _time_proj(*, num_channels: int, timesteps: ttnn.Tensor) -> ttnn.Tensor:
     assert num_channels % 2 == 0
     half_dim = num_channels // 2
 
     max_period = 10000
 
-    exponent = -math.log(max_period) * torch.arange(start=0, end=half_dim, dtype=torch.float32, device=timesteps.device)
+    exponent = -math.log(max_period) * torch.arange(start=0, end=half_dim, dtype=torch.float32)
     exponent = exponent / half_dim
 
-    emb = torch.exp(exponent)
-    emb = timesteps[:, None].float() * emb[None, :]
+    torch_emb = torch.exp(exponent).unsqueeze(0)
 
-    return torch.cat([torch.cos(emb), torch.sin(emb)], dim=-1)
+    emb = ttnn.from_torch(torch_emb, device=timesteps.device(), dtype=timesteps.dtype, layout=timesteps.layout)
+
+    emb = timesteps * emb
+
+    return ttnn.concat([ttnn.cos(emb), ttnn.sin(emb)], dim=-1)
