@@ -6,6 +6,7 @@ import torch
 
 import ttnn
 
+from . import utils
 from .attention import TtAttention, TtAttentionParameters
 from .feed_forward import TtFeedForward, TtFeedForwardParameters
 from .linear import TtLinear, TtLinearParameters
@@ -321,17 +322,13 @@ class TtTransformerBlock:
 
 
 def chunk_time(t: ttnn.Tensor, count: int) -> list[ttnn.Tensor]:
-    # TODO: the ttnn implementation does not give the correct result
-    torch_chunks = ttnn.to_torch(t).chunk(count, dim=-1)
-    return [ttnn.from_torch(x, device=t.device(), layout=ttnn.TILE_LAYOUT) for x in torch_chunks]
+    s = t.shape
+    batch_size = s[0]
 
-    # s = t.shape
-    # batch_size = s[0]
+    t = utils.untilize(t)
+    t = ttnn.reshape(t, [s[0], s[1], count, s[2] // count])
+    t = ttnn.permute(t, [2, 0, 1, 3])
+    t = ttnn.reshape(t, [count * s[0], s[1], s[2] // count])
+    t = utils.tilize(t)
 
-    # t = ttnn.untilize(t)
-    # t = ttnn.reshape(t, [s[0], s[1], count, s[2] // count])
-    # t = ttnn.permute(t, [2, 0, 1, 3])
-    # t = ttnn.reshape(t, [count * s[0], s[1], s[2] // count])
-    # t = ttnn.tilize(t)
-
-    # return [t[i * batch_size : (i + 1) * batch_size] for i in range(count)]
+    return [t[i * batch_size : (i + 1) * batch_size] for i in range(count)]
