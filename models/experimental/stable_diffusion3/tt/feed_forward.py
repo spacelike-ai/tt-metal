@@ -44,12 +44,6 @@ class TtFeedForward:
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         x2 = self.in_proj(x)
-
-        # x3 = ttnn.from_torch(
-        #     torch.nn.functional.gelu(ttnn.to_torch(x2), approximate=self._approximate),
-        #     device=x2.device(),
-        #     layout=x2.layout,
-        # )
         x3 = ttnn.gelu(x2, fast_and_approximate_mode=False)
         ttnn.deallocate(x2)
 
