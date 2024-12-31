@@ -88,26 +88,17 @@ def _time_proj(*, num_channels: int, timesteps: ttnn.Tensor, dtype: ttnn.DataTyp
     assert num_channels % 2 == 0
     half_dim = num_channels // 2
 
+    batch_size = timesteps.shape[0]
+
     max_period = 10000
 
     exponent = -math.log(max_period) * torch.arange(start=0, end=half_dim, dtype=torch.float32)
     exponent = exponent / half_dim
-    factor = torch.exp(exponent).unsqueeze(0)
+    factor = torch.exp(exponent).repeat(batch_size, 1)
 
-    # TODO: ttnn implementation is not precise enough
-    # emb = timesteps * ttnn.from_torch(
-    #     factor,
-    #     device=timesteps.device(),
-    #     dtype=ttnn.float32,
-    #     layout=ttnn.TILE_LAYOUT,
-    # )
-    emb = ttnn.from_torch(
-        ttnn.to_torch(timesteps) * factor,
-        device=timesteps.device(),
-        dtype=ttnn.float32,
-        layout=ttnn.TILE_LAYOUT,
-    )
+    tt_factor = ttnn.from_torch(factor, device=timesteps.device(), layout=ttnn.TILE_LAYOUT)
 
+    emb = timesteps * tt_factor
     c = ttnn.cos(emb)
     s = ttnn.sin(emb)
 
