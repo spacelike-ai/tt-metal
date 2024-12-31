@@ -139,23 +139,22 @@ class TtTransformerBlock:
         # prompt_scaled = ttnn.from_torch(torch.load("prompt_scaled.pt"), device=prompt.device(), layout=ttnn.TILE_LAYOUT)
         spatial_attn, prompt_attn = self._dual_attn(spatial=spatial_scaled, prompt=prompt_scaled)
 
-        # TODO
-        spatial_attn_scaled = ttnn.from_torch(
-            ttnn.to_torch(spatial_gate) * ttnn.to_torch(spatial_attn),
-            device=spatial.device(),
-            layout=ttnn.TILE_LAYOUT,
-        )
-        prompt_attn_scaled = (
-            ttnn.from_torch(
-                ttnn.to_torch(prompt_gate) * ttnn.to_torch(prompt_attn),
-                device=prompt.device(),
-                layout=ttnn.TILE_LAYOUT,
-            )
-            if prompt_gate is not None
-            else None
-        )
-        # spatial_attn_scaled = spatial_gate * spatial_attn
-        # prompt_attn_scaled = prompt_gate * prompt_attn if prompt_gate is not None else None
+        # spatial_attn_scaled = ttnn.from_torch(
+        #     ttnn.to_torch(spatial_gate) * ttnn.to_torch(spatial_attn),
+        #     device=spatial.device(),
+        #     layout=ttnn.TILE_LAYOUT,
+        # )
+        # prompt_attn_scaled = (
+        #     ttnn.from_torch(
+        #         ttnn.to_torch(prompt_gate) * ttnn.to_torch(prompt_attn),
+        #         device=prompt.device(),
+        #         layout=ttnn.TILE_LAYOUT,
+        #     )
+        #     if prompt_gate is not None
+        #     else None
+        # )
+        spatial_attn_scaled = spatial_gate * spatial_attn
+        prompt_attn_scaled = prompt_gate * prompt_attn if prompt_gate is not None else None
 
         ttnn.deallocate(spatial_attn)
         ttnn.deallocate(prompt_attn)
