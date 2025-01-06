@@ -33,7 +33,7 @@ class TtTransformerBlockParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
-    ) -> TtFeedForwardParameters:
+    ) -> TtTransformerBlockParameters:
         return cls(
             dual_attn=TtAttentionParameters.from_torch(substate(state, "attn"), dtype=dtype, device=device),
             spatial_attn=TtAttentionParameters.from_torch(substate(state, "attn2"), dtype=dtype, device=device)

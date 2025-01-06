@@ -41,7 +41,7 @@ class TtLayerNormParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
-    ) -> TtRmsNormParameters:
+    ) -> TtLayerNormParameters:
         return cls(
             weight=ttnn.from_torch(
                 state["weight"],
