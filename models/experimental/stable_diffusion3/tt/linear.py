@@ -39,16 +39,16 @@ class TtLinearParameters:
 
 
 class TtLinear:
+    iteration = 0
+
     def __init__(
         self,
         parameters: TtLinearParameters,
         *,
         memory_config: ttnn.MemoryConfig | None = None,
         program_config: ttnn.MatmulProgramConfig | None = None,
-        compute_kernel_config: ttnn.DeviceComputeKernelConfig | None = None,
         core_grid: ttnn.CoreGrid | None = None,
         output_tile: list[int] | None = None,
-        output_dtype: ttnn.DataType | None = None,
         torch_fallback: bool = False,
     ) -> None:
         self._in_channels = parameters.in_channels
@@ -57,10 +57,8 @@ class TtLinear:
 
         self._memory_config = memory_config
         self._program_config = program_config
-        self._compute_kernel_config = compute_kernel_config
         self._core_grid = core_grid
         self._output_tile = output_tile
-        self._output_dtype = output_dtype
         self._torch_fallback = torch_fallback
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
@@ -78,8 +76,6 @@ class TtLinear:
             bias=self._bias,
             memory_config=self._memory_config,
             program_config=self._program_config,
-            compute_kernel_config=self._compute_kernel_config,
             core_grid=self._core_grid,
             output_tile=self._output_tile,
-            dtype=self._output_dtype,
         )
