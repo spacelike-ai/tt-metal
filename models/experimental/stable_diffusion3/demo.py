@@ -19,20 +19,28 @@ CHECKPOINT = "stabilityai/stable-diffusion-3.5-medium"
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
 def test_sd3(*, device: ttnn.Device):
+    prompt = (
+        "An epic, high-definition cinematic shot of a rustic snowy cabin glowing "
+        "warmly at dusk, nestled in a serene winter landscape. Surrounded by gentle "
+        "snow-covered pines and delicate falling snowflakes - captured in a rich, "
+        "atmospheric, wide-angle scene with deep cinematic depth and warmth."
+    )
+    negative_prompt = ""
+
     model_input = {
-        "prompt_1": ["cat"],
-        "prompt_2": ["cat"],
-        "prompt_3": ["cat"],
-        "negative_prompt_1": ["mouse"],
-        "negative_prompt_2": ["mouse"],
-        "negative_prompt_3": ["mouse"],
+        "prompt_1": [prompt],
+        "prompt_2": [prompt],
+        "prompt_3": [prompt],
+        "negative_prompt_1": [negative_prompt],
+        "negative_prompt_2": [negative_prompt],
+        "negative_prompt_3": [negative_prompt],
         "width": 512,  # default = 1024, works with 512
-        "height": 512,  # default = 1024
-        "num_inference_steps": 50,  # default = 50
-        "guidance_scale": 7.0,
+        "height": 512,
+        "num_inference_steps": 40,
+        "guidance_scale": 4.5,
         "num_images_per_prompt": 1,
         "max_t5_sequence_length": 256,
-        "seed": 0,
+        "seed": 1,
     }
 
     torch.set_grad_enabled(False)
