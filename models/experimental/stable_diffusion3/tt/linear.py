@@ -24,7 +24,7 @@ class TtLinearParameters:
             weight=ttnn.from_torch(
                 state["weight"].transpose(0, 1), layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device
             ),
-            bias=ttnn.from_torch(state["bias"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
+            bias=ttnn.from_torch(state["bias"].unsqueeze(0), layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
             if "bias" in state
             else None,
         )

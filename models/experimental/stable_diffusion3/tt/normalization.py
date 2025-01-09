@@ -21,7 +21,7 @@ class TtRmsNormParameters:
     ) -> TtRmsNormParameters:
         return cls(
             weight=ttnn.from_torch(
-                state["weight"],
+                state["weight"].unsqueeze(0),
                 layout=ttnn.TILE_LAYOUT,
                 dtype=dtype,
                 device=device,
