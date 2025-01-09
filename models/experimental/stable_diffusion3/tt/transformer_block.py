@@ -45,10 +45,10 @@ class TtTransformerBlockParameters:
                 substate(state, "norm1_context.norm"), dtype=dtype, device=device
             ),
             spatial_time_embed=TtLinearParameters.from_torch(
-                substate(state, "norm1.linear"), dtype=dtype, device=device
+                substate(state, "norm1.linear"), dtype=dtype, device=device, unsqueeze_bias=True
             ),
             prompt_time_embed=TtLinearParameters.from_torch(
-                substate(state, "norm1_context.linear"), dtype=dtype, device=device
+                substate(state, "norm1_context.linear"), dtype=dtype, device=device, unsqueeze_bias=True
             ),
             spatial_ff=TtFeedForwardParameters.from_torch(substate(state, "ff"), dtype=dtype, device=device),
             prompt_ff=TtFeedForwardParameters.from_torch(substate(state, "ff_context"), dtype=dtype, device=device)
@@ -81,8 +81,8 @@ class TtTransformerBlock:
             TtFeedForward(parameters.prompt_ff, approximate="tanh") if parameters.prompt_ff is not None else None
         )
 
-        self._spatial_time_embed = TtLinear(parameters.spatial_time_embed, torch_fallback=True)
-        self._prompt_time_embed = TtLinear(parameters.prompt_time_embed, torch_fallback=True)
+        self._spatial_time_embed = TtLinear(parameters.spatial_time_embed)
+        self._prompt_time_embed = TtLinear(parameters.prompt_time_embed)
 
         self._context_pre_only = self._prompt_ff is None
 

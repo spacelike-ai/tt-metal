@@ -55,7 +55,7 @@ class TtSD3Transformer2DModelParameters:
             ),
             transformer_blocks=transformer_blocks,
             time_embed_out=TtLinearParameters.from_torch(
-                substate(state, "norm_out.linear"), dtype=dtype, device=device
+                substate(state, "norm_out.linear"), dtype=dtype, device=device, unsqueeze_bias=True
             ),
             norm_out=TtLayerNormParameters.from_torch(substate(state, "norm_out.norm"), dtype=dtype, device=device),
             proj_out=TtLinearParameters.from_torch(substate(state, "proj_out"), dtype=dtype, device=device),
@@ -78,7 +78,7 @@ class TtSD3Transformer2DModel:
         self._transformer_blocks = [
             TtTransformerBlock(block, num_heads=num_attention_heads) for block in parameters.transformer_blocks
         ]
-        self._time_embed_out = TtLinear(parameters.time_embed_out, torch_fallback=True)
+        self._time_embed_out = TtLinear(parameters.time_embed_out)
         self._norm_out = TtLayerNorm(parameters.norm_out, eps=1e-6)
         self._proj_out = TtLinear(parameters.proj_out)
 

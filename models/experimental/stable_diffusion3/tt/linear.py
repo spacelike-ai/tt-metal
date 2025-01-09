@@ -19,13 +19,24 @@ class TtLinearParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
+        unsqueeze_bias: bool = False,
     ) -> TtLinearParameters:
+        # There appears to be an issue when using `ttnn.linear` if the input tensor has
+        # shape (n, 1, m) and the bias has rank two. `unsqueeze_bias` makes bias a rank three
+        # tensor to circumvent that.
+        if "bias" in state:
+            bias = state["bias"].unsqueeze(0)
+            if unsqueeze_bias:
+                bias = bias.unsqueeze(0)
+        else:
+            bias = None
+
         return cls(
             weight=ttnn.from_torch(
                 state["weight"].transpose(0, 1), layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device
             ),
-            bias=ttnn.from_torch(state["bias"].unsqueeze(0), layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
-            if "bias" in state
+            bias=ttnn.from_torch(bias, layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
+            if bias is not None
             else None,
         )
 
@@ -39,8 +50,6 @@ class TtLinearParameters:
 
 
 class TtLinear:
-    iteration = 0
-
     def __init__(
         self,
         parameters: TtLinearParameters,
@@ -49,7 +58,6 @@ class TtLinear:
         program_config: ttnn.MatmulProgramConfig | None = None,
         core_grid: ttnn.CoreGrid | None = None,
         output_tile: list[int] | None = None,
-        torch_fallback: bool = False,
     ) -> None:
         self._in_channels = parameters.in_channels
         self._weight = parameters.weight
@@ -59,16 +67,9 @@ class TtLinear:
         self._program_config = program_config
         self._core_grid = core_grid
         self._output_tile = output_tile
-        self._torch_fallback = torch_fallback
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         assert x.shape[-1] == self._in_channels, "input tensor does not have the expected shape"
-
-        if self._torch_fallback:
-            result = ttnn.to_torch(x).to(torch.float32) @ ttnn.to_torch(self._weight).to(torch.float32)
-            if self._bias is not None:
-                result += ttnn.to_torch(self._bias).to(torch.float32)
-            return ttnn.from_torch(result, device=x.device(), layout=ttnn.TILE_LAYOUT, dtype=x.dtype)
 
         return ttnn.linear(
             x,
