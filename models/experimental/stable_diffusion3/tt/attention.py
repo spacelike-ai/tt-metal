@@ -121,7 +121,7 @@ class TtAttention:
         if prompt is not None:
             assert self._prompt_attn is not None
 
-            q2, k2, v2 = self._prompt_attn.qkv(spatial, num_heads=self._num_heads, head_dim=self._head_dim)
+            q2, k2, v2 = self._prompt_attn.qkv(prompt, num_heads=self._num_heads, head_dim=self._head_dim)
 
             q = ttnn.concat([q, q2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Eq
             k = ttnn.concat([k, k2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Eq
