@@ -133,12 +133,7 @@ class TtTransformerBlock:
         return result
 
     def _prompt_ff_block(
-        self,
-        inp: ttnn.Tensor,
-        *,
-        gate: ttnn.Tensor,
-        scale: ttnn.Tensor,
-        shift: ttnn.Tensor,
+        self, inp: ttnn.Tensor, *, gate: ttnn.Tensor, scale: ttnn.Tensor, shift: ttnn.Tensor
     ) -> ttnn.Tensor:
         assert self._prompt_ff is not None
 
@@ -232,10 +227,7 @@ class TtTransformerBlock:
             assert spatial_shift_attn is not None
 
             spatial += self._spatial_attn_block(
-                spatial_normed,
-                gate=spatial_gate_attn,
-                scale=spatial_scale_attn,
-                shift=spatial_shift_attn,
+                spatial_normed, gate=spatial_gate_attn, scale=spatial_scale_attn, shift=spatial_shift_attn
             )
             ttnn.deallocate(spatial_normed)
             ttnn.deallocate(spatial_gate_attn)
@@ -244,10 +236,7 @@ class TtTransformerBlock:
 
         spatial_normed = self._spatial_norm_2(spatial)
         spatial += self._spatial_ff_block(
-            spatial_normed,
-            gate=spatial_gate_ff,
-            scale=spatial_scale_ff,
-            shift=spatial_shift_ff,
+            spatial_normed, gate=spatial_gate_ff, scale=spatial_scale_ff, shift=spatial_shift_ff
         )
         ttnn.deallocate(spatial_normed)
         ttnn.deallocate(spatial_gate_ff)
