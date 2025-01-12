@@ -20,13 +20,21 @@ class TtRmsNormParameters:
         device: ttnn.Device,
     ) -> TtRmsNormParameters:
         return cls(
-            weight=ttnn.from_torch(
-                state["weight"].unsqueeze(0),
-                layout=ttnn.TILE_LAYOUT,
-                dtype=dtype,
-                device=device,
-            )
+            weight=ttnn.from_torch(state["weight"].unsqueeze(0), layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
         )
+
+
+class TtRmsNorm:
+    def __init__(self, parameters: TtRmsNormParameters, *, eps: float) -> None:
+        super().__init__()
+
+        self._eps = eps
+        self._weight = parameters.weight
+
+    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        variance = ttnn.mean(ttnn.pow(x, 2), -1, keepdim=True)
+        x *= ttnn.rsqrt(variance + self._eps)
+        return x * self._weight
 
 
 @dataclass
@@ -43,36 +51,13 @@ class TtLayerNormParameters:
         device: ttnn.Device,
     ) -> TtLayerNormParameters:
         return cls(
-            weight=ttnn.from_torch(
-                state["weight"],
-                layout=ttnn.TILE_LAYOUT,
-                dtype=dtype,
-                device=device,
-            )
+            weight=ttnn.from_torch(state["weight"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
             if "weight" in state
             else None,
-            bias=ttnn.from_torch(
-                state["bias"],
-                layout=ttnn.TILE_LAYOUT,
-                dtype=dtype,
-                device=device,
-            )
+            bias=ttnn.from_torch(state["bias"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
             if "bias" in state
             else None,
         )
-
-
-class TtRmsNorm:
-    def __init__(self, parameters: TtRmsNormParameters, *, eps: float) -> None:
-        super().__init__()
-
-        self._eps = eps
-        self._weight = parameters.weight
-
-    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        variance = ttnn.mean(ttnn.pow(x, 2), -1, keepdim=True)
-        x *= ttnn.rsqrt(variance + self._eps)
-        return x * self._weight
 
 
 class TtLayerNorm:
