@@ -87,12 +87,7 @@ class TtTransformerBlock:
         self._context_pre_only = self._prompt_ff is None
 
     def _spatial_attn_block(
-        self,
-        inp: ttnn.Tensor,
-        *,
-        gate: ttnn.Tensor,
-        scale: ttnn.Tensor,
-        shift: ttnn.Tensor,
+        self, inp: ttnn.Tensor, *, gate: ttnn.Tensor, scale: ttnn.Tensor, shift: ttnn.Tensor
     ) -> ttnn.Tensor:
         assert self._spatial_attn is not None
 
@@ -117,43 +112,11 @@ class TtTransformerBlock:
         spatial_scale: ttnn.Tensor,
         spatial_shift: ttnn.Tensor,
     ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
-        # spatial = ttnn.from_torch(torch.load("spatial.pt"), device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-        # prompt = ttnn.from_torch(torch.load("prompt.pt"), device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-        # spatial_gate = ttnn.from_torch(torch.load("spatial_gate.pt"), device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-        # prompt_gate = ttnn.from_torch(torch.load("prompt_gate.pt"), device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-        # prompt_scale = ttnn.from_torch(torch.load("prompt_scale.pt"), device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-        # prompt_shift = ttnn.from_torch(torch.load("prompt_shift.pt"), device=spatial.device(), layout=ttnn.TILE_LAYOUT)
-
-        # spatial_scale = ttnn.from_torch(
-        #     torch.load("spatial_scale.pt"), device=spatial.device(), layout=ttnn.TILE_LAYOUT
-        # )
-        # spatial_shift = ttnn.from_torch(
-        #     torch.load("spatial_shift.pt"), device=spatial.device(), layout=ttnn.TILE_LAYOUT
-        # )
-
         spatial_scaled = spatial * (1 + spatial_scale) + spatial_shift
         prompt_scaled = prompt * (1 + prompt_scale) + prompt_shift
 
-        # spatial_scaled = ttnn.from_torch(
-        #     torch.load("spatial_scaled.pt"), device=prompt.device(), layout=ttnn.TILE_LAYOUT
-        # )
-        # prompt_scaled = ttnn.from_torch(torch.load("prompt_scaled.pt"), device=prompt.device(), layout=ttnn.TILE_LAYOUT)
         spatial_attn, prompt_attn = self._dual_attn(spatial=spatial_scaled, prompt=prompt_scaled)
 
-        # spatial_attn_scaled = ttnn.from_torch(
-        #     ttnn.to_torch(spatial_gate) * ttnn.to_torch(spatial_attn),
-        #     device=spatial.device(),
-        #     layout=ttnn.TILE_LAYOUT,
-        # )
-        # prompt_attn_scaled = (
-        #     ttnn.from_torch(
-        #         ttnn.to_torch(prompt_gate) * ttnn.to_torch(prompt_attn),
-        #         device=prompt.device(),
-        #         layout=ttnn.TILE_LAYOUT,
-        #     )
-        #     if prompt_gate is not None
-        #     else None
-        # )
         spatial_attn_scaled = spatial_gate * spatial_attn
         prompt_attn_scaled = prompt_gate * prompt_attn if prompt_gate is not None else None
 
@@ -162,12 +125,7 @@ class TtTransformerBlock:
         return spatial_attn_scaled, prompt_attn_scaled
 
     def _spatial_ff_block(
-        self,
-        inp: ttnn.Tensor,
-        *,
-        gate: ttnn.Tensor,
-        scale: ttnn.Tensor,
-        shift: ttnn.Tensor,
+        self, inp: ttnn.Tensor, *, gate: ttnn.Tensor, scale: ttnn.Tensor, shift: ttnn.Tensor
     ) -> ttnn.Tensor:
         scaled = inp * (1 + scale) + shift
         result = gate * self._spatial_ff(scaled)

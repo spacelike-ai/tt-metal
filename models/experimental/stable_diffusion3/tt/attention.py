@@ -132,33 +132,22 @@ class TtAttention:
 
         k = ttnn.transpose(k, 2, 3)
 
-        # attention_scores = ttnn.from_torch(
-        #     ttnn.to_torch(q) @ ttnn.to_torch(k), device=q.device(), layout=ttnn.TILE_LAYOUT
-        # )
         attention_scores = ttnn.matmul(
             q,
             k,
             compute_kernel_config=ttnn.WormholeComputeKernelConfig(
                 math_fidelity=ttnn.MathFidelity.HiFi4,
             ),
-        )  # not very precise
+        )
         ttnn.deallocate(q)
         ttnn.deallocate(k)
 
-        # attention_probs = ttnn.from_torch(
-        #     torch.softmax(ttnn.to_torch(attention_scores) / math.sqrt(q.shape[-1]), dim=-1),
-        #     device=attention_scores.device(),
-        #     layout=ttnn.TILE_LAYOUT,
-        # )
         attention_probs = ttnn.transformer.attention_softmax(
             attention_scores, attention_mask=None, head_size=self._head_dim
-        )  # not very precise
+        )
         ttnn.deallocate(attention_scores)
 
-        # attn = ttnn.from_torch(
-        #     ttnn.to_torch(attention_probs) @ ttnn.to_torch(v), device=v.device(), layout=ttnn.TILE_LAYOUT
-        # )
-        attn = ttnn.matmul(attention_probs, v)  # not very precise
+        attn = ttnn.matmul(attention_probs, v)
         ttnn.deallocate(attention_probs)
         ttnn.deallocate(v)
 

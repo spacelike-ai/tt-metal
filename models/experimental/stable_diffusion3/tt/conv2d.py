@@ -63,10 +63,6 @@ class TtConv2d:
         device = x.device()
         memory_config_in = ttnn.get_memory_config(x)
 
-        # conv_config = ttnn.Conv2dConfig(
-        #     shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-        # )
-
         result, [output_height, output_width], [prepared_weight, prepared_bias] = ttnn.conv2d(
             input_tensor=x,
             weight_tensor=self._weight,
@@ -80,7 +76,6 @@ class TtConv2d:
             batch_size=batch_size,
             input_height=x.shape[1],
             input_width=x.shape[2],
-            # conv_config=conv_config,
             return_output_dim=True,
             return_weights_and_bias=True,
         )
