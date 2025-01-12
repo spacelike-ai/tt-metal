@@ -67,12 +67,34 @@ class TtAttentionPart:
 
         eps = 1e-6
 
-        self.q_proj = TtLinear(parameters.q_proj)
-        self.k_proj = TtLinear(parameters.k_proj)
-        self.v_proj = TtLinear(parameters.v_proj)
-        self.out_proj = TtLinear(parameters.out_proj) if parameters.out_proj is not None else None
-        self.norm_q = TtRmsNorm(parameters.norm_q, eps=eps)
-        self.norm_k = TtRmsNorm(parameters.norm_k, eps=eps)
+        self._q_proj = TtLinear(parameters.q_proj)
+        self._k_proj = TtLinear(parameters.k_proj)
+        self._v_proj = TtLinear(parameters.v_proj)
+        self._out_proj = TtLinear(parameters.out_proj) if parameters.out_proj is not None else None
+        self._norm_q = TtRmsNorm(parameters.norm_q, eps=eps)
+        self._norm_k = TtRmsNorm(parameters.norm_k, eps=eps)
+
+    def qkv(self, x: ttnn.Tensor, *, num_heads: int, head_dim: int) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
+        batch_size = x.shape[0]
+
+        q = self._q_proj(x)  # N ⊗ S1 ⊗ (H * Eq)
+        k = self._k_proj(x)  # N ⊗ S1 ⊗ (H * Eq)
+        v = self._v_proj(x)  # N ⊗ S1 ⊗ (H * Ev)
+
+        shape = (batch_size, -1, num_heads, head_dim)
+        q = ttnn.transpose(ttnn.reshape(q, shape), 1, 2)  # N ⊗ H ⊗ S1 ⊗ Eq
+        k = ttnn.transpose(ttnn.reshape(k, shape), 1, 2)  # N ⊗ H ⊗ S1 ⊗ Eq
+        v = ttnn.transpose(ttnn.reshape(v, shape), 1, 2)  # N ⊗ H ⊗ S1 ⊗ Ev
+
+        q = self._norm_q(q)
+        k = self._norm_k(k)
+
+        return q, k, v
+
+    def out_proj(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        if self._out_proj is None:
+            return x
+        return self._out_proj(x)
 
 
 class TtAttention:
@@ -92,39 +114,14 @@ class TtAttention:
         spatial: N ⊗ S1 ⊗ (H * E1)
         prompt: N ⊗ S2 ⊗ (H * E2)
         """
-        batch_size = spatial.shape[0]
         spatial_sequence_length = spatial.shape[1]
 
-        q = self._spatial_attn.q_proj(spatial)  # N ⊗ S1 ⊗ (H * Eq)
-        k = self._spatial_attn.k_proj(spatial)  # N ⊗ S1 ⊗ (H * Eq)
-        v = self._spatial_attn.v_proj(spatial)  # N ⊗ S1 ⊗ (H * Ev)
-
-        q = ttnn.transpose(ttnn.reshape(q, (batch_size, -1, self._num_heads, self._head_dim)), 1, 2)  # N ⊗ H ⊗ S1 ⊗ Eq
-        k = ttnn.transpose(ttnn.reshape(k, (batch_size, -1, self._num_heads, self._head_dim)), 1, 2)  # N ⊗ H ⊗ S1 ⊗ Eq
-        v = ttnn.transpose(ttnn.reshape(v, (batch_size, -1, self._num_heads, self._head_dim)), 1, 2)  # N ⊗ H ⊗ S1 ⊗ Ev
-
-        q = self._spatial_attn.norm_q(q)
-        k = self._spatial_attn.norm_k(k)
+        q, k, v = self._spatial_attn.qkv(spatial, num_heads=self._num_heads, head_dim=self._head_dim)
 
         if prompt is not None:
             assert self._prompt_attn is not None
 
-            q2 = self._prompt_attn.q_proj(prompt)
-            k2 = self._prompt_attn.k_proj(prompt)
-            v2 = self._prompt_attn.v_proj(prompt)
-
-            q2 = ttnn.transpose(
-                ttnn.reshape(q2, (batch_size, -1, self._num_heads, self._head_dim)), 1, 2
-            )  # N ⊗ H ⊗ S2 ⊗ Eq
-            k2 = ttnn.transpose(
-                ttnn.reshape(k2, (batch_size, -1, self._num_heads, self._head_dim)), 1, 2
-            )  # N ⊗ H ⊗ S2 ⊗ Eq
-            v2 = ttnn.transpose(
-                ttnn.reshape(v2, (batch_size, -1, self._num_heads, self._head_dim)), 1, 2
-            )  # N ⊗ H ⊗ S2 ⊗ Ev
-
-            q2 = self._prompt_attn.norm_q(q2)
-            k2 = self._prompt_attn.norm_k(k2)
+            q2, k2, v2 = self._prompt_attn.qkv(spatial, num_heads=self._num_heads, head_dim=self._head_dim)
 
             q = ttnn.concat([q, q2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Eq
             k = ttnn.concat([k, k2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Eq
@@ -158,12 +155,10 @@ class TtAttention:
             spatial = concatenated_attn[:, :spatial_sequence_length]
             prompt = concatenated_attn[:, spatial_sequence_length:]
 
-            if self._prompt_attn.out_proj is not None:
-                prompt = self._prompt_attn.out_proj(prompt)
+            prompt = self._prompt_attn.out_proj(prompt)
         else:
             spatial = concatenated_attn
 
-        if self._spatial_attn.out_proj is not None:
-            spatial = self._spatial_attn.out_proj(spatial)
+        spatial = self._spatial_attn.out_proj(spatial)
 
         return spatial, prompt
