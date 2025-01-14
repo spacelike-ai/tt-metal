@@ -32,9 +32,7 @@ class TtRmsNorm:
         self._weight = parameters.weight
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        variance = ttnn.mean(ttnn.pow(x, 2), -1, keepdim=True)
-        x *= ttnn.rsqrt(variance + self._eps)
-        return x * self._weight
+        return ttnn.rms_norm(x, weight=self._weight, epsilon=self._eps)
 
 
 @dataclass
