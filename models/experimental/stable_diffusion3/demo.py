@@ -34,8 +34,8 @@ def test_sd3(*, device: ttnn.Device):
         "negative_prompt_1": [negative_prompt],
         "negative_prompt_2": [negative_prompt],
         "negative_prompt_3": [negative_prompt],
-        "width": 512,  # default = 1024, works with 512
-        "height": 512,
+        "width": 1024,  # default = 1024, works with 512
+        "height": 1024,
         "num_inference_steps": 40,
         "guidance_scale": 4.5,
         "num_images_per_prompt": 1,
