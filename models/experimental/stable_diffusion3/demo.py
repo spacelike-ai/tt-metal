@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 import torch
 import tqdm
@@ -92,6 +94,43 @@ def test_sd3(*, device: ttnn.Device):
     batch_size = len(model_input["prompt_1"])
     do_classifier_free_guidance = model_input["guidance_scale"] > 1
     tokenizer_max_length = tokenizer_1.model_max_length
+    latents_shape = (
+        batch_size * model_input["num_images_per_prompt"],
+        num_channels_latents,
+        model_input["height"] // vae_scale_factor,
+        model_input["width"] // vae_scale_factor,
+    )
+
+    logger.info("warm up")
+    prompt_embeds = torch.randn([2, 333, 4096])
+    pooled_prompt_embeds = torch.randn([2, 2048])
+    latents = torch.randn(latents_shape)
+    latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+    timestep = torch.tensor([500]).expand(latent_model_input.shape[0])
+    tt_prompt_embeds = ttnn.from_torch(prompt_embeds, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+    tt_pooled_prompt_embeds = ttnn.from_torch(
+        pooled_prompt_embeds, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+    )
+    tt_latent_model_input = ttnn.from_torch(
+        latent_model_input.permute([0, 2, 3, 1]),  # BCYX -> BYXC
+        layout=ttnn.TILE_LAYOUT,
+        device=device,
+        dtype=ttnn.bfloat16,
+    )
+    tt_timestep = ttnn.from_torch(
+        timestep.unsqueeze(1),
+        layout=ttnn.TILE_LAYOUT,
+        device=device,
+        dtype=ttnn.float32,
+    )
+    tt_transformer(
+        spatial=tt_latent_model_input,
+        prompt_embed=tt_prompt_embeds,
+        pooled_projection=tt_pooled_prompt_embeds,
+        timestep=tt_timestep,
+    )
+
+    start_time = time.time()
 
     logger.info("encode prompts")
 
@@ -182,12 +221,6 @@ def test_sd3(*, device: ttnn.Device):
 
     logger.info("prepare latents")
 
-    latents_shape = (
-        batch_size * model_input["num_images_per_prompt"],
-        num_channels_latents,
-        model_input["height"] // vae_scale_factor,
-        model_input["width"] // vae_scale_factor,
-    )
     torch.manual_seed(model_input["seed"])
     latents = torch.randn(latents_shape, dtype=prompt_embeds.dtype)
 
@@ -250,6 +283,10 @@ def test_sd3(*, device: ttnn.Device):
 
     pil_images = image_processor.numpy_to_pil(image_processor.pt_to_numpy(image))
     pil_image = pil_images[0]
+
+    runtime = time.time() - start_time
+    logger.info(f"runtime: {runtime}")
+
     pil_image.save("sd3.png")
 
 
