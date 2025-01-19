@@ -80,3 +80,7 @@ class TtLinear:
             core_grid=self._core_grid,
             output_tile=self._output_tile,
         )
+
+    @property
+    def device(self) -> ttnn.Device:
+        return self._weight.device()

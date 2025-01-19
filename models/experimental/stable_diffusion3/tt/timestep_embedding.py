@@ -8,6 +8,7 @@ import torch
 import ttnn
 from models.experimental.stable_diffusion3.tt.linear import TtLinear, TtLinearParameters
 
+from . import utils
 from .substate import substate
 
 
@@ -60,12 +61,18 @@ class TtCombinedTimestepTextProjEmbeddings:
         self._timestep_embedder = _TimestepEmbedding(parameters.timestep_embedder)
         self._text_embedder = _TimestepEmbedding(parameters.text_embedder)
 
+        device = self._timestep_embedder.device
+        self._time_proj_factor = self._create_time_proj_factor(num_channels=256, device=device)
+
     def __call__(self, *, timestep: ttnn.Tensor, pooled_projection: ttnn.Tensor) -> ttnn.Tensor:
         assert timestep.dtype == ttnn.float32
 
         batch_size = timestep.shape[0]
 
-        emb = timestep * self.time_proj_factor(num_channels=256, batch_size=batch_size, device=timestep.device())
+        time_proj_factor = ttnn.repeat(self._time_proj_factor, ttnn.Shape([batch_size, 1]))
+        time_proj_factor = utils.tilize(time_proj_factor)
+
+        emb = timestep * time_proj_factor
         c = ttnn.cos(emb)
         s = ttnn.sin(emb)
 
@@ -78,7 +85,7 @@ class TtCombinedTimestepTextProjEmbeddings:
         return time_embed + text_embed
 
     @staticmethod
-    def time_proj_factor(*, num_channels: int, batch_size: int, device: ttnn.Device) -> ttnn.Tensor:
+    def _create_time_proj_factor(*, num_channels: int, device: ttnn.Device) -> ttnn.Tensor:
         assert num_channels % 2 == 0
         half_dim = num_channels // 2
 
@@ -86,9 +93,9 @@ class TtCombinedTimestepTextProjEmbeddings:
 
         exponent = -math.log(max_period) * torch.arange(start=0, end=half_dim, dtype=torch.float32)
         exponent = exponent / half_dim
-        factor = torch.exp(exponent).repeat(batch_size, 1)
+        factor = torch.exp(exponent).unsqueeze(0)
 
-        return ttnn.from_torch(factor, device=device, layout=ttnn.TILE_LAYOUT)
+        return ttnn.from_torch(factor, device=device)
 
 
 class _TimestepEmbedding:
@@ -102,3 +109,7 @@ class _TimestepEmbedding:
         x = self._linear_1(x)
         x = ttnn.silu(x)
         return self._linear_2(x)
+
+    @property
+    def device(self) -> ttnn.Device:
+        return self._linear_1.device
