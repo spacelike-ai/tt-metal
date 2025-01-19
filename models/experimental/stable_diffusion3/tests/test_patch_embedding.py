@@ -20,6 +20,7 @@ from ..tt.patch_embedding import TtPatchEmbed, TtPatchEmbedParameters
 def test_patch_embedding(
     *,
     device: ttnn.Device,
+    use_program_cache: None,
     batch_size: int,
 ):
     dtype = torch.bfloat16

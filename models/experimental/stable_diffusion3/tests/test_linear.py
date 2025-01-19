@@ -17,6 +17,7 @@ from ..tt.linear import TtLinear, TtLinearParameters
 def test_linear(
     *,
     device: ttnn.Device,
+    use_program_cache: None,
     batch_size: int,
     input_dim: int,
     output_dim: int,

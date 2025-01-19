@@ -20,7 +20,11 @@ CHECKPOINT = "stabilityai/stable-diffusion-3.5-medium"
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
-def test_sd3(*, device: ttnn.Device):
+def test_sd3(
+    *,
+    device: ttnn.Device,
+    use_program_cache: None,
+):
     prompt = (
         "An epic, high-definition cinematic shot of a rustic snowy cabin glowing "
         "warmly at dusk, nestled in a serene winter landscape. Surrounded by gentle "

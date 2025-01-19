@@ -20,6 +20,7 @@ from ..tt.normalization import TtLayerNorm, TtLayerNormParameters, TtRmsNorm, Tt
 def test_layer_norm(
     *,
     device: ttnn.Device,
+    use_program_cache: None,
     input_shape: list[int],
 ):
     dtype = torch.bfloat16

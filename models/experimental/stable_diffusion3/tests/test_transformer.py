@@ -19,6 +19,7 @@ from ..tt.transformer import TtSD3Transformer2DModel, TtSD3Transformer2DModelPar
 def test_transformer(
     *,
     device: ttnn.Device,
+    use_program_cache: None,
     batch_size: int,
     prompt_sequence_length: int,
 ):

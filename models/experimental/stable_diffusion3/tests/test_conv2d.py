@@ -21,6 +21,7 @@ from ..tt.patch_embedding import TtConv2d, TtConv2dParameters
 def test_conv2d(
     *,
     device: ttnn.Device,
+    use_program_cache: None,
     batch_size: int,
     in_channels: int,
     out_channels: int,

@@ -20,6 +20,7 @@ from ..tt.attention import TtAttention, TtAttentionParameters
 def test_attention(
     *,
     device: ttnn.Device,
+    use_program_cache: None,
     block_index: int,
     batch_size: int,
     spatial_sequence_length: int,

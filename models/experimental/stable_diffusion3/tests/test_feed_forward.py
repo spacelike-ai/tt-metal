@@ -19,6 +19,7 @@ from ..tt.feed_forward import TtFeedForward, TtFeedForwardParameters
 def test_feed_forward(
     *,
     device: ttnn.Device,
+    use_program_cache: None,
     batch_size: int,
     input_dim: int,
     output_dim: int,

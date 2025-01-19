@@ -22,6 +22,7 @@ from ..tt.timestep_embedding import (
 def test_timestep_embedding(
     *,
     device: ttnn.Device,
+    use_program_cache: None,
     batch_size: int,
 ):
     dtype = torch.bfloat16

@@ -20,6 +20,7 @@ from ..tt.transformer_block import TtTransformerBlock, TtTransformerBlockParamet
 def test_transformer_block(
     *,
     device: ttnn.Device,
+    use_program_cache: None,
     block_index: int,
     batch_size: int,
     spatial_sequence_length: int,
