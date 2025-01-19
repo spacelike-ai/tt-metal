@@ -61,12 +61,34 @@ class TtCombinedTimestepTextProjEmbeddings:
         self._text_embedder = _TimestepEmbedding(parameters.text_embedder)
 
     def __call__(self, *, timestep: ttnn.Tensor, pooled_projection: ttnn.Tensor) -> ttnn.Tensor:
-        timesteps_proj = _time_proj(num_channels=256, timesteps=timestep, dtype=pooled_projection.dtype)
+        assert timestep.dtype == ttnn.float32
+
+        batch_size = timestep.shape[0]
+
+        emb = timestep * self.time_proj_factor(num_channels=256, batch_size=batch_size, device=timestep.device())
+        c = ttnn.cos(emb)
+        s = ttnn.sin(emb)
+
+        timesteps_proj = ttnn.concat([c, s], dim=-1)
+        timesteps_proj = ttnn.clone(timesteps_proj, dtype=pooled_projection.dtype)
 
         time_embed = self._timestep_embedder(timesteps_proj)
         text_embed = self._text_embedder(pooled_projection)
 
         return time_embed + text_embed
+
+    @staticmethod
+    def time_proj_factor(*, num_channels: int, batch_size: int, device: ttnn.Device) -> ttnn.Tensor:
+        assert num_channels % 2 == 0
+        half_dim = num_channels // 2
+
+        max_period = 10000
+
+        exponent = -math.log(max_period) * torch.arange(start=0, end=half_dim, dtype=torch.float32)
+        exponent = exponent / half_dim
+        factor = torch.exp(exponent).repeat(batch_size, 1)
+
+        return ttnn.from_torch(factor, device=device, layout=ttnn.TILE_LAYOUT)
 
 
 class _TimestepEmbedding:
@@ -80,27 +102,3 @@ class _TimestepEmbedding:
         x = self._linear_1(x)
         x = ttnn.silu(x)
         return self._linear_2(x)
-
-
-def _time_proj(*, num_channels: int, timesteps: ttnn.Tensor, dtype: ttnn.DataType) -> ttnn.Tensor:
-    assert timesteps.dtype == ttnn.float32
-
-    assert num_channels % 2 == 0
-    half_dim = num_channels // 2
-
-    batch_size = timesteps.shape[0]
-
-    max_period = 10000
-
-    exponent = -math.log(max_period) * torch.arange(start=0, end=half_dim, dtype=torch.float32)
-    exponent = exponent / half_dim
-    factor = torch.exp(exponent).repeat(batch_size, 1)
-
-    tt_factor = ttnn.from_torch(factor, device=timesteps.device(), layout=ttnn.TILE_LAYOUT)
-
-    emb = timesteps * tt_factor
-    c = ttnn.cos(emb)
-    s = ttnn.sin(emb)
-
-    result = ttnn.concat([c, s], dim=-1)
-    return ttnn.clone(result, dtype=dtype)
