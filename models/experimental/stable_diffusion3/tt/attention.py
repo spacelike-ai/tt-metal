@@ -13,9 +13,7 @@ from .substate import has_substate, substate
 
 @dataclass
 class TtAttentionPartParameters:
-    q_proj: TtLinearParameters
-    k_proj: TtLinearParameters
-    v_proj: TtLinearParameters
+    qkv_proj: TtLinearParameters
     norm_q: TtRmsNormParameters
     norm_k: TtRmsNormParameters
     out_proj: TtLinearParameters | None
@@ -34,19 +32,20 @@ class TtAttentionParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
     ) -> TtAttentionParameters:
+        spatial_qkv_proj = _merge_qkv_proj(substate(state, "to_q"), substate(state, "to_k"), substate(state, "to_v"))
+        prompt_qkv_proj = _merge_qkv_proj(
+            substate(state, "add_q_proj"), substate(state, "add_k_proj"), substate(state, "add_v_proj")
+        )
+
         return cls(
             spatial=TtAttentionPartParameters(
-                q_proj=TtLinearParameters.from_torch(substate(state, "to_q"), dtype=dtype, device=device),
-                k_proj=TtLinearParameters.from_torch(substate(state, "to_k"), dtype=dtype, device=device),
-                v_proj=TtLinearParameters.from_torch(substate(state, "to_v"), dtype=dtype, device=device),
+                qkv_proj=TtLinearParameters.from_torch(spatial_qkv_proj, dtype=dtype, device=device),
                 norm_q=TtRmsNormParameters.from_torch(substate(state, "norm_q"), dtype=dtype, device=device),
                 norm_k=TtRmsNormParameters.from_torch(substate(state, "norm_k"), dtype=dtype, device=device),
                 out_proj=TtLinearParameters.from_torch(substate(state, "to_out.0"), dtype=dtype, device=device),
             ),
             prompt=TtAttentionPartParameters(
-                q_proj=TtLinearParameters.from_torch(substate(state, "add_q_proj"), dtype=dtype, device=device),
-                k_proj=TtLinearParameters.from_torch(substate(state, "add_k_proj"), dtype=dtype, device=device),
-                v_proj=TtLinearParameters.from_torch(substate(state, "add_v_proj"), dtype=dtype, device=device),
+                qkv_proj=TtLinearParameters.from_torch(prompt_qkv_proj, dtype=dtype, device=device),
                 norm_q=TtRmsNormParameters.from_torch(substate(state, "norm_added_q"), dtype=dtype, device=device),
                 norm_k=TtRmsNormParameters.from_torch(substate(state, "norm_added_k"), dtype=dtype, device=device),
                 out_proj=TtLinearParameters.from_torch(substate(state, "to_add_out"), dtype=dtype, device=device)
@@ -58,7 +57,7 @@ class TtAttentionParameters:
         )
 
     def head_dim(self, *, num_heads: int) -> int:
-        return self.spatial.q_proj.out_channels // num_heads
+        return self.spatial.qkv_proj.out_channels // num_heads // 3
 
 
 class TtAttentionPart:
@@ -67,24 +66,15 @@ class TtAttentionPart:
 
         eps = 1e-6
 
-        self._q_proj = TtLinear(parameters.q_proj)
-        self._k_proj = TtLinear(parameters.k_proj)
-        self._v_proj = TtLinear(parameters.v_proj)
+        self._qkv_proj = TtLinear(parameters.qkv_proj)
         self._out_proj = TtLinear(parameters.out_proj) if parameters.out_proj is not None else None
         self._norm_q = TtRmsNorm(parameters.norm_q, eps=eps)
         self._norm_k = TtRmsNorm(parameters.norm_k, eps=eps)
 
     def qkv(self, x: ttnn.Tensor, *, num_heads: int, head_dim: int) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
-        batch_size = x.shape[0]
+        qkv = self._qkv_proj(x)
 
-        q = self._q_proj(x)  # N ⊗ S1 ⊗ (H * Eq)
-        k = self._k_proj(x)  # N ⊗ S1 ⊗ (H * Eq)
-        v = self._v_proj(x)  # N ⊗ S1 ⊗ (H * Ev)
-
-        shape = (batch_size, -1, num_heads, head_dim)
-        q = ttnn.transpose(ttnn.reshape(q, shape), 1, 2)  # N ⊗ H ⊗ S1 ⊗ Eq
-        k = ttnn.transpose(ttnn.reshape(k, shape), 1, 2)  # N ⊗ H ⊗ S1 ⊗ Eq
-        v = ttnn.transpose(ttnn.reshape(v, shape), 1, 2)  # N ⊗ H ⊗ S1 ⊗ Ev
+        q, k, v = ttnn.transformer.split_query_key_value_and_split_heads(qkv, num_heads=num_heads, transpose_key=False)
 
         q = self._norm_q(q)
         k = self._norm_k(k)
@@ -161,3 +151,14 @@ class TtAttention:
         spatial = self._spatial_attn.out_proj(spatial)
 
         return spatial, prompt
+
+
+def _merge_qkv_proj(
+    q_state: dict[str, torch.Tensor],
+    k_state: dict[str, torch.Tensor],
+    v_state: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    return {
+        "weight": torch.cat([q_state["weight"], k_state["weight"], v_state["weight"]]) if "weight" in q_state else None,
+        "bias": torch.cat([q_state["bias"], k_state["bias"], v_state["bias"]]) if "bias" in q_state else None,
+    }
