@@ -50,7 +50,6 @@ class TtStableDiffusion3Pipeline:
         )
         self._num_channels_latents = torch_transformer.config.in_channels
         self._joint_attention_dim = torch_transformer.config.joint_attention_dim
-        logger.info("done")
 
         self._block_out_channels = self._vae.config.block_out_channels
         self._vae_scaling_factor = self._vae.config.scaling_factor
@@ -59,30 +58,25 @@ class TtStableDiffusion3Pipeline:
         self._vae_scale_factor = 2 ** (len(self._block_out_channels) - 1)
         self._image_processor = VaeImageProcessor(vae_scale_factor=self._vae_scale_factor)
 
-    def __call__(
+    def prepare(
         self,
         *,
-        prompt_1: list[str],
-        prompt_2: list[str],
-        prompt_3: list[str],
-        negative_prompt_1: list[str],
-        negative_prompt_2: list[str],
-        negative_prompt_3: list[str],
+        batch_size: int,
+        num_images_per_prompt: int = 1,
         width: int = 1024,
         height: int = 1024,
-        num_inference_steps: int = 40,
         guidance_scale: float = 4.5,
-        num_images_per_prompt: int = 1,
         max_t5_sequence_length: int = 256,
-        seed: int = 0,
-    ) -> None:
-        assert height % (self._vae_scale_factor * self._tt_transformer.patch_size) == 0
-        assert width % (self._vae_scale_factor * self._tt_transformer.patch_size) == 0
-        assert max_t5_sequence_length <= 512
+    ):
+        self._prepared_batch_size = batch_size
+        self._prepared_num_images_per_prompt = num_images_per_prompt
+        self._prepared_width = width
+        self._prepared_height = height
+        self._prepared_guidance_scale = guidance_scale
+        self._prepared_max_t5_sequence_length = max_t5_sequence_length
 
-        batch_size = len(prompt_1)
         do_classifier_free_guidance = guidance_scale > 1
-        tokenizer_max_length = self._tokenizer_1.model_max_length
+
         latents_shape = (
             batch_size * num_images_per_prompt,
             self._num_channels_latents,
@@ -90,9 +84,8 @@ class TtStableDiffusion3Pipeline:
             width // self._vae_scale_factor,
         )
 
-        logger.info("warm up")
-        prompt_embeds = torch.randn([2, 333, 4096])
-        pooled_prompt_embeds = torch.randn([2, 2048])
+        prompt_embeds = torch.randn([2, 333, 4096])  # TODO: do not hardcode these numbers
+        pooled_prompt_embeds = torch.randn([2, 2048])  # TODO: do not hardcode these numbers
         latents = torch.randn(latents_shape)
         latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
         timestep = torch.tensor([500]).expand(latent_model_input.shape[0])
@@ -121,100 +114,58 @@ class TtStableDiffusion3Pipeline:
             timestep=tt_timestep,
         )
 
-        start_time = time.time()
+    def __call__(
+        self,
+        *,
+        prompt_1: list[str],
+        prompt_2: list[str],
+        prompt_3: list[str],
+        negative_prompt_1: list[str],
+        negative_prompt_2: list[str],
+        negative_prompt_3: list[str],
+        num_inference_steps: int = 40,
+        seed: int = 0,
+    ) -> None:
+        batch_size = self._prepared_batch_size
+        num_images_per_prompt = self._prepared_num_images_per_prompt
+        width = self._prepared_width
+        height = self._prepared_height
+        guidance_scale = self._prepared_guidance_scale
+        max_t5_sequence_length = self._prepared_max_t5_sequence_length
 
-        logger.info("encode prompts")
+        assert height % (self._vae_scale_factor * self._tt_transformer.patch_size) == 0
+        assert width % (self._vae_scale_factor * self._tt_transformer.patch_size) == 0
+        assert max_t5_sequence_length <= 512
+        assert batch_size == len(prompt_1)
 
-        logger.info("prompt 1")
-        prompt_embed, pooled_prompt_embed = _get_clip_prompt_embeds(
-            prompt=prompt_1,
+        do_classifier_free_guidance = guidance_scale > 1
+        latents_shape = (
+            batch_size * num_images_per_prompt,
+            self._num_channels_latents,
+            height // self._vae_scale_factor,
+            width // self._vae_scale_factor,
+        )
+
+        logger.info("encoding prompts...")
+
+        prompt_embeds, pooled_prompt_embeds = self._encode_prompts(
+            prompt_1=prompt_1,
+            prompt_2=prompt_2,
+            prompt_3=prompt_3,
+            negative_prompt_1=negative_prompt_1,
+            negative_prompt_2=negative_prompt_2,
+            negative_prompt_3=negative_prompt_3,
             num_images_per_prompt=num_images_per_prompt,
-            tokenizer=self._tokenizer_1,
-            text_encoder=self._text_encoder_1,
-            tokenizer_max_length=tokenizer_max_length,
+            max_t5_sequence_length=max_t5_sequence_length,
+            do_classifier_free_guidance=do_classifier_free_guidance,
         )
 
-        logger.info("prompt 2")
-        prompt_2_embed, pooled_prompt_2_embed = _get_clip_prompt_embeds(
-            prompt=prompt_2,
-            num_images_per_prompt=num_images_per_prompt,
-            tokenizer=self._tokenizer_2,
-            text_encoder=self._text_encoder_2,
-            tokenizer_max_length=tokenizer_max_length,
-        )
-        clip_prompt_embeds = torch.cat([prompt_embed, prompt_2_embed], dim=-1)
-
-        logger.info("prompt 3")
-        t5_prompt_embed = _get_t5_prompt_embeds(
-            prompt=prompt_3,
-            num_images_per_prompt=num_images_per_prompt,
-            max_sequence_length=max_t5_sequence_length,
-            tokenizer=self._tokenizer_3,
-            text_encoder=self._text_encoder_3,
-            tokenizer_max_length=tokenizer_max_length,
-            joint_attention_dim=self._joint_attention_dim,
-        )
-
-        clip_prompt_embeds = torch.nn.functional.pad(
-            clip_prompt_embeds,
-            (0, t5_prompt_embed.shape[-1] - clip_prompt_embeds.shape[-1]),
-        )
-
-        prompt_embeds = torch.cat([clip_prompt_embeds, t5_prompt_embed], dim=-2)
-        pooled_prompt_embeds = torch.cat([pooled_prompt_embed, pooled_prompt_2_embed], dim=-1)
-
-        if do_classifier_free_guidance:
-            logger.info("negative prompt 1")
-            negative_prompt_embed, negative_pooled_prompt_embed = _get_clip_prompt_embeds(
-                prompt=negative_prompt_1,
-                num_images_per_prompt=num_images_per_prompt,
-                tokenizer=self._tokenizer_1,
-                text_encoder=self._text_encoder_1,
-                tokenizer_max_length=tokenizer_max_length,
-            )
-            logger.info("negative prompt 2")
-            negative_prompt_2_embed, negative_pooled_prompt_2_embed = _get_clip_prompt_embeds(
-                prompt=negative_prompt_2,
-                num_images_per_prompt=num_images_per_prompt,
-                tokenizer=self._tokenizer_2,
-                text_encoder=self._text_encoder_2,
-                tokenizer_max_length=tokenizer_max_length,
-            )
-            negative_clip_prompt_embeds = torch.cat([negative_prompt_embed, negative_prompt_2_embed], dim=-1)
-
-            logger.info("negative prompt 3")
-            t5_negative_prompt_embed = _get_t5_prompt_embeds(
-                prompt=negative_prompt_3,
-                num_images_per_prompt=num_images_per_prompt,
-                max_sequence_length=max_t5_sequence_length,
-                tokenizer=self._tokenizer_3,
-                text_encoder=self._text_encoder_3,
-                tokenizer_max_length=tokenizer_max_length,
-                joint_attention_dim=self._joint_attention_dim,
-            )
-
-            negative_clip_prompt_embeds = torch.nn.functional.pad(
-                negative_clip_prompt_embeds,
-                (
-                    0,
-                    t5_negative_prompt_embed.shape[-1] - negative_clip_prompt_embeds.shape[-1],
-                ),
-            )
-
-            negative_prompt_embeds = torch.cat([negative_clip_prompt_embeds, t5_negative_prompt_embed], dim=-2)
-            negative_pooled_prompt_embeds = torch.cat(
-                [negative_pooled_prompt_embed, negative_pooled_prompt_2_embed], dim=-1
-            )
-
-            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-            pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
-
-        logger.info("prepare timesteps")
+        logger.info("preparing timesteps...")
 
         self._scheduler.set_timesteps(num_inference_steps)
         timesteps = self._scheduler.timesteps
 
-        logger.info("prepare latents")
+        logger.info("preparing latents...")
 
         torch.manual_seed(seed)
         latents = torch.randn(latents_shape, dtype=prompt_embeds.dtype)
@@ -226,7 +177,7 @@ class TtStableDiffusion3Pipeline:
             pooled_prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
         )
 
-        logger.info("denoising loop")
+        logger.info("denoising...")
 
         for t in tqdm.tqdm(timesteps):
             latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
@@ -265,12 +216,7 @@ class TtStableDiffusion3Pipeline:
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-            latents = self._scheduler.step(
-                noise_pred,  # type: ignore  # noqa: PGH003
-                t,  # type: ignore  # noqa: PGH003
-                latents,  # type: ignore  # noqa: PGH003
-                return_dict=False,
-            )[0]
+            latents = self._scheduler.step(noise_pred, t, latents, return_dict=False)[0]
 
         latents = (latents / self._vae_scaling_factor) + self._vae_shift_factor
 
@@ -279,13 +225,104 @@ class TtStableDiffusion3Pipeline:
             image = self._image_processor.postprocess(image, output_type="pt")
             assert isinstance(image, torch.Tensor)
 
-        pil_images = self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
-        pil_image = pil_images[0]
+        return self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
 
-        runtime = time.time() - start_time
-        logger.info(f"runtime: {runtime}")
+    def _encode_prompts(
+        self,
+        *,
+        prompt_1: list[str],
+        prompt_2: list[str],
+        prompt_3: list[str],
+        negative_prompt_1: list[str],
+        negative_prompt_2: list[str],
+        negative_prompt_3: list[str],
+        num_images_per_prompt: int,
+        max_t5_sequence_length: int,
+        do_classifier_free_guidance: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        tokenizer_max_length = self._tokenizer_1.model_max_length
 
-        pil_image.save("sd3.png")
+        prompt_embed, pooled_prompt_embed = _get_clip_prompt_embeds(
+            prompt=prompt_1,
+            num_images_per_prompt=num_images_per_prompt,
+            tokenizer=self._tokenizer_1,
+            text_encoder=self._text_encoder_1,
+            tokenizer_max_length=tokenizer_max_length,
+        )
+
+        prompt_2_embed, pooled_prompt_2_embed = _get_clip_prompt_embeds(
+            prompt=prompt_2,
+            num_images_per_prompt=num_images_per_prompt,
+            tokenizer=self._tokenizer_2,
+            text_encoder=self._text_encoder_2,
+            tokenizer_max_length=tokenizer_max_length,
+        )
+        clip_prompt_embeds = torch.cat([prompt_embed, prompt_2_embed], dim=-1)
+
+        t5_prompt_embed = _get_t5_prompt_embeds(
+            prompt=prompt_3,
+            num_images_per_prompt=num_images_per_prompt,
+            max_sequence_length=max_t5_sequence_length,
+            tokenizer=self._tokenizer_3,
+            text_encoder=self._text_encoder_3,
+            tokenizer_max_length=tokenizer_max_length,
+            joint_attention_dim=self._joint_attention_dim,
+        )
+
+        clip_prompt_embeds = torch.nn.functional.pad(
+            clip_prompt_embeds,
+            (0, t5_prompt_embed.shape[-1] - clip_prompt_embeds.shape[-1]),
+        )
+
+        prompt_embeds = torch.cat([clip_prompt_embeds, t5_prompt_embed], dim=-2)
+        pooled_prompt_embeds = torch.cat([pooled_prompt_embed, pooled_prompt_2_embed], dim=-1)
+
+        if not do_classifier_free_guidance:
+            return prompt_embeds, pooled_prompt_embeds
+
+        negative_prompt_embed, negative_pooled_prompt_embed = _get_clip_prompt_embeds(
+            prompt=negative_prompt_1,
+            num_images_per_prompt=num_images_per_prompt,
+            tokenizer=self._tokenizer_1,
+            text_encoder=self._text_encoder_1,
+            tokenizer_max_length=tokenizer_max_length,
+        )
+        negative_prompt_2_embed, negative_pooled_prompt_2_embed = _get_clip_prompt_embeds(
+            prompt=negative_prompt_2,
+            num_images_per_prompt=num_images_per_prompt,
+            tokenizer=self._tokenizer_2,
+            text_encoder=self._text_encoder_2,
+            tokenizer_max_length=tokenizer_max_length,
+        )
+        negative_clip_prompt_embeds = torch.cat([negative_prompt_embed, negative_prompt_2_embed], dim=-1)
+
+        t5_negative_prompt_embed = _get_t5_prompt_embeds(
+            prompt=negative_prompt_3,
+            num_images_per_prompt=num_images_per_prompt,
+            max_sequence_length=max_t5_sequence_length,
+            tokenizer=self._tokenizer_3,
+            text_encoder=self._text_encoder_3,
+            tokenizer_max_length=tokenizer_max_length,
+            joint_attention_dim=self._joint_attention_dim,
+        )
+
+        negative_clip_prompt_embeds = torch.nn.functional.pad(
+            negative_clip_prompt_embeds,
+            (
+                0,
+                t5_negative_prompt_embed.shape[-1] - negative_clip_prompt_embeds.shape[-1],
+            ),
+        )
+
+        negative_prompt_embeds = torch.cat([negative_clip_prompt_embeds, t5_negative_prompt_embed], dim=-2)
+        negative_pooled_prompt_embeds = torch.cat(
+            [negative_pooled_prompt_embed, negative_pooled_prompt_2_embed], dim=-1
+        )
+
+        prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+        pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
+
+        return prompt_embeds, pooled_prompt_embeds
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/stable_diffusion_3/pipeline_stable_diffusion_3.py

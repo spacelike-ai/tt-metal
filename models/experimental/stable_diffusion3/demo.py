@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import time
+
 import pytest
-import torch
+from loguru import logger
 
 import ttnn
 
@@ -16,6 +18,12 @@ def test_sd3(
 ):
     pipeline = TtStableDiffusion3Pipeline(checkpoint="stabilityai/stable-diffusion-3.5-medium", device=device)
 
+    pipeline.prepare(
+        batch_size=1,
+        width=1024,
+        height=1024,
+    )
+
     prompt = (
         "An epic, high-definition cinematic shot of a rustic snowy cabin glowing "
         "warmly at dusk, nestled in a serene winter landscape. Surrounded by gentle "
@@ -24,15 +32,20 @@ def test_sd3(
     )
     negative_prompt = ""
 
-    pipeline(
+    start_time = time.time()
+
+    images = pipeline(
         prompt_1=[prompt],
         prompt_2=[prompt],
         prompt_3=[prompt],
         negative_prompt_1=[negative_prompt],
         negative_prompt_2=[negative_prompt],
         negative_prompt_3=[negative_prompt],
-        width=1024,
-        height=1024,
         num_inference_steps=40,
         seed=0,
     )
+
+    runtime = time.time() - start_time
+    logger.info(f"runtime: {runtime}")
+
+    images[0].save("sd3.png")
