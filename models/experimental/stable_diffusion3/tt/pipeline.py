@@ -105,7 +105,8 @@ class TtStableDiffusion3Pipeline:
             device=self._device,
             dtype=ttnn.float32,
         )
-        self._tt_transformer(
+
+        self._transformer_trace = self._tt_transformer.cache_and_trace(
             spatial=tt_latent_model_input,
             prompt=tt_prompt_embeds,
             pooled_projection=tt_pooled_prompt_embeds,
@@ -168,12 +169,8 @@ class TtStableDiffusion3Pipeline:
         torch.manual_seed(seed)
         latents = torch.randn(latents_shape, dtype=prompt_embeds.dtype)
 
-        tt_prompt_embeds = ttnn.from_torch(
-            prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
-        )
-        tt_pooled_prompt_embeds = ttnn.from_torch(
-            pooled_prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
-        )
+        tt_prompt_embeds = ttnn.from_torch(prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+        tt_pooled_prompt_embeds = ttnn.from_torch(pooled_prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
 
         logger.info("denoising...")
 
@@ -185,20 +182,18 @@ class TtStableDiffusion3Pipeline:
             tt_latent_model_input = ttnn.from_torch(
                 latent_model_input.permute([0, 2, 3, 1]),  # BCYX -> BYXC
                 layout=ttnn.TILE_LAYOUT,
-                device=self._device,
                 dtype=ttnn.bfloat16,
             )
             tt_timestep = ttnn.from_torch(
                 timestep.unsqueeze(1),
                 layout=ttnn.TILE_LAYOUT,
-                device=self._device,
                 dtype=ttnn.float32,
             )
 
-            tt_noise_pred = self._tt_transformer(
+            tt_noise_pred = self._transformer_trace(
                 spatial=tt_latent_model_input,
-                prompt=tt_prompt_embeds,
-                pooled_projection=tt_pooled_prompt_embeds,
+                prompt=tt_prompt_embeds,  # TODO: do not copy on every iteration
+                pooled_projection=tt_pooled_prompt_embeds,  # TODO: do not copy on every iteration
                 timestep=tt_timestep,
             )
             noise_pred = ttnn.to_torch(tt_noise_pred).to(dtype=torch.float32)

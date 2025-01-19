@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass
-from typing import Protocol
 
 import torch
-from loguru import logger
 
 import ttnn
 from models.experimental.stable_diffusion3.tt.linear import TtLinear, TtLinearParameters
@@ -105,7 +103,6 @@ class TtSD3Transformer2DModel:
         time_embed = utils.tilize(time_embed)
 
         for i, block in enumerate(self._transformer_blocks):
-            logger.info(f"running transformer block {i}...")
             spatial, prompt = block(
                 spatial=spatial,
                 prompt=prompt,

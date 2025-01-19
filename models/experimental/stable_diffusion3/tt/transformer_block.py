@@ -6,7 +6,6 @@ import torch
 
 import ttnn
 
-from . import utils
 from .attention import TtAttention, TtAttentionParameters
 from .feed_forward import TtFeedForward, TtFeedForwardParameters
 from .linear import TtLinear, TtLinearParameters

@@ -10,7 +10,7 @@ import ttnn
 from .tt import TtStableDiffusion3Pipeline
 
 
-@pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 15210496}], indirect=True)
 def test_sd3(
     *,
     device: ttnn.Device,
