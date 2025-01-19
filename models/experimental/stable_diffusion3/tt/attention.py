@@ -127,11 +127,10 @@ class TtAttention:
             k = ttnn.concat([k, k2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Eq
             v = ttnn.concat([v, v2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Ev
 
-        k = ttnn.transpose(k, 2, 3)
-
         attention_scores = ttnn.matmul(
             q,
             k,
+            transpose_b=True,
             compute_kernel_config=ttnn.WormholeComputeKernelConfig(
                 math_fidelity=ttnn.MathFidelity.HiFi4,
             ),
