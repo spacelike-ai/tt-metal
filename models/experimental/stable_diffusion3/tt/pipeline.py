@@ -48,7 +48,8 @@ class TtStableDiffusion3Pipeline:
         self._tt_transformer = TtSD3Transformer2DModel(
             parameters, num_attention_heads=torch_transformer.config.num_attention_heads
         )
-        self._num_channels_latents = torch_transformer.in_channels
+        self._num_channels_latents = torch_transformer.config.in_channels
+        self._joint_attention_dim = torch_transformer.config.joint_attention_dim
         logger.info("done")
 
         self._block_out_channels = self._vae.config.block_out_channels
@@ -150,6 +151,8 @@ class TtStableDiffusion3Pipeline:
             max_sequence_length=max_t5_sequence_length,
             tokenizer=self._tokenizer_3,
             text_encoder=self._text_encoder_3,
+            tokenizer_max_length=tokenizer_max_length,
+            joint_attention_dim=self._joint_attention_dim,
         )
 
         clip_prompt_embeds = torch.nn.functional.pad(
@@ -186,6 +189,8 @@ class TtStableDiffusion3Pipeline:
                 max_sequence_length=max_t5_sequence_length,
                 tokenizer=self._tokenizer_3,
                 text_encoder=self._text_encoder_3,
+                tokenizer_max_length=tokenizer_max_length,
+                joint_attention_dim=self._joint_attention_dim,
             )
 
             negative_clip_prompt_embeds = torch.nn.functional.pad(
@@ -285,14 +290,16 @@ class TtStableDiffusion3Pipeline:
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/stable_diffusion_3/pipeline_stable_diffusion_3.py
 def _get_clip_prompt_embeds(
-    prompt: list[str],
     *,
+    clip_skip: int | None = None,
+    device: torch.device | None = None,
     num_images_per_prompt: int,
+    prompt: list[str],
+    text_encoder: CLIPTextModelWithProjection,
     tokenizer_max_length: int,
     tokenizer: CLIPTokenizer,
-    text_encoder: CLIPTextModelWithProjection,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    prompt_count = len(prompt)
+):
+    batch_size = len(prompt)
 
     text_inputs = tokenizer(
         prompt,
@@ -302,17 +309,31 @@ def _get_clip_prompt_embeds(
         return_tensors="pt",
     )
 
-    prompt_embeds = text_encoder(text_inputs.input_ids, output_hidden_states=True)
+    text_input_ids = text_inputs.input_ids
+    untruncated_ids = tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
+    if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(text_input_ids, untruncated_ids):
+        removed_text = tokenizer.batch_decode(untruncated_ids[:, tokenizer_max_length - 1 : -1])
+        logger.warning(
+            "The following part of your input was truncated because CLIP can only handle sequences up to"
+            f" {tokenizer_max_length} tokens: {removed_text}"
+        )
+    prompt_embeds = text_encoder(text_input_ids.to(device), output_hidden_states=True)
     pooled_prompt_embeds = prompt_embeds[0]
-    prompt_embeds = prompt_embeds.hidden_states[-2]
+
+    if clip_skip is None:
+        prompt_embeds = prompt_embeds.hidden_states[-2]
+    else:
+        prompt_embeds = prompt_embeds.hidden_states[-(clip_skip + 2)]
+
+    prompt_embeds = prompt_embeds.to(dtype=text_encoder.dtype, device=device)
 
     _, seq_len, _ = prompt_embeds.shape
     # duplicate text embeddings for each generation per prompt, using mps friendly method
     prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-    prompt_embeds = prompt_embeds.view(prompt_count * num_images_per_prompt, seq_len, -1)
+    prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
 
     pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt, 1)
-    pooled_prompt_embeds = pooled_prompt_embeds.view(prompt_count * num_images_per_prompt, -1)
+    pooled_prompt_embeds = pooled_prompt_embeds.view(batch_size * num_images_per_prompt, -1)
 
     return prompt_embeds, pooled_prompt_embeds
 
@@ -321,12 +342,30 @@ def _get_clip_prompt_embeds(
 def _get_t5_prompt_embeds(
     prompt: list[str],
     *,
-    num_images_per_prompt: int,
+    device: torch.device | None = None,
+    dtype: torch.dtype | None = None,
+    joint_attention_dim: int,
     max_sequence_length: int,
+    num_images_per_prompt: int,
+    text_encoder: T5EncoderModel | None,
+    tokenizer_max_length: int,
     tokenizer: T5TokenizerFast,
-    text_encoder: T5EncoderModel,
 ) -> torch.Tensor:
-    prompt_count = len(prompt)
+    dtype = dtype or text_encoder.dtype
+
+    prompt = [prompt] if isinstance(prompt, str) else prompt
+    batch_size = len(prompt)
+
+    if text_encoder is None:
+        return torch.zeros(
+            (
+                batch_size * num_images_per_prompt,
+                tokenizer_max_length,
+                joint_attention_dim,
+            ),
+            device=device,
+            dtype=dtype,
+        )
 
     text_inputs = tokenizer(
         prompt,
@@ -336,17 +375,28 @@ def _get_t5_prompt_embeds(
         add_special_tokens=True,
         return_tensors="pt",
     )
+    text_input_ids = text_inputs.input_ids
+    untruncated_ids = tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
 
-    prompt_embeds = text_encoder.forward(text_inputs.input_ids)[0]
+    if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(text_input_ids, untruncated_ids):
+        removed_text = tokenizer.batch_decode(untruncated_ids[:, tokenizer_max_length - 1 : -1])
+        logger.warning(
+            "The following part of your input was truncated because `max_sequence_length` is set to "
+            f" {max_sequence_length} tokens: {removed_text}"
+        )
+
+    prompt_embeds = text_encoder(text_input_ids.to(device))[0]
 
     dtype = text_encoder.dtype
-    prompt_embeds = prompt_embeds.to(dtype=dtype)
+    prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
 
     _, seq_len, _ = prompt_embeds.shape
 
     # duplicate text embeddings and attention mask for each generation per prompt, using mps friendly method
     prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-    return prompt_embeds.view(prompt_count * num_images_per_prompt, seq_len, -1)
+    prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+
+    return prompt_embeds
 
 
 def _reshape_noise_pred(

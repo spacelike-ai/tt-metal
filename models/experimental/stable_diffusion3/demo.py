@@ -33,6 +33,6 @@ def test_sd3(
         negative_prompt_3=[negative_prompt],
         width=1024,
         height=1024,
-        num_inference_steps=4,
+        num_inference_steps=40,
         seed=0,
     )
