@@ -52,7 +52,7 @@ class TtPatchEmbed:
 
         assert list(latent.shape) == list(latent.shape.with_tile_padding())
         assert (out_height * out_width) % 32 == 0
-        latent = ttnn.reshape(latent, [batch_size, out_height * out_width, c])
+        latent = latent.reshape([batch_size, out_height * out_width, c])
 
         pos_embed = self._cropped_pos_embed(out_height, out_width)
         pos_embed = utils.tilize(pos_embed)

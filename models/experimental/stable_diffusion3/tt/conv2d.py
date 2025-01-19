@@ -91,7 +91,7 @@ class TtConv2d:
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         result, shape = self.call_without_reshape(x)
         result = utils.untilize(result)
-        return ttnn.reshape(result, shape)
+        return result.reshape(shape)
 
     @property
     def in_channels(self) -> int:

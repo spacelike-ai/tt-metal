@@ -273,9 +273,9 @@ def chunk_time(t: ttnn.Tensor, count: int) -> list[ttnn.Tensor]:
     batch_size = s[0]
 
     t = utils.untilize(t)
-    t = ttnn.reshape(t, [s[0], s[1], count, s[2] // count])
+    t = t.reshape([s[0], s[1], count, s[2] // count])
     t = ttnn.permute(t, [2, 0, 1, 3])
-    t = ttnn.reshape(t, [count * s[0], s[1], s[2] // count])
+    t = t.reshape([count * s[0], s[1], s[2] // count])
     t = utils.tilize(t)
 
     return [t[i * batch_size : (i + 1) * batch_size] for i in range(count)]
