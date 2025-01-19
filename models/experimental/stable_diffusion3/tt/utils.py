@@ -20,3 +20,7 @@ def tilize(t: ttnn.Tensor) -> ttnn.Tensor:
     [*n, h, w] = list(t.shape)
     shape = [*n, increase_to_nearest_multiple(h, 32), increase_to_nearest_multiple(w, 32)]
     return ttnn.tilize_with_val_padding(t, output_tensor_shape=shape, pad_value=0.0)
+
+
+def allocate_tensor_on_device_like(t: ttnn.Tensor, *, device: ttnn.Device) -> ttnn.Tensor:
+    return ttnn.allocate_tensor_on_device(t.shape, t.dtype, t.layout, device)

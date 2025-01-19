@@ -8,6 +8,7 @@ from tests.ttnn.utils_for_testing import assert_with_pcc
 from ..reference import SD3Transformer2DModel
 from ..reference.attention import Attention
 from ..tt.attention import TtAttention, TtAttentionParameters
+from ..tt.utils import allocate_tensor_on_device_like
 
 
 @pytest.mark.parametrize(
@@ -49,8 +50,8 @@ def test_attention(
     with torch.no_grad():
         spatial_output, prompt_output = torch_model(spatial=spatial, prompt=prompt)
 
-    tt_spatial = ttnn.allocate_tensor_on_device(tt_spatial_host.shape, ttnn_dtype, ttnn.TILE_LAYOUT, device)
-    tt_prompt = ttnn.allocate_tensor_on_device(tt_prompt_host.shape, ttnn_dtype, ttnn.TILE_LAYOUT, device)
+    tt_spatial = allocate_tensor_on_device_like(tt_spatial_host, device=device)
+    tt_prompt = allocate_tensor_on_device_like(tt_prompt_host, device=device)
 
     # cache
     tt_model(spatial=tt_spatial, prompt=tt_prompt)

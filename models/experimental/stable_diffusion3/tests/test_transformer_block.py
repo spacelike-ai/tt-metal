@@ -8,6 +8,7 @@ from tests.ttnn.utils_for_testing import assert_with_pcc
 from ..reference import SD3Transformer2DModel
 from ..reference.transformer_block import TransformerBlock
 from ..tt.transformer_block import TtTransformerBlock, TtTransformerBlockParameters
+from ..tt.utils import allocate_tensor_on_device_like
 
 
 @pytest.mark.parametrize(
@@ -53,9 +54,9 @@ def test_transformer_block(
     with torch.no_grad():
         spatial_output, prompt_output = torch_model(spatial=spatial, prompt=prompt, time_embed=time)
 
-    tt_spatial = ttnn.allocate_tensor_on_device(tt_spatial_host.shape, ttnn_dtype, ttnn.TILE_LAYOUT, device)
-    tt_prompt = ttnn.allocate_tensor_on_device(tt_prompt_host.shape, ttnn_dtype, ttnn.TILE_LAYOUT, device)
-    tt_time = ttnn.allocate_tensor_on_device(tt_time_host.shape, ttnn_dtype, ttnn.TILE_LAYOUT, device)
+    tt_spatial = allocate_tensor_on_device_like(tt_spatial_host, device=device)
+    tt_prompt = allocate_tensor_on_device_like(tt_prompt_host, device=device)
+    tt_time = allocate_tensor_on_device_like(tt_time_host, device=device)
 
     # cache
     tt_model(spatial=tt_spatial, prompt=tt_prompt, time_embed=tt_time)
