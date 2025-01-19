@@ -17,6 +17,7 @@ from ..tt.transformer_block import TtTransformerBlock, TtTransformerBlockParamet
         (23, 2, 1024, 333),
     ],
 )
+@pytest.mark.parametrize("device_params", [{"trace_region_size": 716800}], indirect=True)
 def test_transformer_block(
     *,
     device: ttnn.Device,
@@ -45,32 +46,48 @@ def test_transformer_block(
     prompt = torch.randn((batch_size, prompt_sequence_length, embedding_dim), dtype=torch_dtype)
     time = torch.randn((batch_size, embedding_dim))
 
-    tt_spatial = ttnn.from_torch(spatial, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
-    tt_prompt = ttnn.from_torch(prompt, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
-    tt_time = ttnn.from_torch(time.unsqueeze(1), device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
+    tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
+    tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
+    tt_time_host = ttnn.from_torch(time.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
 
     with torch.no_grad():
-        spatial, prompt = torch_model(spatial=spatial, prompt=prompt, time_embed=time)
+        spatial_output, prompt_output = torch_model(spatial=spatial, prompt=prompt, time_embed=time)
 
-    tt_spatial, tt_prompt = tt_model(spatial=tt_spatial, prompt=tt_prompt, time_embed=tt_time)
+    tt_spatial = ttnn.allocate_tensor_on_device(tt_spatial_host.shape, ttnn_dtype, ttnn.TILE_LAYOUT, device)
+    tt_prompt = ttnn.allocate_tensor_on_device(tt_prompt_host.shape, ttnn_dtype, ttnn.TILE_LAYOUT, device)
+    tt_time = ttnn.allocate_tensor_on_device(tt_time_host.shape, ttnn_dtype, ttnn.TILE_LAYOUT, device)
 
-    assert (prompt is None) == (tt_prompt is None)
+    # cache
+    tt_model(spatial=tt_spatial, prompt=tt_prompt, time_embed=tt_time)
 
-    tt_prompt_torch = ttnn.to_torch(tt_prompt) if tt_prompt is not None else None
-    tt_spatial_torch = ttnn.to_torch(tt_spatial)
+    # trace
+    tid = ttnn.begin_trace_capture(device)
+    tt_spatial_output, tt_prompt_output = tt_model(spatial=tt_spatial, prompt=tt_prompt, time_embed=tt_time)
+    ttnn.end_trace_capture(device, tid)
 
-    if prompt is not None and tt_prompt_torch is not None:
+    # execute
+    ttnn.copy_host_to_device_tensor(tt_spatial_host, tt_spatial)
+    ttnn.copy_host_to_device_tensor(tt_prompt_host, tt_prompt)
+    ttnn.copy_host_to_device_tensor(tt_time_host, tt_time)
+    ttnn.execute_trace(device, tid)
+
+    assert (prompt_output is None) == (tt_prompt_output is None)
+
+    tt_prompt_output_torch = ttnn.to_torch(tt_prompt_output) if tt_prompt_output is not None else None
+    tt_spatial_output_torch = ttnn.to_torch(tt_spatial_output)
+
+    if prompt_output is not None and tt_prompt_output_torch is not None:
         mse = torch.nn.functional.mse_loss(
-            prompt.to(dtype=torch.float32),
-            tt_prompt_torch.to(dtype=torch.float32),
+            prompt_output.to(dtype=torch.float32),
+            tt_prompt_output_torch.to(dtype=torch.float32),
         ).item()
         logger.info(f"prompt mse: {mse:.6f}")
-        assert_with_pcc(prompt, tt_prompt_torch, pcc=0.995)
+        assert_with_pcc(prompt_output, tt_prompt_output_torch, pcc=0.995)
 
-    assert spatial.shape == tt_spatial_torch.shape
+    assert spatial_output.shape == tt_spatial_output_torch.shape
     mse = torch.nn.functional.mse_loss(
-        spatial.to(dtype=torch.float32),
-        tt_spatial_torch.to(dtype=torch.float32),
+        spatial_output.to(dtype=torch.float32),
+        tt_spatial_output_torch.to(dtype=torch.float32),
     ).item()
     logger.info(f"spatial mse: {mse:.6f}")
-    assert_with_pcc(spatial, tt_spatial_torch, pcc=0.995)
+    assert_with_pcc(spatial_output, tt_spatial_output_torch, pcc=0.995)
