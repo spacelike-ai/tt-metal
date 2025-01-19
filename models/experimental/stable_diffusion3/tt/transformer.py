@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass
+from typing import Protocol
 
 import torch
 from loguru import logger
@@ -88,7 +89,7 @@ class TtSD3Transformer2DModel:
         self,
         *,
         spatial: ttnn.Tensor,
-        prompt_embed: ttnn.Tensor,
+        prompt: ttnn.Tensor,
         pooled_projection: ttnn.Tensor,
         timestep: ttnn.Tensor,
     ) -> ttnn.Tensor:
@@ -96,7 +97,7 @@ class TtSD3Transformer2DModel:
 
         spatial = self._pos_embed(spatial)
         time_embed = self._time_text_embed(timestep=timestep, pooled_projection=pooled_projection)
-        prompt_embed = self._context_embedder(prompt_embed)
+        prompt = self._context_embedder(prompt)
 
         # time_embed = time_embed.unsqueeze(1)
         time_embed = utils.untilize(time_embed)
@@ -105,9 +106,9 @@ class TtSD3Transformer2DModel:
 
         for i, block in enumerate(self._transformer_blocks):
             logger.info(f"running transformer block {i}...")
-            spatial, prompt_embed = block(
+            spatial, prompt = block(
                 spatial=spatial,
-                prompt=prompt_embed,
+                prompt=prompt,
                 time_embed=time_embed,
             )
 
@@ -117,6 +118,60 @@ class TtSD3Transformer2DModel:
 
         return self._proj_out(spatial)
 
+    def cache_and_trace(
+        self,
+        *,
+        spatial: ttnn.Tensor,
+        prompt: ttnn.Tensor,
+        pooled_projection: ttnn.Tensor,
+        timestep: ttnn.Tensor,
+    ) -> TtSD3Transformer2DModelTrace:
+        device = spatial.device()
+
+        self(spatial=spatial, prompt=prompt, pooled_projection=pooled_projection, timestep=timestep)
+
+        tid = ttnn.begin_trace_capture(device)
+        output = self(spatial=spatial, prompt=prompt, pooled_projection=pooled_projection, timestep=timestep)
+        ttnn.end_trace_capture(device, tid)
+
+        return TtSD3Transformer2DModelTrace(
+            spatial_input=spatial,
+            prompt_input=prompt,
+            pooled_projection_input=pooled_projection,
+            timestep_input=timestep,
+            output=output,
+            tid=tid,
+        )
+
     @property
     def patch_size(self) -> int:
         return self._patch_size
+
+
+@dataclass
+class TtSD3Transformer2DModelTrace:
+    spatial_input: ttnn.Tensor
+    prompt_input: ttnn.Tensor
+    pooled_projection_input: ttnn.Tensor
+    timestep_input: ttnn.Tensor
+    output: ttnn.Tensor
+    tid: int
+
+    def __call__(
+        self,
+        *,
+        spatial: ttnn.Tensor,
+        prompt: ttnn.Tensor,
+        pooled_projection: ttnn.Tensor,
+        timestep: ttnn.Tensor,
+    ) -> ttnn.Tensor:
+        device = self.spatial_input.device()
+
+        ttnn.copy_host_to_device_tensor(spatial, self.spatial_input)
+        ttnn.copy_host_to_device_tensor(prompt, self.prompt_input)
+        ttnn.copy_host_to_device_tensor(pooled_projection, self.pooled_projection_input)
+        ttnn.copy_host_to_device_tensor(timestep, self.timestep_input)
+
+        ttnn.execute_trace(device, self.tid)
+
+        return self.output

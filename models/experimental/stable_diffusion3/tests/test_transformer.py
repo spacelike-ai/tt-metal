@@ -58,30 +58,15 @@ def test_transformer(
     tt_pooled_projection = allocate_tensor_on_device_like(tt_pooled_projection_host, device=device)
     tt_timestep = allocate_tensor_on_device_like(tt_timestep_host, device=device)
 
-    # cache
-    tt_model(
-        spatial=tt_spatial,
-        prompt_embed=tt_prompt,
-        pooled_projection=tt_pooled_projection,
-        timestep=tt_timestep,
+    trace = tt_model.cache_and_trace(
+        spatial=tt_spatial, prompt=tt_prompt, pooled_projection=tt_pooled_projection, timestep=tt_timestep
     )
-
-    # trace
-    tid = ttnn.begin_trace_capture(device)
-    tt_output = tt_model(
-        spatial=tt_spatial,
-        prompt_embed=tt_prompt,
-        pooled_projection=tt_pooled_projection,
-        timestep=tt_timestep,
+    tt_output = trace(
+        spatial=tt_spatial_host,
+        prompt=tt_prompt_host,
+        pooled_projection=tt_pooled_projection_host,
+        timestep=tt_timestep_host,
     )
-    ttnn.end_trace_capture(device, tid)
-
-    # execute
-    ttnn.copy_host_to_device_tensor(tt_spatial_host, tt_spatial)
-    ttnn.copy_host_to_device_tensor(tt_prompt_host, tt_prompt)
-    ttnn.copy_host_to_device_tensor(tt_pooled_projection_host, tt_pooled_projection)
-    ttnn.copy_host_to_device_tensor(tt_timestep_host, tt_timestep)
-    ttnn.execute_trace(device, tid)
 
     tt_output_torch = ttnn.to_torch(tt_output)
 

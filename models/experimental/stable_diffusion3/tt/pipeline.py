@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import time
-
 import torch
 import tqdm
 from diffusers.image_processor import VaeImageProcessor
@@ -109,7 +107,7 @@ class TtStableDiffusion3Pipeline:
         )
         self._tt_transformer(
             spatial=tt_latent_model_input,
-            prompt_embed=tt_prompt_embeds,
+            prompt=tt_prompt_embeds,
             pooled_projection=tt_pooled_prompt_embeds,
             timestep=tt_timestep,
         )
@@ -199,7 +197,7 @@ class TtStableDiffusion3Pipeline:
 
             tt_noise_pred = self._tt_transformer(
                 spatial=tt_latent_model_input,
-                prompt_embed=tt_prompt_embeds,
+                prompt=tt_prompt_embeds,
                 pooled_projection=tt_pooled_prompt_embeds,
                 timestep=tt_timestep,
             )
