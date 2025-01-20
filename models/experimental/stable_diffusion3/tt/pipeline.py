@@ -174,7 +174,7 @@ class TtStableDiffusion3Pipeline:
 
         logger.info("denoising...")
 
-        for t in tqdm.tqdm(timesteps):
+        for i, t in enumerate(tqdm.tqdm(timesteps)):
             latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
 
             timestep = t.expand(latent_model_input.shape[0])
@@ -209,7 +209,11 @@ class TtStableDiffusion3Pipeline:
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-            latents = self._scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+            latents = latents.to(torch.float32)
+            sigma = self._scheduler.sigmas[i]
+            sigma_next = self._scheduler.sigmas[i + 1]
+            latents = latents + (sigma_next - sigma) * noise_pred
+            latents = latents.to(noise_pred.dtype)
 
         latents = (latents / self._vae_scaling_factor) + self._vae_shift_factor
 
