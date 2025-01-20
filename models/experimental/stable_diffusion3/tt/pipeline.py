@@ -167,7 +167,7 @@ class TtStableDiffusion3Pipeline:
         logger.info("preparing latents...")
 
         torch.manual_seed(seed)
-        latents = torch.randn(latents_shape, dtype=prompt_embeds.dtype)
+        latents = torch.randn(latents_shape, dtype=prompt_embeds.dtype).permute([0, 2, 3, 1])
 
         tt_prompt_embeds = ttnn.from_torch(prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
         tt_pooled_prompt_embeds = ttnn.from_torch(pooled_prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
@@ -175,12 +175,12 @@ class TtStableDiffusion3Pipeline:
         logger.info("denoising...")
 
         for i, t in enumerate(tqdm.tqdm(timesteps)):
-            latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+            latent_model_input = torch.cat([latents, latents]) if do_classifier_free_guidance else latents
 
             timestep = t.expand(latent_model_input.shape[0])
 
             tt_latent_model_input = ttnn.from_torch(
-                latent_model_input.permute([0, 2, 3, 1]),  # BCYX -> BYXC
+                latent_model_input,
                 layout=ttnn.TILE_LAYOUT,
                 dtype=ttnn.bfloat16,
             )
@@ -200,8 +200,8 @@ class TtStableDiffusion3Pipeline:
 
             noise_pred = _reshape_noise_pred(
                 noise_pred,
-                height=latent_model_input.shape[-2],
-                width=latent_model_input.shape[-1],
+                height=latent_model_input.shape[-3],
+                width=latent_model_input.shape[-2],
                 patch_size=self._tt_transformer.patch_size,
             )
 
@@ -209,13 +209,11 @@ class TtStableDiffusion3Pipeline:
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-            latents = latents.to(torch.float32)
             sigma = self._scheduler.sigmas[i]
             sigma_next = self._scheduler.sigmas[i + 1]
             latents = latents + (sigma_next - sigma) * noise_pred
-            latents = latents.to(noise_pred.dtype)
 
-        latents = (latents / self._vae_scaling_factor) + self._vae_shift_factor
+        latents = (latents.permute([0, 3, 1, 2]) / self._vae_scaling_factor) + self._vae_shift_factor
 
         with torch.no_grad():
             image = self._vae.decode(latents, return_dict=False)[0]
@@ -461,4 +459,4 @@ def _reshape_noise_pred(
 
     noise_pred = noise_pred.reshape(shape1)
     noise_pred = torch.einsum("nhwpqc->nchpwq", noise_pred)
-    return noise_pred.reshape(shape2)
+    return noise_pred.reshape(shape2).permute([0, 2, 3, 1])
