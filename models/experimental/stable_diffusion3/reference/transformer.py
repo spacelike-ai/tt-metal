@@ -1,3 +1,8 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: Copyright 2024 Stability AI, The HuggingFace Team and The InstantX Team. All rights reserved.
+
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 import torch
