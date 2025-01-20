@@ -13,10 +13,8 @@ The model consists of two different text encoders together with their tokenizers
 
 ## Implementation Status
 
-- All operations of MMDiT are implemented using `ttnn` with the exception of linear transformations of the time embedding in the transformer blocks and at the end of the transformer. Using the `ttnn` implementation gives unusable results, possibly due to numerical precision issues.
-  - When multiplying two bfloat16 matrices with dimensions AxB and BxC with B = 10_000, only about 26 % of the resulting elements are within 10 % of the correct value. Using float32 about 94 % are withing this bound.
+- All operations of MMDiT are implemented using `ttnn`.
 - Almost all tensors have data type bfloat16 and reside on DRAM.
-- Enabling the program cache makes the model give incorrect results.
 - The VAE, the scheduler, the text encoders and tokenizers are taken from the `diffusers` library.
   - An update of the `diffusers` library was required.
 - The T5 text encoder takes several seconds to encode a prompt on the CPU. It could be ported to `ttnn` to improve performance.
