@@ -447,21 +447,19 @@ def _reshape_noise_pred(
     patch_count_x = width // patch_size
 
     shape1 = (
-        noise_pred.shape[0],
-        patch_count_y,
+        noise_pred.shape[0] * patch_count_y,
         patch_count_x,
-        patch_size,
         patch_size,
         -1,
     )
 
     shape2 = (
         noise_pred.shape[0],
-        -1,
         patch_count_y * patch_size,
         patch_count_x * patch_size,
+        -1,
     )
 
     noise_pred = noise_pred.reshape(shape1)
-    noise_pred = torch.einsum("nhwpqc->nchpwq", noise_pred)
-    return noise_pred.reshape(shape2).permute([0, 2, 3, 1])
+    noise_pred = noise_pred.transpose(1, 2)
+    return noise_pred.reshape(shape2)
