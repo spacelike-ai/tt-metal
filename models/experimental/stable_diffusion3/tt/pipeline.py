@@ -180,43 +180,15 @@ class TtStableDiffusion3Pipeline:
         logger.info("denoising...")
 
         for i, t in enumerate(tqdm.tqdm(timesteps)):
-            latent_model_input = torch.cat([latents, latents]) if do_classifier_free_guidance else latents
-
-            timestep = t.expand(latent_model_input.shape[0])
-
-            tt_latent_model_input = ttnn.from_torch(
-                latent_model_input,
-                layout=ttnn.TILE_LAYOUT,
-                dtype=ttnn.bfloat16,
+            latents = self._step(
+                iteration=i,
+                time=t,
+                latents=latents,
+                do_classifier_free_guidance=do_classifier_free_guidance,
+                tt_prompt_embeds=tt_prompt_embeds,
+                tt_pooled_prompt_embeds=tt_pooled_prompt_embeds,
+                guidance_scale=guidance_scale,
             )
-            tt_timestep = ttnn.from_torch(
-                timestep.unsqueeze(1),
-                layout=ttnn.TILE_LAYOUT,
-                dtype=ttnn.float32,
-            )
-
-            tt_noise_pred = self._transformer_trace(
-                spatial=tt_latent_model_input,
-                prompt=tt_prompt_embeds,  # TODO: do not copy on every iteration
-                pooled_projection=tt_pooled_prompt_embeds,  # TODO: do not copy on every iteration
-                timestep=tt_timestep,
-            )
-            noise_pred = ttnn.to_torch(tt_noise_pred).to(dtype=torch.float32)
-
-            noise_pred = _reshape_noise_pred(
-                noise_pred,
-                height=latent_model_input.shape[-3],
-                width=latent_model_input.shape[-2],
-                patch_size=self._tt_transformer.patch_size,
-            )
-
-            if do_classifier_free_guidance:
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-            sigma = self._scheduler.sigmas[i]
-            sigma_next = self._scheduler.sigmas[i + 1]
-            latents = latents + (sigma_next - sigma) * noise_pred
 
         latents = (latents.permute([0, 3, 1, 2]) / self._vae_scaling_factor) + self._vae_shift_factor
 
@@ -226,6 +198,55 @@ class TtStableDiffusion3Pipeline:
             assert isinstance(image, torch.Tensor)
 
         return self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
+
+    def _step(
+        self,
+        *,
+        do_classifier_free_guidance: bool,
+        guidance_scale: float,
+        iteration: int,
+        latents: torch.Tensor,
+        time: torch.Tensor,
+        tt_pooled_prompt_embeds: ttnn.Tensor,
+        tt_prompt_embeds: ttnn.Tensor,
+    ) -> torch.Tensor:
+        latent_model_input = torch.cat([latents, latents]) if do_classifier_free_guidance else latents
+
+        timestep = time.expand(latent_model_input.shape[0])
+
+        tt_latent_model_input = ttnn.from_torch(
+            latent_model_input,
+            layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat16,
+        )
+        tt_timestep = ttnn.from_torch(
+            timestep.unsqueeze(1),
+            layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.float32,
+        )
+
+        tt_noise_pred = self._transformer_trace(
+            spatial=tt_latent_model_input,
+            prompt=tt_prompt_embeds,  # TODO: do not copy on every iteration
+            pooled_projection=tt_pooled_prompt_embeds,  # TODO: do not copy on every iteration
+            timestep=tt_timestep,
+        )
+        noise_pred = ttnn.to_torch(tt_noise_pred).to(dtype=torch.float32)
+
+        noise_pred = _reshape_noise_pred(
+            noise_pred,
+            height=latent_model_input.shape[-3],
+            width=latent_model_input.shape[-2],
+            patch_size=self._tt_transformer.patch_size,
+        )
+
+        if do_classifier_free_guidance:
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+        sigma = self._scheduler.sigmas[iteration]
+        sigma_next = self._scheduler.sigmas[iteration + 1]
+        return latents + (sigma_next - sigma) * noise_pred
 
     def _encode_prompts(
         self,
