@@ -9,12 +9,13 @@
 #include "ttnn/operations/data_movement/permute/permute.hpp"
 #include "ttnn/operations/data_movement/permute/device/permute_device_operation.hpp"
 #include "ttnn/operations/data_movement/transpose/transpose.hpp"
-#include "ttnn/cpp/ttnn/operations/copy.hpp"
-#include "ttnn/cpp/ttnn/operations/data_movement/pad/pad.hpp"
-#include "ttnn/cpp/ttnn/operations/data_movement/slice/slice.hpp"
+#include "cpp/ttnn/operations/copy.hpp"
+#include "cpp/ttnn/operations/data_movement/pad/pad.hpp"
+#include "cpp/ttnn/operations/data_movement/slice/slice.hpp"
 
-// FIXME: ARCH_NAME specific include
-#include "noc/noc_parameters.h"  // DRAM_ALIGNMENT
+#include <tt-metalium/hal_exp.hpp>
+
+using namespace tt::tt_metal::experimental;
 
 namespace ttnn::operations::data_movement {
 
@@ -31,7 +32,8 @@ inline Tensor transpose_(
                                     // all the other bugs/limitations we should rewrite it
     // use device->get_allocator_alignment when the it reflects the alignment of the buffer and doesn't just default to
     // DRAM
-    auto BUFFER_ALIGNMENT = a.buffer()->buffer_type() == tt::tt_metal::BufferType::DRAM ? DRAM_ALIGNMENT : L1_ALIGNMENT;
+    auto BUFFER_ALIGNMENT = a.buffer()->buffer_type() == tt::tt_metal::BufferType::DRAM ? hal::get_dram_alignment()
+                                                                                        : hal::get_l1_alignment();
     uint32_t W = a.get_padded_shape()[-1];
     uint32_t H = a.get_padded_shape()[-2];
     switch (transpose_dim) {

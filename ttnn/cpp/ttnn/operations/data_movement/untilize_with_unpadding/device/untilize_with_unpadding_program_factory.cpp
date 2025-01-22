@@ -9,9 +9,9 @@
 #include "ttnn/operations/cb_utils.hpp"
 #include "ttnn/operations/math.hpp"
 #include "ttnn/operations/core/work_split/work_split_tilize.hpp"
-#include "tt_metal/common/constants.hpp"
-#include "tt_metal/detail/util.hpp"
-#include "tt_metal/host_api.hpp"
+#include <tt-metalium/constants.hpp>
+#include <tt-metalium/util.hpp>
+#include <tt-metalium/host_api.hpp>
 #include "ttnn/common/constants.hpp"
 #include "ttnn/operation.hpp"
 
@@ -228,8 +228,16 @@ operation::ProgramWithCallbacks untilize_with_unpadding_multi_core_interleaved(
 
     bool has_cliff = core_range_cliff.size() > 0;
 
-    uint32_t padded_row_size_bytes = input_shape[-1] * a.element_size();     // Assuming bfloat16 dataformat
-    uint32_t unpadded_row_size_bytes = output_shape[-1] * a.element_size();  // Assuming bfloat16 dataformat
+    uint32_t padded_row_size_bytes;
+    uint32_t unpadded_row_size_bytes;
+
+    if (a.get_dtype() == DataType::BFLOAT8_B) {
+        padded_row_size_bytes = input_shape[-1] * output.element_size();
+        unpadded_row_size_bytes = output_shape[-1] * output.element_size();
+    } else {
+        padded_row_size_bytes = input_shape[-1] * a.element_size();
+        unpadded_row_size_bytes = output_shape[-1] * a.element_size();
+    }
 
     create_cb(tt::CBIndex::c_0, program, all_cores, input_single_tile_size, num_tiles_per_row, input_cb_data_format);
     create_cb(tt::CBIndex::c_16, program, all_cores, output_single_tile_size, num_tiles_per_row, output_cb_data_format);
@@ -328,14 +336,30 @@ operation::ProgramWithCallbacks untilize_with_unpadding_multi_core_interleaved(
 
         uint32_t nblocks_per_core = 0;
 
+        BlockRep ref_el = assignment[0];
+        uint32_t count_repeated = 0;  // will be incremented in first iteration of the loop
         for (const auto& el : assignment) {
             nblocks_per_core += el.block_count();
             row_start_id += el.data_row_count();
-            writer_rt_args.push_back(el.n_data);
-            writer_rt_args.push_back(el.n_mixed);
-            writer_rt_args.push_back(el.n_pads);
-            writer_rt_args.push_back(el.times);
+            if (compare_assignments(ref_el, el)) {
+                count_repeated++;
+            } else {
+                // push back information for previious elements
+                writer_rt_args.push_back(ref_el.n_data);
+                writer_rt_args.push_back(ref_el.n_mixed);
+                writer_rt_args.push_back(ref_el.n_pads);
+                writer_rt_args.push_back(ref_el.times);
+                writer_rt_args.push_back(count_repeated);
+                // Set up assignment for this element
+                ref_el = el;
+                count_repeated = 1;
+            }
         }
+        writer_rt_args.push_back(ref_el.n_data);
+        writer_rt_args.push_back(ref_el.n_mixed);
+        writer_rt_args.push_back(ref_el.n_pads);
+        writer_rt_args.push_back(ref_el.times);
+        writer_rt_args.push_back(count_repeated);
 
         uint32_t num_tiles_per_core = num_tiles_per_row * nblocks_per_core;
 

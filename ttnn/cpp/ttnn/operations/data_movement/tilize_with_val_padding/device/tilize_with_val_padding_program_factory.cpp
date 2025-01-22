@@ -8,15 +8,44 @@
 #include "ttnn/operations/math.hpp"
 #include "ttnn/operation.hpp"
 #include "ttnn/operations/core/work_split/work_split_tilize.hpp"
-#include "tt_metal/common/constants.hpp"
-#include "tt_metal/detail/util.hpp"
-#include "tt_metal/host_api.hpp"
+#include <tt-metalium/constants.hpp>
+#include <tt-metalium/util.hpp>
+#include <tt-metalium/host_api.hpp>
 #include "ttnn/operations/data_movement/tilize_with_val_padding/tilize_with_val_padding_common.hpp"
 
 using namespace tt::constants;
 using namespace tt::tt_metal;
 
 namespace ttnn::operations::data_movement::detail {
+
+inline uint32_t get_estimated_size_of_cbs(
+    const Tensor& input_tensor_a,
+    const uint32_t input_single_tile_size,
+    const uint32_t output_single_tile_size,
+    const uint32_t num_tiles_per_row) {
+    uint32_t cb_src0_size = input_single_tile_size * num_tiles_per_row;
+    uint32_t cb_output_size = output_single_tile_size * num_tiles_per_row;
+    return cb_src0_size + cb_output_size;
+}
+
+inline uint32_t get_max_l1_space(const Tensor& input_tensor_a) {
+    auto device = input_tensor_a.device();
+    auto lowest_address = device->lowest_occupied_compute_l1_address();
+    uint32_t max_l1_space = lowest_address.has_value() ? lowest_address.value() : device->l1_size_per_core();
+    max_l1_space = max_l1_space - device->get_base_allocator_addr(HalMemType::L1);
+    return max_l1_space;
+}
+
+inline bool enough_available_space(
+    const Tensor& input_tensor_a,
+    const uint32_t input_single_tile_size,
+    const uint32_t output_single_tile_size,
+    const uint32_t num_tiles_per_row) {
+    uint32_t max_l1_space = get_max_l1_space(input_tensor_a);
+    uint32_t estimated_size_of_cbs =
+        get_estimated_size_of_cbs(input_tensor_a, input_single_tile_size, output_single_tile_size, num_tiles_per_row);
+    return max_l1_space > estimated_size_of_cbs;
+}
 
 uint32_t get_packed_value(const Tensor tensor, const ttnn::PadValue pad_value) {
     return std::visit(
@@ -245,6 +274,11 @@ operation::ProgramWithCallbacks tilize_with_val_padding_multi_core_interleaved(
     uint32_t num_blocks = output.volume() / output.get_legacy_shape()[-1] / TILE_HEIGHT;
     uint32_t num_tiles_per_row = output.get_legacy_shape()[-1] / TILE_WIDTH;
 
+    bool enough_space = enough_available_space(a, input_single_tile_size, output_single_tile_size, num_tiles_per_row);
+    if (!enough_space) {
+        return tilize_with_val_padding_single_core(a, output, pad_value);
+    }
+
     auto [ncores, all_cores, core_range, core_range_cliff, nblocks_per_core, nblocks_per_core_cliff] =
         ttnn::split_blocks_for_tilize(grid_size, num_blocks);
 
@@ -340,15 +374,30 @@ operation::ProgramWithCallbacks tilize_with_val_padding_multi_core_interleaved(
         };
 
         uint32_t nblocks_per_core = 0;
-
+        BlockRep ref_el = assignment[0];
+        uint32_t count_repeated = 0;  // will be incremented in first iteration of the loop
         for (const auto& el : assignment) {
             nblocks_per_core += el.block_count();
             row_start_id += el.data_row_count();
-            reader_rt_args.push_back(el.n_data);
-            reader_rt_args.push_back(el.n_mixed);
-            reader_rt_args.push_back(el.n_pads);
-            reader_rt_args.push_back(el.times);
+            if (compare_assignments(ref_el, el)) {
+                count_repeated++;
+            } else {
+                // push back information for previous elements
+                reader_rt_args.push_back(ref_el.n_data);
+                reader_rt_args.push_back(ref_el.n_mixed);
+                reader_rt_args.push_back(ref_el.n_pads);
+                reader_rt_args.push_back(ref_el.times);
+                reader_rt_args.push_back(count_repeated);
+                // set up assignment for this element
+                ref_el = el;
+                count_repeated = 1;
+            }
         }
+        reader_rt_args.push_back(ref_el.n_data);
+        reader_rt_args.push_back(ref_el.n_mixed);
+        reader_rt_args.push_back(ref_el.n_pads);
+        reader_rt_args.push_back(ref_el.times);
+        reader_rt_args.push_back(count_repeated);
 
         uint32_t num_tiles_per_core = num_tiles_per_row * nblocks_per_core;
 

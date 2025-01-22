@@ -4,11 +4,11 @@
 
 #pragma once
 
-#include "ttnn/cpp/ttnn/operations/ccl/ccl_host_datastructures.hpp"
-#include "ttnn/cpp/ttnn/operations/ccl/ccl_common.hpp"
+#include "cpp/ttnn/operations/ccl/ccl_host_datastructures.hpp"
+#include "cpp/ttnn/operations/ccl/ccl_common.hpp"
 #include "ttnn/operations/ccl/common/uops/ccl_command.hpp"
 #include "ttnn/operations/ccl/common/uops/ccl_host_commands.hpp"
-#include "ttnn/cpp/ttnn/operations/ccl/common/host/command_backend_runtime_args_overrider.hpp"
+#include "cpp/ttnn/operations/ccl/common/host/command_backend_runtime_args_overrider.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -173,6 +173,8 @@ struct CCLWorkerArgBuilder {
     bool src_is_dram;
     bool dst_is_dram;
 };
+
+bool can_command_stream_be_lowered_to_noc_commands(const Tensor& input_tensor);
 
 }  // namespace worker_detail
 }  // namespace ttnn::ccl

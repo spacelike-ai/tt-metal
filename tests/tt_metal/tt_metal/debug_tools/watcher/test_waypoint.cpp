@@ -4,8 +4,8 @@
 
 #include "debug_tools_fixture.hpp"
 #include "debug_tools_test_utils.hpp"
-#include "tt_metal/detail/tt_metal.hpp"
-#include "tt_metal/host_api.hpp"
+#include <tt-metalium/tt_metal.hpp>
+#include <tt-metalium/host_api.hpp>
 
 //////////////////////////////////////////////////////////////////////////////////////////
 // A test for checking watcher waypoints.
@@ -145,7 +145,7 @@ static void RunTest(WatcherFixture* fixture, IDevice* device) {
                     k_id_s = "";
                 }
                 expected = fmt::format(
-                    "Device {} ethnet core(x={:2},y={:2}) virtual(x={:2},y={:2}): {},   X,   X,   X,   X  rmsg:* "
+                    "Device {} ethnet core(x={:2},y={:2}) virtual(x={:2},y={:2}): {},   {},   X,   X,   X  rmsg:* "
                     "h_id:0 "
                     "k_id:{}",
                     device->id(),
@@ -154,6 +154,7 @@ static void RunTest(WatcherFixture* fixture, IDevice* device) {
                     phys_core.x,
                     phys_core.y,
                     waypoint,
+                    (device->arch() == ARCH::BLACKHOLE) ? "W" : "X", // TODO (#15448): Uplift this when watcher device reader accounts for variable num eth riscs
                     k_id_s);
             } else {
                 // Each different config has a different calculation for k_id, let's just do one. Fast Dispatch, one device.
