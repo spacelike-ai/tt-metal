@@ -90,7 +90,7 @@ Tensor create_tensor_from_owned_buffer(
 template <typename T>
 Tensor to_weight_special_padding_tile_layout(
     const Tensor& conv_weight_tensor, uint32_t in1_block_h, uint32_t in1_block_w, DataType output_dtype) {
-    auto w_shape = conv_weight_tensor.get_legacy_shape();
+    auto w_shape = conv_weight_tensor.get_padded_shape();
     auto compute = [&w_shape, &in1_block_h, &in1_block_w, &output_dtype](const auto& input_buffer) {
         uint32_t in1_block_h_datums = in1_block_h * constants::TILE_HEIGHT;
         uint32_t in1_block_w_datums = in1_block_w * constants::TILE_WIDTH;
@@ -127,7 +127,7 @@ Tensor to_weight_special_padding_tile_layout(
 template <typename T>
 Tensor to_weight_tile_layout(
     const Tensor& conv_weight_tensor, uint32_t in1_block_h, uint32_t in1_block_w, DataType output_dtype) {
-    auto w_shape = conv_weight_tensor.get_legacy_shape();
+    auto w_shape = conv_weight_tensor.get_padded_shape();
     auto compute = [&w_shape, &in1_block_h, &in1_block_w, &output_dtype](const auto& input_buffer) {
         auto weight_matrix_cols = w_shape[0];
         // width padding
@@ -184,7 +184,7 @@ Tensor convert_conv_weight_tensor_to_tiled_layout(
 template <typename T>
 Tensor to_weight_tile_layout_block_sharded(
     const Tensor& conv_weight_tensor, uint32_t num_channel_shards, DataType output_dtype) {
-    auto w_shape = conv_weight_tensor.get_legacy_shape();
+    auto w_shape = conv_weight_tensor.get_padded_shape();
     auto compute = [&w_shape, &num_channel_shards, &output_dtype](const auto& input_buffer) {
         auto weight_matrix_cols = w_shape[0];
         TT_ASSERT(weight_matrix_cols % num_channel_shards == 0);
@@ -252,7 +252,7 @@ Tensor convert_conv_weight_tensor_to_tiled_layout_block_sharded(
 template <typename T>
 Tensor to_bias_tile_layout_block_sharded(
     const Tensor& conv_bias_tensor, uint32_t num_channel_shards, DataType output_dtype) {
-    auto b_shape = conv_bias_tensor.get_legacy_shape();
+    auto b_shape = conv_bias_tensor.get_padded_shape();
     TT_ASSERT(b_shape[0] == 1 && b_shape[1] == 1 && b_shape[2] == 1);
     auto compute = [&b_shape, &num_channel_shards, &output_dtype](const auto& input_buffer) {
         auto bias_matrix_cols = b_shape[3];
@@ -512,8 +512,7 @@ ttnn::Tensor conv_bias_layout_convert(
     if (!is_non_tile_mul_width) {
         const auto& bias_shape = bias_tensor_.get_logical_shape();
         TT_FATAL(bias_shape[0] == 1 && bias_shape[1] == 1 && bias_shape[2] == 1, "bias shape is not correct");
-        tt::tt_metal::LegacyShape bias_channels_padded_shape = tt::tt_metal::LegacyShape(
-            std::array<uint32_t, 4>({1, 1, 32, round_up(out_channels, weight_block_w_ntiles * 32)}));
+        ttnn::SimpleShape bias_channels_padded_shape({1, 1, 32, round_up(out_channels, weight_block_w_ntiles * 32)});
         bias_tensor_ =
             ttnn::pad(bias_tensor_, bias_channels_padded_shape.to_array_4D(), tt::tt_metal::Array4D{0, 0, 0, 0}, 0);
         bias_tensor_ = ttnn::to_layout(bias_tensor_, Layout::TILE, std::nullopt, std::nullopt, (T*)nullptr);
@@ -598,8 +597,7 @@ static OptimizedConvBlockConfig get_opt_block_config(
 
     uint32_t round_up_size = !use_non_tile_height ? tt::constants::TILE_HEIGHT : 1;
     auto conv_out_memory_config = create_sharded_memory_config_from_parallel_config(
-        ttnn::Shape(
-            std::array<uint32_t, 4>{1, 1, batch_size * output_height * output_width, tt::round_up(out_channels, 32)}),
+        ttnn::SimpleShape({1, 1, batch_size * output_height * output_width, tt::round_up(out_channels, 32)}),
         output_parallel_config,
         round_up_size);
     auto largest_parallel_config = output_parallel_config.grid.num_cores() > parallel_config.grid.num_cores()
@@ -687,11 +685,10 @@ std::pair<ttnn::Tensor, std::optional<ttnn::Tensor>> prepare_conv_weights_biases
     uint32_t in_channels_padded = tt::round_up(in_channels, input_num_cores_channels * input_channels_alignment);
     uint32_t out_channel_padding = out_channels_padded - out_channels;
 
-    tt::tt_metal::LegacyShape weights_channels_padded_shape = tt::tt_metal::LegacyShape(
-        std::array<uint32_t, 4>({out_channels_padded, in_channels_padded, window_h, window_w}));
+    ttnn::SimpleShape weights_channels_padded_shape({out_channels_padded, in_channels_padded, window_h, window_w});
     if (is_non_tile_mul_width) {
-        weights_channels_padded_shape = tt::tt_metal::LegacyShape(std::array<uint32_t, 4>(
-            {round_up(out_channels, 32), round_up(in_channels, input_channels_alignment), window_h, window_w}));
+        weights_channels_padded_shape = ttnn::SimpleShape(
+            {round_up(out_channels, 32), round_up(in_channels, input_channels_alignment), window_h, window_w});
         out_channels_padded = tt::round_up(out_channels, 32);
     }
     if (weights_bias_dtype == DataType::BFLOAT8_B) {
@@ -722,17 +719,11 @@ std::pair<ttnn::Tensor, std::optional<ttnn::Tensor>> prepare_conv_weights_biases
     }
 
     uint32_t weight_matrix_height = in_channels * window_h * window_w;
-    int32_t weight_matrix_height_padding = weight_tensor_.shape()[2] - weight_matrix_height;
-    TT_FATAL(weight_matrix_height_padding >= 0, " Matrix Height Padding can't be negative");
-
-    auto target_shape = ttnn::Shape(
-        std::array<uint32_t, 4>{1, 1, weight_matrix_height, out_channels},
-        std::array<std::array<uint32_t, 2>, 4>{
-            std::array<uint32_t, 2>{0, 0},
-            std::array<uint32_t, 2>{0, 0},
-            std::array<uint32_t, 2>{0, weight_matrix_height_padding},
-            std::array<uint32_t, 2>{0, out_channel_padding}});
-    weight_tensor_ = ttnn::reshape(weight_tensor_, target_shape);
+    TT_FATAL(weight_tensor_.shape()[2] >= weight_matrix_height, " Matrix Height Padding can't be negative");
+    ttnn::SimpleShape target_shape({1, 1, weight_matrix_height, out_channels});
+    ttnn::SimpleShape padded_target_shape(
+        {1, 1, weight_tensor_.get_logical_shape()[2], out_channels + out_channel_padding});
+    weight_tensor_ = ttnn::reshape(weight_tensor_, ttnn::Shape(target_shape.view(), padded_target_shape.view()));
 
     if (parameters_on_device) {
         weight_tensor_ = ttnn::operations::core::to_device(weight_tensor_, device, std::nullopt);

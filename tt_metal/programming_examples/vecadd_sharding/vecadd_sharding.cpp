@@ -7,13 +7,11 @@
 // then perform vector addition tile by tile. Because of sharding to L1, DRAM is not involved.
 // Data copy is avoided and reader and writer kernels are not needed.
 
-#include "buffers/circular_buffer_types.hpp"
-#include "common/bfloat16.hpp"
-#include "common/constants.hpp"
-#include "common/core_coord.hpp"
-#include "detail/tt_metal.hpp"
-#include "tt_metal/host_api.hpp"
-#include "tt_metal/impl/device/device.hpp"
+#include <tt-metalium/bfloat16.hpp>
+#include <tt-metalium/core_coord.hpp>
+#include <tt-metalium/host_api.hpp>
+#include <tt-metalium/device_impl.hpp>
+#include <tt-metalium/tt_metal.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -71,7 +69,7 @@ std::shared_ptr<Buffer> MakeShardedL1BufferBFP16(IDevice* device, const L1Config
 }
 
 CBHandle MakeCircularBufferBFP16(
-    Program& program, const CoreSpec& core, tt::CBIndex cb, uint32_t n_tiles, std::shared_ptr<Buffer> l1_buf) {
+    Program& program, const CoreSpec& core, tt::CBIndex cb, uint32_t n_tiles, const std::shared_ptr<Buffer>& l1_buf) {
     constexpr uint32_t tile_size = sizeof(bfloat16) * tt::constants::TILE_HW;
     CircularBufferConfig cb_src0_config = CircularBufferConfig(n_tiles * tile_size, {{cb, tt::DataFormat::Float16_b}})
                                               .set_page_size(cb, tile_size)
