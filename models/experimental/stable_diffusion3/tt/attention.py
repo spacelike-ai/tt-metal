@@ -134,6 +134,7 @@ class TtAttention:
             fp32_dest_acc_en=True,
         )
 
+        # operands must be in DRAM
         attn = ttnn.transformer.scaled_dot_product_attention(
             q,
             k,
