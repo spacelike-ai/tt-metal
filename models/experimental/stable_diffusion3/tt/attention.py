@@ -125,7 +125,7 @@ class TtAttention:
             compute_with_storage_grid_size=[8, 8],
             q_chunk_size=256,
             k_chunk_size=512,
-            exp_approx_mode=False,
+            exp_approx_mode=True,
         )
 
         compute_kernel_config = ttnn.WormholeComputeKernelConfig(
