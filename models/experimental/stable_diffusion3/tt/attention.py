@@ -121,24 +121,29 @@ class TtAttention:
             k = ttnn.concat([k, k2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Eq
             v = ttnn.concat([v, v2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Ev
 
-        attention_scores = ttnn.matmul(
+        program_config = ttnn.SDPAProgramConfig(
+            compute_with_storage_grid_size=[8, 8],
+            q_chunk_size=256,
+            k_chunk_size=512,
+            exp_approx_mode=False,
+        )
+
+        compute_kernel_config = ttnn.WormholeComputeKernelConfig(
+            math_fidelity=ttnn.MathFidelity.HiFi4,
+            math_approx_mode=False,
+            fp32_dest_acc_en=True,
+        )
+
+        attn = ttnn.transformer.scaled_dot_product_attention(
             q,
             k,
-            transpose_b=True,
-            compute_kernel_config=ttnn.WormholeComputeKernelConfig(
-                math_fidelity=ttnn.MathFidelity.HiFi4,
-            ),
+            v,
+            is_causal=False,
+            program_config=program_config,
+            compute_kernel_config=compute_kernel_config,
         )
         ttnn.deallocate(q)
         ttnn.deallocate(k)
-
-        attention_probs = ttnn.transformer.attention_softmax(
-            attention_scores, attention_mask=None, head_size=self._head_dim
-        )
-        ttnn.deallocate(attention_scores)
-
-        attn = ttnn.matmul(attention_probs, v)
-        ttnn.deallocate(attention_probs)
         ttnn.deallocate(v)
 
         concatenated_attn = ttnn.transformer.concatenate_heads(attn)
