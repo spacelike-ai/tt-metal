@@ -58,6 +58,7 @@ def test_layer_norm(
         [2, 24, 4096, 64],
     ],
 )
+@pytest.mark.usefixtures("use_program_cache")
 def test_rms_norm(
     *,
     device: ttnn.Device,
