@@ -7,7 +7,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-
 import ttnn
 
 from .linear import TtLinear, TtLinearParameters
@@ -60,9 +59,6 @@ class TtAttentionParameters:
             else None,
         )
 
-    def head_dim(self, *, num_heads: int) -> int:
-        return self.spatial.qkv_proj.out_channels // num_heads // 3
-
 
 class TtAttentionPart:
     def __init__(self, parameters: TtAttentionPartParameters) -> None:
@@ -75,7 +71,7 @@ class TtAttentionPart:
         self._norm_q = TtRmsNorm(parameters.norm_q, eps=eps)
         self._norm_k = TtRmsNorm(parameters.norm_k, eps=eps)
 
-    def qkv(self, x: ttnn.Tensor, *, num_heads: int, head_dim: int) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
+    def qkv(self, x: ttnn.Tensor, *, num_heads: int) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
         qkv = self._qkv_proj(x)
 
         q, k, v = ttnn.transformer.split_query_key_value_and_split_heads(qkv, num_heads=num_heads, transpose_key=False)
@@ -96,7 +92,6 @@ class TtAttention:
         super().__init__()
 
         self._num_heads = num_heads
-        self._head_dim = parameters.head_dim(num_heads=num_heads)
 
         self._spatial_attn = TtAttentionPart(parameters.spatial)
         self._prompt_attn = TtAttentionPart(parameters.prompt) if parameters.prompt is not None else None
@@ -110,12 +105,12 @@ class TtAttention:
         """
         spatial_sequence_length = spatial.shape[1]
 
-        q, k, v = self._spatial_attn.qkv(spatial, num_heads=self._num_heads, head_dim=self._head_dim)
+        q, k, v = self._spatial_attn.qkv(spatial, num_heads=self._num_heads)
 
         if prompt is not None:
             assert self._prompt_attn is not None
 
-            q2, k2, v2 = self._prompt_attn.qkv(prompt, num_heads=self._num_heads, head_dim=self._head_dim)
+            q2, k2, v2 = self._prompt_attn.qkv(prompt, num_heads=self._num_heads)
 
             q = ttnn.concat([q, q2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Eq
             k = ttnn.concat([k, k2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Eq

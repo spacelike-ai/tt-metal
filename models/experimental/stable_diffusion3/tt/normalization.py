@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-import torch
+from typing import TYPE_CHECKING
 
 import ttnn
+
+if TYPE_CHECKING:
+    import torch
 
 
 @dataclass

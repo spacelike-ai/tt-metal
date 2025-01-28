@@ -6,14 +6,16 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-
-import torch
+from typing import TYPE_CHECKING
 
 import ttnn
 
 from . import utils
 from .conv2d import TtConv2d, TtConv2dParameters
 from .substate import substate
+
+if TYPE_CHECKING:
+    import torch
 
 
 @dataclass
@@ -29,7 +31,7 @@ class TtPatchEmbedParameters:
         device: ttnn.Device,
     ) -> TtPatchEmbedParameters:
         return cls(
-            proj=TtConv2dParameters.from_torch(substate(state, "proj"), dtype=ttnn.bfloat16, device=device),
+            proj=TtConv2dParameters.from_torch(substate(state, "proj"), dtype=ttnn.bfloat16),
             pos_embed=ttnn.from_torch(state["pos_embed"], dtype=ttnn.bfloat16, device=device),
         )
 

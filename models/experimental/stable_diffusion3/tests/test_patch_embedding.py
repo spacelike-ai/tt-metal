@@ -2,16 +2,20 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import TYPE_CHECKING
+
 import pytest
 import torch
+import ttnn
 from loguru import logger
 
-import ttnn
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from ..reference import SD3Transformer2DModel
-from ..reference.patch_embedding import PatchEmbed
 from ..tt.patch_embedding import TtPatchEmbed, TtPatchEmbedParameters
+
+if TYPE_CHECKING:
+    from ..reference.patch_embedding import PatchEmbed
 
 
 @pytest.mark.parametrize(
@@ -21,12 +25,12 @@ from ..tt.patch_embedding import TtPatchEmbed, TtPatchEmbedParameters
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
+@pytest.mark.usefixtures("use_program_cache")
 def test_patch_embedding(
     *,
     device: ttnn.Device,
-    use_program_cache: None,
     batch_size: int,
-):
+) -> None:
     dtype = torch.bfloat16
 
     parent_torch_model = SD3Transformer2DModel.from_pretrained(

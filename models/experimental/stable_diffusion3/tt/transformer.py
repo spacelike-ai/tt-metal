@@ -6,8 +6,7 @@ from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass
-
-import torch
+from typing import TYPE_CHECKING
 
 import ttnn
 from models.experimental.stable_diffusion3.tt.linear import TtLinear, TtLinearParameters
@@ -18,6 +17,9 @@ from .patch_embedding import TtPatchEmbed, TtPatchEmbedParameters
 from .substate import has_substate, substate
 from .timestep_embedding import TtCombinedTimestepTextProjEmbeddings, TtCombinedTimestepTextProjEmbeddingsParameters
 from .transformer_block import TtTransformerBlock, TtTransformerBlockParameters, chunk_time
+
+if TYPE_CHECKING:
+    import torch
 
 
 @dataclass
@@ -106,7 +108,7 @@ class TtSD3Transformer2DModel:
         time_embed = time_embed.reshape([time_embed.shape[0], 1, time_embed.shape[1]])
         time_embed = utils.tilize(time_embed)
 
-        for i, block in enumerate(self._transformer_blocks):
+        for block in self._transformer_blocks:
             spatial, prompt = block(
                 spatial=spatial,
                 prompt=prompt,

@@ -2,36 +2,40 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import TYPE_CHECKING
+
 import pytest
 import torch
+import ttnn
 from loguru import logger
 
-import ttnn
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from ..reference import SD3Transformer2DModel
-from ..reference.attention import Attention
 from ..tt.attention import TtAttention, TtAttentionParameters
 from ..tt.utils import allocate_tensor_on_device_like
 
+if TYPE_CHECKING:
+    from ..reference.attention import Attention
+
 
 @pytest.mark.parametrize(
-    "block_index, batch_size, spatial_sequence_length, prompt_sequence_length",
+    ("block_index", "batch_size", "spatial_sequence_length", "prompt_sequence_length"),
     [
         (0, 2, 4096, 333),
         (23, 2, 4096, 333),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"trace_region_size": 517120}], indirect=True)
+@pytest.mark.usefixtures("use_program_cache")
 def test_attention(
     *,
     device: ttnn.Device,
-    use_program_cache: None,
     block_index: int,
     batch_size: int,
     spatial_sequence_length: int,
     prompt_sequence_length: int,
-):
+) -> None:
     torch_dtype = torch.float32
     ttnn_dtype = ttnn.bfloat16
 

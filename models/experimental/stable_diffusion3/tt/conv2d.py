@@ -5,12 +5,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-import torch
+from typing import TYPE_CHECKING
 
 import ttnn
 
 from . import utils
+
+if TYPE_CHECKING:
+    import torch
 
 
 @dataclass
@@ -24,7 +26,6 @@ class TtConv2dParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,
     ) -> TtConv2dParameters:
         return cls(
             weight=ttnn.from_torch(state["weight"], dtype=dtype),

@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
-import torch
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch
 
 
 def substate(state: dict[str, torch.Tensor], key: str) -> dict[str, torch.Tensor]:
@@ -17,8 +20,4 @@ def substate(state: dict[str, torch.Tensor], key: str) -> dict[str, torch.Tensor
 def has_substate(state: dict[str, torch.Tensor], key: str) -> bool:
     prefix = f"{key}."
 
-    for k in state:
-        if k.startswith(prefix):
-            return True
-
-    return False
+    return any(k.startswith(prefix) for k in state)

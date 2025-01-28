@@ -2,12 +2,10 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-from loguru import logger
-
 import ttnn
 
 
-def increase_to_nearest_multiple(x, factor):
+def increase_to_nearest_multiple(x: int, factor: int) -> int:
     """Return smallest multiple of `factor` bigger or equal to `x`."""
     return (x + factor - 1) // factor * factor
 

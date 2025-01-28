@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import pytest
 import torch
+import ttnn
 from loguru import logger
 
-import ttnn
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from ..reference.normalization import RmsNorm
@@ -21,12 +21,12 @@ from ..tt.normalization import TtLayerNorm, TtLayerNormParameters, TtRmsNorm, Tt
         [2, 24, 4096, 64],
     ],
 )
+@pytest.mark.usefixtures("use_program_cache")
 def test_layer_norm(
     *,
     device: ttnn.Device,
-    use_program_cache: None,
     input_shape: list[int],
-):
+) -> None:
     dtype = torch.bfloat16
 
     torch_model = torch.nn.LayerNorm(input_shape[-1:], eps=1.0).to(dtype=dtype)
@@ -62,7 +62,7 @@ def test_rms_norm(
     *,
     device: ttnn.Device,
     input_shape: list[int],
-):
+) -> None:
     dtype = torch.bfloat16
 
     torch_model = RmsNorm(dim=input_shape[-1], eps=1.0).to(dtype=dtype)

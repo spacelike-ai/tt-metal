@@ -4,9 +4,9 @@
 
 import pytest
 import torch
+import ttnn
 from loguru import logger
 
-import ttnn
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from ..reference.feed_forward import FeedForward
@@ -14,21 +14,21 @@ from ..tt.feed_forward import TtFeedForward, TtFeedForwardParameters
 
 
 @pytest.mark.parametrize(
-    "batch_size, input_dim, output_dim, approximate",
+    ("batch_size", "input_dim", "output_dim", "approximate"),
     [
         (32, 128, 256, "none"),
         (32, 128, 256, "tanh"),
     ],
 )
+@pytest.mark.usefixtures("use_program_cache")
 def test_feed_forward(
     *,
     device: ttnn.Device,
-    use_program_cache: None,
     batch_size: int,
     input_dim: int,
     output_dim: int,
     approximate: str,
-):
+) -> None:
     dtype = torch.bfloat16
 
     torch_model = FeedForward(dim=input_dim, dim_out=output_dim, approximate=approximate).to(dtype=dtype)

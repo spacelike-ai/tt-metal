@@ -5,8 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-import torch
+from typing import TYPE_CHECKING
 
 import ttnn
 
@@ -15,6 +14,9 @@ from .feed_forward import TtFeedForward, TtFeedForwardParameters
 from .linear import TtLinear, TtLinearParameters
 from .normalization import TtLayerNorm, TtLayerNormParameters
 from .substate import has_substate, substate
+
+if TYPE_CHECKING:
+    import torch
 
 
 @dataclass
@@ -145,7 +147,7 @@ class TtTransformerBlock:
         ttnn.deallocate(scaled)
         return result
 
-    def __call__(
+    def __call__(  # noqa: PLR0915
         self, *, spatial: ttnn.Tensor, prompt: ttnn.Tensor, time_embed: ttnn.Tensor
     ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
         t = ttnn.silu(time_embed)

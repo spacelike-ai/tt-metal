@@ -5,21 +5,23 @@
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 import pytest
 from loguru import logger
 
-import ttnn
-
 from .tt import TtStableDiffusion3Pipeline
+
+if TYPE_CHECKING:
+    import ttnn
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 15210496}], indirect=True)
+@pytest.mark.usefixtures("use_program_cache")
 def test_sd3(
     *,
     device: ttnn.Device,
-    use_program_cache: None,
-):
+) -> None:
     pipeline = TtStableDiffusion3Pipeline(checkpoint="stabilityai/stable-diffusion-3.5-medium", device=device)
 
     pipeline.prepare(

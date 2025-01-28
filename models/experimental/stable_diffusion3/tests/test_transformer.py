@@ -4,9 +4,9 @@
 
 import pytest
 import torch
+import ttnn
 from loguru import logger
 
-import ttnn
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from ..reference.transformer import SD3Transformer2DModel
@@ -15,19 +15,19 @@ from ..tt.utils import allocate_tensor_on_device_like
 
 
 @pytest.mark.parametrize(
-    "batch_size, prompt_sequence_length",
+    ("batch_size", "prompt_sequence_length"),
     [
         (2, 333),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 15157248}], indirect=True)
+@pytest.mark.usefixtures("use_program_cache")
 def test_transformer(
     *,
     device: ttnn.Device,
-    use_program_cache: None,
     batch_size: int,
     prompt_sequence_length: int,
-):
+) -> None:
     torch_dtype = torch.float32
     ttnn_dtype = ttnn.bfloat16
 

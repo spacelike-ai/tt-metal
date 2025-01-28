@@ -2,19 +2,23 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+from typing import TYPE_CHECKING
+
 import pytest
 import torch
+import ttnn
 from loguru import logger
 
-import ttnn
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from ..reference import SD3Transformer2DModel
-from ..reference.timestep_embedding import CombinedTimestepTextProjEmbeddings
 from ..tt.timestep_embedding import (
     TtCombinedTimestepTextProjEmbeddings,
     TtCombinedTimestepTextProjEmbeddingsParameters,
 )
+
+if TYPE_CHECKING:
+    from ..reference.timestep_embedding import CombinedTimestepTextProjEmbeddings
 
 
 @pytest.mark.parametrize(
@@ -23,12 +27,12 @@ from ..tt.timestep_embedding import (
         100,
     ],
 )
+@pytest.mark.usefixtures("use_program_cache")
 def test_timestep_embedding(
     *,
     device: ttnn.Device,
-    use_program_cache: None,
     batch_size: int,
-):
+) -> None:
     dtype = torch.bfloat16
 
     parent_torch_model = SD3Transformer2DModel.from_pretrained(

@@ -7,14 +7,13 @@ from __future__ import annotations
 
 import torch
 import tqdm
+import ttnn
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
 from diffusers.models.transformers.transformer_sd3 import SD3Transformer2DModel
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 from loguru import logger
 from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
-
-import ttnn
 
 from .transformer import TtSD3Transformer2DModel, TtSD3Transformer2DModelParameters
 
@@ -72,7 +71,7 @@ class TtStableDiffusion3Pipeline:
         height: int = 1024,
         guidance_scale: float = 4.5,
         max_t5_sequence_length: int = 256,
-    ):
+    ) -> None:
         self._prepared_batch_size = batch_size
         self._prepared_num_images_per_prompt = num_images_per_prompt
         self._prepared_width = width
@@ -141,7 +140,7 @@ class TtStableDiffusion3Pipeline:
 
         assert height % (self._vae_scale_factor * self._tt_transformer.patch_size) == 0
         assert width % (self._vae_scale_factor * self._tt_transformer.patch_size) == 0
-        assert max_t5_sequence_length <= 512
+        assert max_t5_sequence_length <= 512  # noqa: PLR2004
         assert batch_size == len(prompt_1)
 
         do_classifier_free_guidance = guidance_scale > 1
@@ -358,7 +357,7 @@ def _get_clip_prompt_embeds(
     text_encoder: CLIPTextModelWithProjection,
     tokenizer_max_length: int,
     tokenizer: CLIPTokenizer,
-):
+) -> tuple[torch.Tensor, torch.Tensor]:
     batch_size = len(prompt)
 
     text_inputs = tokenizer(
@@ -454,9 +453,7 @@ def _get_t5_prompt_embeds(
 
     # duplicate text embeddings and attention mask for each generation per prompt, using mps friendly method
     prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-    prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
-
-    return prompt_embeds
+    return prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
 
 
 def _reshape_noise_pred(

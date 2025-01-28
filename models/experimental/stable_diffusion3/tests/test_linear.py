@@ -4,28 +4,28 @@
 
 import pytest
 import torch
+import ttnn
 from loguru import logger
 
-import ttnn
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from ..tt.linear import TtLinear, TtLinearParameters
 
 
 @pytest.mark.parametrize(
-    "batch_size, input_dim, output_dim",
+    ("batch_size", "input_dim", "output_dim"),
     [
         (32, 1536, 2048),
     ],
 )
+@pytest.mark.usefixtures("use_program_cache")
 def test_linear(
     *,
     device: ttnn.Device,
-    use_program_cache: None,
     batch_size: int,
     input_dim: int,
     output_dim: int,
-):
+) -> None:
     dtype = torch.bfloat16
 
     torch_model = torch.nn.Linear(input_dim, output_dim).to(dtype=dtype)

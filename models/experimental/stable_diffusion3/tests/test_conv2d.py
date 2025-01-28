@@ -6,26 +6,26 @@ from __future__ import annotations
 
 import pytest
 import torch
+import ttnn
 from loguru import logger
 
-import ttnn
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from ..tt.patch_embedding import TtConv2d, TtConv2dParameters
 
 
 @pytest.mark.parametrize(
-    "batch_size, in_channels, out_channels, kernel_size, stride, height, width",
+    ("batch_size", "in_channels", "out_channels", "kernel_size", "stride", "height", "width"),
     [
         (10, 32, 32, (2, 3), (2, 2), 64, 64),
         (10, 20, 32, (3, 3), (2, 3), 128, 256),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
+@pytest.mark.usefixtures("use_program_cache")
 def test_conv2d(
     *,
     device: ttnn.Device,
-    use_program_cache: None,
     batch_size: int,
     in_channels: int,
     out_channels: int,
@@ -33,7 +33,7 @@ def test_conv2d(
     stride: tuple[int, int],
     height: int,
     width: int,
-):
+) -> None:
     dtype = torch.bfloat16
 
     torch_model = torch.nn.Conv2d(
@@ -45,7 +45,7 @@ def test_conv2d(
     )
     torch_model.eval()
 
-    parameters = TtConv2dParameters.from_torch(torch_model.state_dict(), device=device)
+    parameters = TtConv2dParameters.from_torch(torch_model.state_dict())
     tt_model = TtConv2d(parameters, stride=stride)
 
     torch_input_tensor = torch.randn((batch_size, in_channels, height, width), dtype=dtype)

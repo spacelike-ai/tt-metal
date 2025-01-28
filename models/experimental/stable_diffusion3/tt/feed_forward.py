@@ -5,13 +5,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-import torch
+from typing import TYPE_CHECKING
 
 import ttnn
 
 from .linear import TtLinear, TtLinearParameters
 from .substate import substate
+
+if TYPE_CHECKING:
+    import torch
 
 
 @dataclass
