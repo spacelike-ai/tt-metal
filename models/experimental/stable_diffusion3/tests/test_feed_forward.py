@@ -34,7 +34,7 @@ def test_feed_forward(
     torch_model = FeedForward(dim=input_dim, dim_out=output_dim, approximate=approximate).to(dtype=dtype)
     torch_model.eval()
 
-    parameters = TtFeedForwardParameters.from_torch(torch_model.state_dict(), device=device)
+    parameters = TtFeedForwardParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b)
     tt_model = TtFeedForward(parameters, approximate=approximate)
 
     torch_input_tensor = torch.randn((batch_size, input_dim), dtype=dtype)

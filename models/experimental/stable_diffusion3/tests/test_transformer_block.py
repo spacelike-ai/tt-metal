@@ -41,7 +41,7 @@ def test_transformer_block(
     torch_model: TransformerBlock = parent_torch_model.transformer_blocks[block_index]
     torch_model.eval()
 
-    parameters = TtTransformerBlockParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn_dtype)
+    parameters = TtTransformerBlockParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b)
     tt_model = TtTransformerBlock(parameters, num_heads=torch_model.num_heads)
 
     embedding_dim = 1536

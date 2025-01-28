@@ -31,7 +31,7 @@ def test_layer_norm(
 
     torch_model = torch.nn.LayerNorm(input_shape[-1:], eps=1.0).to(dtype=dtype)
 
-    parameters = TtLayerNormParameters.from_torch(torch_model.state_dict(), device=device)
+    parameters = TtLayerNormParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b)
     tt_model = TtLayerNorm(parameters, eps=torch_model.eps)
 
     torch_input_tensor = torch.randn(input_shape, dtype=dtype)

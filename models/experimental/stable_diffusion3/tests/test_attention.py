@@ -41,7 +41,7 @@ def test_attention(
     torch_model: Attention = parent_torch_model.transformer_blocks[block_index].attn
     torch_model.eval()
 
-    parameters = TtAttentionParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn_dtype)
+    parameters = TtAttentionParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b)
     tt_model = TtAttention(parameters, num_heads=torch_model.num_heads)
 
     torch.manual_seed(0)

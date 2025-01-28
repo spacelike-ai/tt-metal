@@ -31,7 +31,7 @@ def test_linear(
     torch_model = torch.nn.Linear(input_dim, output_dim).to(dtype=dtype)
     torch_model.eval()
 
-    parameters = TtLinearParameters.from_torch(torch_model.state_dict(), device=device)
+    parameters = TtLinearParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b)
     tt_model = TtLinear(parameters)
 
     torch_input_tensor = torch.randn((batch_size, input_dim), dtype=dtype)
@@ -49,4 +49,4 @@ def test_linear(
         tt_output_torch.to(dtype=torch.float32),
     ).item()
     logger.info(f"mse: {mse:.6f}")
-    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_950)
+    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_900)

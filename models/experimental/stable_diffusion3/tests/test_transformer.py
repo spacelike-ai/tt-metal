@@ -36,7 +36,9 @@ def test_transformer(
     )
     torch_model.eval()
 
-    parameters = TtSD3Transformer2DModelParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn_dtype)
+    parameters = TtSD3Transformer2DModelParameters.from_torch(
+        torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b
+    )
     tt_model = TtSD3Transformer2DModel(parameters, num_attention_heads=torch_model.config.num_attention_heads)
 
     torch.manual_seed(0)

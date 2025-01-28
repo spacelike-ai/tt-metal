@@ -37,7 +37,9 @@ def test_timestep_embedding(
     torch_model: CombinedTimestepTextProjEmbeddings = parent_torch_model.time_text_embed
     torch_model.eval()
 
-    parameters = TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(torch_model.state_dict(), device=device)
+    parameters = TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(
+        torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b
+    )
     tt_model = TtCombinedTimestepTextProjEmbeddings(parameters)
 
     torch.manual_seed(0)
