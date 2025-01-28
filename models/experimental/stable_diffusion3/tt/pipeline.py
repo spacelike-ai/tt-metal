@@ -187,19 +187,38 @@ class TtStableDiffusion3Pipeline:
             dtype=ttnn.bfloat16,
             device=self._device,
         )
+        tt_latents = ttnn.from_torch(
+            latents,
+            layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat16,
+            device=self._device,
+        )
 
         logger.info("denoising...")
 
         for i, t in enumerate(tqdm.tqdm(timesteps)):
-            latents = self._step(
-                iteration=i,
-                time=t,
-                latents=latents,
-                do_classifier_free_guidance=do_classifier_free_guidance,
-                tt_prompt_embeds=tt_prompt_embeds,
-                tt_pooled_prompt_embeds=tt_pooled_prompt_embeds,
-                guidance_scale=guidance_scale,
+            tt_timestep = ttnn.from_torch(t.reshape([1, 1]), dtype=ttnn.float32, device=self._device)
+
+            sigma_difference = self._scheduler.sigmas[i + 1] - self._scheduler.sigmas[i]
+            tt_sigma_difference = ttnn.full(
+                [1, 1],
+                fill_value=sigma_difference,
+                layout=ttnn.TILE_LAYOUT,
+                dtype=ttnn.bfloat16,
+                device=self._device,
             )
+
+            tt_latents = self._step(
+                timestep=tt_timestep,
+                latents=tt_latents,
+                do_classifier_free_guidance=do_classifier_free_guidance,
+                prompt_embeds=tt_prompt_embeds,
+                pooled_prompt_embeds=tt_pooled_prompt_embeds,
+                guidance_scale=guidance_scale,
+                sigma_difference=tt_sigma_difference,
+            )
+
+        latents = ttnn.to_torch(tt_latents).to(torch.float32)
 
         logger.info("decoding image...")
 
@@ -217,36 +236,24 @@ class TtStableDiffusion3Pipeline:
         *,
         do_classifier_free_guidance: bool,
         guidance_scale: float,
-        iteration: int,
-        latents: torch.Tensor,
-        time: torch.Tensor,
-        tt_pooled_prompt_embeds: ttnn.Tensor,
-        tt_prompt_embeds: ttnn.Tensor,
-    ) -> torch.Tensor:
-        latent_model_input = torch.cat([latents, latents]) if do_classifier_free_guidance else latents
+        latents: ttnn.Tensor,
+        timestep: ttnn.Tensor,
+        pooled_prompt_embeds: ttnn.Tensor,
+        prompt_embeds: ttnn.Tensor,
+        sigma_difference: ttnn.Tensor,
+    ) -> ttnn.Tensor:
+        latent_model_input = ttnn.concat([latents, latents]) if do_classifier_free_guidance else latents
+        latent_model_batch_size = latent_model_input.shape[0]
 
-        timestep = time.expand(latent_model_input.shape[0])
+        timestep = ttnn.repeat(timestep, ttnn.Shape([latent_model_batch_size, 1]))
+        timestep = ttnn.to_layout(timestep, ttnn.TILE_LAYOUT)
 
-        tt_latent_model_input = ttnn.from_torch(
-            latent_model_input,
-            layout=ttnn.TILE_LAYOUT,
-            dtype=ttnn.bfloat16,
-            device=self._device,
+        noise_pred = self._tt_transformer(
+            spatial=latent_model_input,
+            prompt=prompt_embeds,  # TODO: do not copy on every iteration
+            pooled_projection=pooled_prompt_embeds,  # TODO: do not copy on every iteration
+            timestep=timestep,
         )
-        tt_timestep = ttnn.from_torch(
-            timestep.unsqueeze(1),
-            layout=ttnn.TILE_LAYOUT,
-            dtype=ttnn.float32,
-            device=self._device,
-        )
-
-        tt_noise_pred = self._tt_transformer(
-            spatial=tt_latent_model_input,
-            prompt=tt_prompt_embeds,  # TODO: do not copy on every iteration
-            pooled_projection=tt_pooled_prompt_embeds,  # TODO: do not copy on every iteration
-            timestep=tt_timestep,
-        )
-        noise_pred = ttnn.to_torch(tt_noise_pred).to(dtype=torch.float32)
 
         noise_pred = _reshape_noise_pred(
             noise_pred,
@@ -256,12 +263,12 @@ class TtStableDiffusion3Pipeline:
         )
 
         if do_classifier_free_guidance:
-            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+            split_pos = noise_pred.shape[0] // 2
+            uncond = noise_pred[0:split_pos]
+            cond = noise_pred[split_pos:]
+            noise_pred = uncond + guidance_scale * (cond - uncond)
 
-        sigma = self._scheduler.sigmas[iteration]
-        sigma_next = self._scheduler.sigmas[iteration + 1]
-        return latents + (sigma_next - sigma) * noise_pred
+        return latents + sigma_difference * noise_pred
 
     def _encode_prompts(
         self,
@@ -471,12 +478,12 @@ def _get_t5_prompt_embeds(
 
 
 def _reshape_noise_pred(
-    noise_pred: torch.Tensor,
+    noise_pred: ttnn.Tensor,
     *,
     height: int,
     width: int,
     patch_size: int,
-) -> torch.Tensor:
+) -> ttnn.Tensor:
     patch_count_y = height // patch_size
     patch_count_x = width // patch_size
 
@@ -495,5 +502,5 @@ def _reshape_noise_pred(
     )
 
     noise_pred = noise_pred.reshape(shape1)
-    noise_pred = noise_pred.transpose(1, 2)
+    noise_pred = ttnn.transpose(noise_pred, 1, 2)
     return noise_pred.reshape(shape2)
