@@ -191,10 +191,12 @@ class TtStableDiffusion3Pipeline:
                 guidance_scale=guidance_scale,
             )
 
+        logger.info("decoding image...")
+
         latents = (latents.permute([0, 3, 1, 2]) / self._vae_scaling_factor) + self._vae_shift_factor
 
         with torch.no_grad():
-            image = self._vae.decode(latents, return_dict=False)[0]
+            image = self._vae.decoder(latents)
             image = self._image_processor.postprocess(image, output_type="pt")
             assert isinstance(image, torch.Tensor)
 
