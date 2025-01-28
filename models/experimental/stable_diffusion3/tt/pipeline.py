@@ -47,7 +47,9 @@ class TtStableDiffusion3Pipeline:
         assert isinstance(torch_transformer, SD3Transformer2DModel)
 
         logger.info("creating tt transformer...")
-        parameters = TtSD3Transformer2DModelParameters.from_torch(torch_transformer.state_dict(), device=device)
+        parameters = TtSD3Transformer2DModelParameters.from_torch(
+            torch_transformer.state_dict(), device=device, dtype=ttnn.bfloat8_b
+        )
         self._tt_transformer = TtSD3Transformer2DModel(
             parameters, num_attention_heads=torch_transformer.config.num_attention_heads
         )

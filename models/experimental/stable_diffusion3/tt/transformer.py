@@ -49,7 +49,7 @@ class TtSD3Transformer2DModelParameters:
             )
 
         return cls(
-            pos_embed=TtPatchEmbedParameters.from_torch(substate(state, "pos_embed"), dtype=dtype, device=device),
+            pos_embed=TtPatchEmbedParameters.from_torch(substate(state, "pos_embed"), device=device),
             time_text_embed=TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(
                 substate(state, "time_text_embed"), dtype=dtype, device=device
             ),

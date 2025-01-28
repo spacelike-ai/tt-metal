@@ -26,12 +26,11 @@ class TtPatchEmbedParameters:
         cls,
         state: dict[str, torch.Tensor],
         *,
-        dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
     ) -> TtPatchEmbedParameters:
         return cls(
-            proj=TtConv2dParameters.from_torch(substate(state, "proj"), dtype=dtype, device=device),
-            pos_embed=ttnn.from_torch(state["pos_embed"], dtype=dtype, device=device),
+            proj=TtConv2dParameters.from_torch(substate(state, "proj"), dtype=ttnn.bfloat16, device=device),
+            pos_embed=ttnn.from_torch(state["pos_embed"], dtype=ttnn.bfloat16, device=device),
         )
 
     @property
