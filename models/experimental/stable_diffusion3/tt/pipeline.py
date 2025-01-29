@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import tqdm
 import ttnn
@@ -83,40 +85,50 @@ class TtStableDiffusion3Pipeline:
 
         latents_shape = (
             batch_size * num_images_per_prompt,
-            self._num_channels_latents,
             height // self._vae_scale_factor,
             width // self._vae_scale_factor,
+            self._num_channels_latents,
         )
 
-        prompt_embeds = torch.randn([2, 333, 4096])  # TODO: do not hardcode these numbers
-        pooled_prompt_embeds = torch.randn([2, 2048])  # TODO: do not hardcode these numbers
-        latents = torch.randn(latents_shape)
-        latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-        timestep = torch.tensor([500]).expand(latent_model_input.shape[0])
-        tt_prompt_embeds = ttnn.from_torch(
-            prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+        tt_timestep = ttnn.allocate_tensor_on_device([1, 1], ttnn.float32, ttnn.ROW_MAJOR_LAYOUT, self._device)
+        tt_sigma_difference = ttnn.allocate_tensor_on_device([1, 1], ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
+        tt_prompt_embeds = ttnn.allocate_tensor_on_device([2, 333, 4096], ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
+        tt_pooled_prompt_embeds = ttnn.allocate_tensor_on_device(
+            [2, 2048], ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device
         )
-        tt_pooled_prompt_embeds = ttnn.from_torch(
-            pooled_prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
-        )
-        tt_latent_model_input = ttnn.from_torch(
-            latent_model_input.permute([0, 2, 3, 1]),  # BCYX -> BYXC
-            layout=ttnn.TILE_LAYOUT,
-            device=self._device,
-            dtype=ttnn.bfloat16,
-        )
-        tt_timestep = ttnn.from_torch(
-            timestep.unsqueeze(1),
-            layout=ttnn.TILE_LAYOUT,
-            device=self._device,
-            dtype=ttnn.float32,
-        )
+        tt_latents = ttnn.allocate_tensor_on_device(latents_shape, ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
 
-        self._transformer_trace = self._tt_transformer(
-            spatial=tt_latent_model_input,
-            prompt=tt_prompt_embeds,
-            pooled_projection=tt_pooled_prompt_embeds,
+        # cache
+        self._step(
             timestep=tt_timestep,
+            latents=tt_latents,
+            do_classifier_free_guidance=do_classifier_free_guidance,
+            prompt_embeds=tt_prompt_embeds,
+            pooled_prompt_embeds=tt_pooled_prompt_embeds,
+            guidance_scale=guidance_scale,
+            sigma_difference=tt_sigma_difference,
+        )
+
+        # trace
+        tid = ttnn.begin_trace_capture(self._device)
+        self._step(
+            timestep=tt_timestep,
+            latents=tt_latents,
+            do_classifier_free_guidance=do_classifier_free_guidance,
+            prompt_embeds=tt_prompt_embeds,
+            pooled_prompt_embeds=tt_pooled_prompt_embeds,
+            guidance_scale=guidance_scale,
+            sigma_difference=tt_sigma_difference,
+        )
+        ttnn.end_trace_capture(self._device, tid)
+
+        self._trace = PipelineTrace(
+            tid=tid,
+            spatial_input_output=tt_latents,
+            prompt_input=tt_prompt_embeds,
+            pooled_projection_input=tt_pooled_prompt_embeds,
+            timestep_input=tt_timestep,
+            sigma_difference_input=tt_sigma_difference,
         )
 
     def __call__(
@@ -175,50 +187,30 @@ class TtStableDiffusion3Pipeline:
         torch.manual_seed(seed)
         latents = torch.randn(latents_shape, dtype=prompt_embeds.dtype).permute([0, 2, 3, 1])
 
-        tt_prompt_embeds = ttnn.from_torch(
-            prompt_embeds,
-            layout=ttnn.TILE_LAYOUT,
-            dtype=ttnn.bfloat16,
-            device=self._device,
-        )
-        tt_pooled_prompt_embeds = ttnn.from_torch(
-            pooled_prompt_embeds,
-            layout=ttnn.TILE_LAYOUT,
-            dtype=ttnn.bfloat16,
-            device=self._device,
-        )
-        tt_latents = ttnn.from_torch(
-            latents,
-            layout=ttnn.TILE_LAYOUT,
-            dtype=ttnn.bfloat16,
-            device=self._device,
-        )
+        tt_prompt_embeds = ttnn.from_torch(prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+        tt_pooled_prompt_embeds = ttnn.from_torch(pooled_prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+        tt_initial_latents = ttnn.from_torch(latents, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
 
         logger.info("denoising...")
 
+        ttnn.copy_host_to_device_tensor(tt_prompt_embeds, self._trace.prompt_input)
+        ttnn.copy_host_to_device_tensor(tt_pooled_prompt_embeds, self._trace.pooled_projection_input)
+        ttnn.copy_host_to_device_tensor(tt_initial_latents, self._trace.spatial_input_output)
+
         for i, t in enumerate(tqdm.tqdm(timesteps)):
-            tt_timestep = ttnn.from_torch(t.reshape([1, 1]), dtype=ttnn.float32, device=self._device)
+            tt_timestep = ttnn.full([1, 1], fill_value=t, dtype=ttnn.float32)
 
             sigma_difference = self._scheduler.sigmas[i + 1] - self._scheduler.sigmas[i]
             tt_sigma_difference = ttnn.full(
-                [1, 1],
-                fill_value=sigma_difference,
-                layout=ttnn.TILE_LAYOUT,
-                dtype=ttnn.bfloat16,
-                device=self._device,
+                [1, 1], fill_value=sigma_difference, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
             )
 
-            tt_latents = self._step(
-                timestep=tt_timestep,
-                latents=tt_latents,
-                do_classifier_free_guidance=do_classifier_free_guidance,
-                prompt_embeds=tt_prompt_embeds,
-                pooled_prompt_embeds=tt_pooled_prompt_embeds,
-                guidance_scale=guidance_scale,
-                sigma_difference=tt_sigma_difference,
-            )
+            ttnn.copy_host_to_device_tensor(tt_timestep, self._trace.timestep_input)
+            ttnn.copy_host_to_device_tensor(tt_sigma_difference, self._trace.sigma_difference_input)
 
-        latents = ttnn.to_torch(tt_latents).to(torch.float32)
+            self._trace.execute()
+
+        latents = ttnn.to_torch(self._trace.spatial_input_output).to(torch.float32)
 
         logger.info("decoding image...")
 
@@ -241,7 +233,7 @@ class TtStableDiffusion3Pipeline:
         pooled_prompt_embeds: ttnn.Tensor,
         prompt_embeds: ttnn.Tensor,
         sigma_difference: ttnn.Tensor,
-    ) -> ttnn.Tensor:
+    ) -> None:
         latent_model_input = ttnn.concat([latents, latents]) if do_classifier_free_guidance else latents
         latent_model_batch_size = latent_model_input.shape[0]
 
@@ -250,8 +242,8 @@ class TtStableDiffusion3Pipeline:
 
         noise_pred = self._tt_transformer(
             spatial=latent_model_input,
-            prompt=prompt_embeds,  # TODO: do not copy on every iteration
-            pooled_projection=pooled_prompt_embeds,  # TODO: do not copy on every iteration
+            prompt=prompt_embeds,
+            pooled_projection=pooled_prompt_embeds,
             timestep=timestep,
         )
 
@@ -268,7 +260,7 @@ class TtStableDiffusion3Pipeline:
             cond = noise_pred[split_pos:]
             noise_pred = uncond + guidance_scale * (cond - uncond)
 
-        return latents + sigma_difference * noise_pred
+        ttnn.add_(latents, sigma_difference * noise_pred)
 
     def _encode_prompts(
         self,
@@ -366,6 +358,19 @@ class TtStableDiffusion3Pipeline:
         pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
 
         return prompt_embeds, pooled_prompt_embeds
+
+
+@dataclass
+class PipelineTrace:
+    spatial_input_output: ttnn.Tensor
+    prompt_input: ttnn.Tensor
+    pooled_projection_input: ttnn.Tensor
+    timestep_input: ttnn.Tensor
+    sigma_difference_input: ttnn.Tensor
+    tid: int
+
+    def execute(self) -> None:
+        ttnn.execute_trace(self.spatial_input_output.device(), self.tid)
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/stable_diffusion_3/pipeline_stable_diffusion_3.py
