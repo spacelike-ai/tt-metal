@@ -4,11 +4,9 @@
 
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING
 
 import pytest
-from loguru import logger
 
 from .tt import TtStableDiffusion3Pipeline
 
@@ -38,8 +36,6 @@ def test_sd3(
     )
     negative_prompt = ""
 
-    start_time = time.time()
-
     images = pipeline(
         prompt_1=[prompt],
         prompt_2=[prompt],
@@ -50,8 +46,5 @@ def test_sd3(
         num_inference_steps=40,
         seed=0,
     )
-
-    runtime = time.time() - start_time
-    logger.info(f"runtime: {runtime}")
 
     images[0].save("sd3.png")

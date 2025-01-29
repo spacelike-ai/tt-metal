@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import torch
@@ -143,6 +144,8 @@ class TtStableDiffusion3Pipeline:
         num_inference_steps: int = 40,
         seed: int = 0,
     ) -> None:
+        start_time = time.time()
+
         batch_size = self._prepared_batch_size
         num_images_per_prompt = self._prepared_num_images_per_prompt
         width = self._prepared_width
@@ -165,6 +168,7 @@ class TtStableDiffusion3Pipeline:
 
         logger.info("encoding prompts...")
 
+        prompt_encoding_start_time = time.time()
         prompt_embeds, pooled_prompt_embeds = self._encode_prompts(
             prompt_1=prompt_1,
             prompt_2=prompt_2,
@@ -176,6 +180,7 @@ class TtStableDiffusion3Pipeline:
             max_t5_sequence_length=max_t5_sequence_length,
             do_classifier_free_guidance=do_classifier_free_guidance,
         )
+        prompt_encoding_end_time = time.time()
 
         logger.info("preparing timesteps...")
 
@@ -192,6 +197,7 @@ class TtStableDiffusion3Pipeline:
         tt_initial_latents = ttnn.from_torch(latents, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
 
         logger.info("denoising...")
+        denoising_start_time = time.time()
 
         ttnn.copy_host_to_device_tensor(tt_prompt_embeds, self._trace.prompt_input)
         ttnn.copy_host_to_device_tensor(tt_pooled_prompt_embeds, self._trace.pooled_projection_input)
@@ -210,10 +216,13 @@ class TtStableDiffusion3Pipeline:
 
             self._trace.execute()
 
-        latents = ttnn.to_torch(self._trace.spatial_input_output).to(torch.float32)
+        denoising_end_time = time.time()
 
         logger.info("decoding image...")
 
+        image_decoding_start_time = time.time()
+
+        latents = ttnn.to_torch(self._trace.spatial_input_output).to(torch.float32)
         latents = (latents.permute([0, 3, 1, 2]) / self._vae_scaling_factor) + self._vae_shift_factor
 
         with torch.no_grad():
@@ -221,7 +230,18 @@ class TtStableDiffusion3Pipeline:
             image = self._image_processor.postprocess(image, output_type="pt")
             assert isinstance(image, torch.Tensor)
 
-        return self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
+        image_decoding_end_time = time.time()
+
+        output = self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
+
+        end_time = time.time()
+
+        logger.info(f"prompt encoding duration: {prompt_encoding_end_time - prompt_encoding_start_time}")
+        logger.info(f"denoising duration: {denoising_end_time - denoising_start_time}")
+        logger.info(f"image decoding duration: {image_decoding_end_time - image_decoding_start_time}")
+        logger.info(f"total runtime: {end_time - start_time}")
+
+        return output
 
     def _step(
         self,
