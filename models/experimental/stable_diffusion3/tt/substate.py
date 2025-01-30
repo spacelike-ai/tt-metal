@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import itertools
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -21,3 +22,14 @@ def has_substate(state: dict[str, torch.Tensor], key: str) -> bool:
     prefix = f"{key}."
 
     return any(k.startswith(prefix) for k in state)
+
+
+def indexed_substates(state: dict[str, torch.Tensor], key: str) -> list[dict[str, torch.Tensor]]:
+    result = []
+    for i in itertools.count():
+        s = substate(state, f"{key}.{i}")
+        if not s:
+            return result
+        result.append(s)
+
+    return []

@@ -14,7 +14,7 @@ from models.experimental.stable_diffusion3.tt.linear import TtLinear, TtLinearPa
 from . import utils
 from .normalization import TtLayerNorm, TtLayerNormParameters
 from .patch_embedding import TtPatchEmbed, TtPatchEmbedParameters
-from .substate import has_substate, substate
+from .substate import has_substate, indexed_substates, substate
 from .timestep_embedding import TtCombinedTimestepTextProjEmbeddings, TtCombinedTimestepTextProjEmbeddingsParameters
 from .transformer_block import TtTransformerBlock, TtTransformerBlockParameters, chunk_time
 
@@ -40,16 +40,6 @@ class TtSD3Transformer2DModelParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
     ) -> TtSD3Transformer2DModelParameters:
-        transformer_blocks = []
-        for i in itertools.count():
-            key = f"transformer_blocks.{i}"
-            if not has_substate(state, key):
-                break
-
-            transformer_blocks.append(
-                TtTransformerBlockParameters.from_torch(substate(state, key), dtype=dtype, device=device)
-            )
-
         return cls(
             pos_embed=TtPatchEmbedParameters.from_torch(substate(state, "pos_embed"), device=device),
             time_text_embed=TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(
@@ -58,7 +48,10 @@ class TtSD3Transformer2DModelParameters:
             context_embedder=TtLinearParameters.from_torch(
                 substate(state, "context_embedder"), dtype=dtype, device=device
             ),
-            transformer_blocks=transformer_blocks,
+            transformer_blocks=[
+                TtTransformerBlockParameters.from_torch(s, dtype=dtype, device=device)
+                for s in indexed_substates(state, "transformer_blocks")
+            ],
             time_embed_out=TtLinearParameters.from_torch(
                 substate(state, "norm_out.linear"), dtype=dtype, device=device, unsqueeze_bias=True
             ),
