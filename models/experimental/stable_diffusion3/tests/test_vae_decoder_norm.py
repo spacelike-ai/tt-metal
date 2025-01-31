@@ -15,7 +15,7 @@ from ..tt.vae_decoder import TtGroupNorm, TtGroupNormParameters
 
 
 @pytest.mark.parametrize("device_params", [{"trace_region_size": 16384}], indirect=True)
-@pytest.mark.usefixtures("use_program_cache")
+# @pytest.mark.usefixtures("use_program_cache")
 def test_group_norm(*, device: ttnn.Device) -> None:
     torch_dtype = torch.float32
     ttnn_dtype = ttnn.bfloat16
@@ -43,17 +43,20 @@ def test_group_norm(*, device: ttnn.Device) -> None:
 
     tt_inp = allocate_tensor_on_device_like(tt_inp_host, device=device)
 
-    # cache
-    tt_model(tt_inp)
+    # # cache
+    # tt_model(tt_inp)
 
-    # trace
-    tid = ttnn.begin_trace_capture(device)
-    tt_out = tt_model(tt_inp)
-    ttnn.end_trace_capture(device, tid)
+    # # trace
+    # tid = ttnn.begin_trace_capture(device)
+    # tt_out = tt_model(tt_inp)
+    # ttnn.end_trace_capture(device, tid)
 
-    # execute
+    # # execute
+    # ttnn.copy_host_to_device_tensor(tt_inp_host, tt_inp)
+    # ttnn.execute_trace(device, tid)
+
     ttnn.copy_host_to_device_tensor(tt_inp_host, tt_inp)
-    ttnn.execute_trace(device, tid)
+    tt_out = tt_model(tt_inp)
 
     tt_out_torch = ttnn.to_torch(tt_out).permute(0, 3, 1, 2)
 
