@@ -5,13 +5,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-import torch
 import ttnn
 
 from .conv2d import TtConv2d, TtConv2dParameters
 from .linear import TtLinear, TtLinearParameters
 from .substate import has_substate, indexed_substates, substate
+
+if TYPE_CHECKING:
+    import torch
 
 
 @dataclass
@@ -60,7 +63,6 @@ class TtVaeDecoder:
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         x = self._conv_in(x)
-        x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)  # TODO: remove
         x = self._mid_block(x)
 
         for up_block in self._up_blocks:
@@ -117,7 +119,6 @@ class TtUpDecoderBlock2D:
             x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
             x = ttnn.upsample(x, 2)
             x = self._upsampler_conv(x)
-            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)  # TODO: remove
 
         return x
 
@@ -222,17 +223,14 @@ class TtResnetBlock2D:
 
         x = ttnn.silu(x)
         x = self.conv1(x)
-        x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)  # TODO: remove
 
         x = self.norm2(x)
 
         x = ttnn.silu(x)
         x = self.conv2(x)
-        x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)  # TODO: remove
 
         if self.conv_shortcut is not None:
             residual = self.conv_shortcut(residual)
-            residual = ttnn.to_layout(residual, ttnn.TILE_LAYOUT)  # TODO: remove
 
         return residual + x
 
@@ -317,7 +315,8 @@ class TtAttention:
         ttnn.deallocate(k)
         ttnn.deallocate(v)
 
-        x = x.reshape([batch_size, height, width, features])  # from [batch_size, height * width, 1, features]
+        assert self._num_heads == 1
+        x = x.reshape([batch_size, height, width, features])
 
         x = self.to_out(x)
 
@@ -347,8 +346,8 @@ class TtGroupNormParameters:
         )
 
     @property
-    def in_channels(self) -> int:
-        return self.weight.shape[1]  # TODO: correct?
+    def channels(self) -> int:
+        return self.weight.shape[1]
 
 
 class TtGroupNorm:
@@ -371,13 +370,13 @@ class TtGroupNorm:
         device = parameters.weight.device()
 
         torch_weight = ttnn.create_group_norm_weight_bias_rm(
-            ttnn.to_torch(parameters.weight), parameters.in_channels, num_cores_across_channel
+            ttnn.to_torch(parameters.weight), parameters.channels, num_cores_across_channel
         )
         torch_bias = ttnn.create_group_norm_weight_bias_rm(
-            ttnn.to_torch(parameters.bias), parameters.in_channels, num_cores_across_channel
+            ttnn.to_torch(parameters.bias), parameters.channels, num_cores_across_channel
         )
         torch_norm_input_mask = ttnn.create_group_norm_input_mask(
-            parameters.in_channels, num_groups, num_cores_across_channel
+            parameters.channels, num_groups, num_cores_across_channel
         )
         self._weight = ttnn.from_torch(
             torch_weight,
@@ -402,7 +401,7 @@ class TtGroupNorm:
         )
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        [batch_size, height, width, in_channels] = list(x.shape)
+        [batch_size, height, width, channels] = list(x.shape)
 
         x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
 
@@ -411,13 +410,13 @@ class TtGroupNorm:
             core_grid,
         ) = ttnn.determine_expected_group_norm_sharded_config_and_grid_size(
             device=x.device(),
-            num_channels=in_channels,
+            num_channels=channels,
             num_groups=self._num_groups,
             input_nhw=batch_size * height * width,
             is_height_sharded=False,
         )
 
-        x = ttnn.reshape(x, [batch_size, 1, width * height, in_channels])
+        x = ttnn.reshape(x, [batch_size, 1, width * height, channels])
         x = ttnn.to_memory_config(x, memory_config)
         x = ttnn.reallocate(x)
 
@@ -433,8 +432,6 @@ class TtGroupNorm:
             inplace=True,
         )
 
-        x = x.reshape([batch_size, height, width, in_channels])
-        x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)  # TODO: remove?
-        x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-
-        return x
+        x = x.reshape([batch_size, height, width, channels])
+        x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
+        return ttnn.to_layout(x, ttnn.TILE_LAYOUT)
