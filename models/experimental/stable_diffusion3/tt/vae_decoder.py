@@ -66,9 +66,7 @@ class TtVaeDecoder:
         for up_block in self._up_blocks:
             x = up_block(x)
 
-        x = ttnn.permute(x, [0, 3, 1, 2])  # TODO: remove
         x = self._conv_norm_out(x, inplace=False)  # TODO: change to inplace=True
-        x = ttnn.permute(x, [0, 2, 3, 1])  # TODO: remove
 
         x = ttnn.silu(x)
         return self._conv_out(x)
@@ -220,17 +218,13 @@ class TtResnetBlock2D:
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         residual = x
 
-        x = ttnn.permute(x, [0, 3, 1, 2])  # TODO: remove
         x = self.norm1(x, inplace=False)  # TODO: change to inplace=True
-        x = ttnn.permute(x, [0, 2, 3, 1])  # TODO: remove
 
         x = ttnn.silu(x)
         x = self.conv1(x)
         x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)  # TODO: remove
 
-        x = ttnn.permute(x, [0, 3, 1, 2])  # TODO: remove
         x = self.norm2(x, inplace=False)  # TODO: change to inplace=True
-        x = ttnn.permute(x, [0, 2, 3, 1])  # TODO: remove
 
         x = ttnn.silu(x)
         x = self.conv2(x)
@@ -283,12 +277,14 @@ class TtAttention:
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         residual = x
 
+        # x = ttnn.permute(x, [0, 3, 1, 2])  # TODO: remove
+        # x = x.reshape([batch_size, features, height * width])
+
+        x = self._group_norm(x, inplace=False)  # TODO: inplace=True
         x = ttnn.permute(x, [0, 3, 1, 2])  # TODO: remove
+        batch_size, features, height, width = list(x.shape)
+        x = x.reshape([batch_size, features, height * width])
 
-        batch_size, sequence_length, height, width = list(x.shape)
-        x = x.reshape([batch_size, sequence_length, height * width])
-
-        x = self._group_norm(x)
         x = ttnn.transpose(x, 1, 2)
 
         q = self.to_q(x)
@@ -327,11 +323,11 @@ class TtAttention:
         ttnn.deallocate(v)
 
         x = ttnn.transpose(x, 1, 2)
-        x = x.reshape([batch_size, -1, sequence_length])  # TODO: is this the correct shape?
+        x = x.reshape([batch_size, -1, features])  # TODO: is this the correct shape?
 
         x = self.to_out(x)
 
-        x = ttnn.transpose(x, -1, -2).reshape([batch_size, sequence_length, height, width])
+        x = ttnn.transpose(x, -1, -2).reshape([batch_size, features, height, width])
 
         x = ttnn.permute(x, [0, 2, 3, 1])  # TODO: remove
 
@@ -360,29 +356,109 @@ class TtGroupNormParameters:
             else None,
         )
 
+    @property
+    def in_channels(self) -> int:
+        return self.weight.shape[1]  # TODO: correct?
+
 
 class TtGroupNorm:
     def __init__(self, parameters: TtGroupNormParameters, *, num_groups: int, eps: float) -> None:
         super().__init__()
 
         self._eps = eps
-        self._weight = ttnn.to_torch(parameters.weight).squeeze(0) if parameters.weight is not None else None
-        self._bias = ttnn.to_torch(parameters.bias).squeeze(0) if parameters.bias is not None else None
+        self._weight = parameters.weight
+        self._bias = parameters.bias
         self._num_groups = num_groups
 
-    def __call__(self, x: ttnn.Tensor, *, inplace: bool = False) -> ttnn.Tensor:
-        assert not inplace
-        torch_result = torch.nn.functional.group_norm(
-            ttnn.to_torch(x), self._num_groups, self._weight, self._bias, eps=self._eps
-        )
-        return ttnn.from_torch(torch_result, device=x.device(), layout=x.layout, memory_config=x.memory_config())
+        # if input_memory_config.memory_layout == ttnn.TensorMemoryLayout.BLOCK_SHARDED:
+        #     num_cores_across_channel = self.group_norm_core_grid.y
+        # elif input_memory_config.memory_layout == ttnn.TensorMemoryLayout.HEIGHT_SHARDED:
+        #     num_cores_across_channel = 1
+        # else:
+        #     num_cores_across_channel = int(self.group_norm_core_grid.x * self.group_norm_core_grid.y)
+        num_cores_across_channel = 64
 
-        # return ttnn.group_norm(
-        #     x,
-        #     weight=self._weight,
-        #     bias=self._bias,
-        #     num_groups=self._num_groups,
-        #     epsilon=self._eps,
-        #     core_grid=core_grid,
-        #     inplace=inplace,
-        # )
+        device = parameters.weight.device()
+
+        torch_weight = ttnn.create_group_norm_weight_bias_rm(
+            ttnn.to_torch(parameters.weight), parameters.in_channels, num_cores_across_channel
+        )
+        torch_bias = ttnn.create_group_norm_weight_bias_rm(
+            ttnn.to_torch(parameters.bias), parameters.in_channels, num_cores_across_channel
+        )
+        torch_norm_input_mask = ttnn.create_group_norm_input_mask(
+            parameters.in_channels, num_groups, num_cores_across_channel
+        )
+        self._weight = ttnn.from_torch(
+            torch_weight,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
+            device=device,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        self._bias = ttnn.from_torch(
+            torch_bias,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
+            device=device,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        self._norm_input_mask = ttnn.from_torch(
+            torch_norm_input_mask,
+            dtype=ttnn.bfloat8_b,
+            layout=ttnn.TILE_LAYOUT,
+            device=device,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+
+        self._torch_weight = ttnn.to_torch(parameters.weight).squeeze(0)
+        self._torch_bias = ttnn.to_torch(parameters.bias).squeeze(0)
+
+    def __call__(self, x: ttnn.Tensor, *, inplace: bool = False) -> ttnn.Tensor:
+        if x.shape[1] > 0:
+            assert not inplace
+
+            torch_x = ttnn.to_torch(x).permute([0, 3, 1, 2])
+            torch_result = torch.nn.functional.group_norm(
+                torch_x, self._num_groups, self._torch_weight, self._torch_bias, eps=self._eps
+            )
+            torch_result = torch_result.permute([0, 2, 3, 1])
+
+            return ttnn.from_torch(torch_result, device=x.device(), layout=x.layout, memory_config=x.memory_config())
+
+        [batch_size, height, width, in_channels] = list(x.shape)
+
+        x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
+
+        (
+            memory_config,
+            core_grid,
+        ) = ttnn.determine_expected_group_norm_sharded_config_and_grid_size(
+            device=x.device(),
+            num_channels=in_channels,
+            num_groups=self._num_groups,
+            input_nhw=batch_size * height * width,
+            is_height_sharded=False,
+        )
+
+        x = ttnn.reshape(x, [batch_size, 1, width * height, in_channels])
+        x = ttnn.to_memory_config(x, memory_config)
+        x = ttnn.reallocate(x)
+
+        x = ttnn.group_norm(
+            x,
+            weight=self._weight,
+            bias=self._bias,
+            input_mask=self._norm_input_mask,
+            num_groups=self._num_groups,
+            epsilon=self._eps,
+            core_grid=core_grid,
+            memory_config=memory_config,
+            inplace=inplace,
+        )
+
+        x = x.reshape([batch_size, height, width, in_channels])
+        x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)  # TODO: remove?
+        x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
+
+        return x
