@@ -103,18 +103,7 @@ class TtAttention:
         spatial: N ⊗ S1 ⊗ (H * E1)
         prompt: N ⊗ S2 ⊗ (H * E2)
         """
-        spatial_sequence_length = spatial.shape[1]
-
         q, k, v = self._spatial_attn.qkv(spatial, num_heads=self._num_heads)
-
-        if prompt is not None:
-            assert self._prompt_attn is not None
-
-            q2, k2, v2 = self._prompt_attn.qkv(prompt, num_heads=self._num_heads)
-
-            q = ttnn.concat([q, q2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Eq
-            k = ttnn.concat([k, k2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Eq
-            v = ttnn.concat([v, v2], dim=2)  # N ⊗ H ⊗ (S1 + S2) ⊗ Ev
 
         program_config = ttnn.SDPAProgramConfig(
             compute_with_storage_grid_size=[8, 8],
@@ -129,31 +118,47 @@ class TtAttention:
             fp32_dest_acc_en=True,
         )
 
-        # operands must be in DRAM
-        attn = ttnn.transformer.scaled_dot_product_attention(
+        if prompt is None:
+            # operands must be in DRAM
+            attn = ttnn.transformer.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                is_causal=False,
+                program_config=program_config,
+                compute_kernel_config=compute_kernel_config,
+            )
+            ttnn.deallocate(q)
+            ttnn.deallocate(k)
+            ttnn.deallocate(v)
+
+            concatenated_attn = ttnn.transformer.concatenate_heads(attn)
+            ttnn.deallocate(attn)
+
+            spatial = self._spatial_attn.out_proj(concatenated_attn)
+            return spatial, None
+
+        assert self._prompt_attn is not None
+
+        q2, k2, v2 = self._prompt_attn.qkv(prompt, num_heads=self._num_heads)
+
+        spatial, prompt = ttnn.transformer.joint_scaled_dot_product_attention(
             q,
             k,
             v,
-            is_causal=False,
+            q2,
+            k2,
+            v2,
+            joint_strategy="rear",
             program_config=program_config,
             compute_kernel_config=compute_kernel_config,
         )
-        ttnn.deallocate(q)
-        ttnn.deallocate(k)
-        ttnn.deallocate(v)
 
-        concatenated_attn = ttnn.transformer.concatenate_heads(attn)
-        ttnn.deallocate(attn)
-
-        if prompt is not None:
-            spatial = concatenated_attn[:, :spatial_sequence_length]
-            prompt = concatenated_attn[:, spatial_sequence_length:]
-
-            prompt = self._prompt_attn.out_proj(prompt)
-        else:
-            spatial = concatenated_attn
+        spatial = ttnn.transformer.concatenate_heads(spatial)
+        prompt = ttnn.transformer.concatenate_heads(prompt)
 
         spatial = self._spatial_attn.out_proj(spatial)
+        prompt = self._prompt_attn.out_proj(prompt)
 
         return spatial, prompt
 
