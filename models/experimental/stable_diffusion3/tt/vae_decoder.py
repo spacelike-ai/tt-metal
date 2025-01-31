@@ -376,7 +376,7 @@ class TtGroupNorm:
         #     num_cores_across_channel = 1
         # else:
         #     num_cores_across_channel = int(self.group_norm_core_grid.x * self.group_norm_core_grid.y)
-        num_cores_across_channel = 64
+        num_cores_across_channel = 8
 
         device = parameters.weight.device()
 
