@@ -41,10 +41,10 @@ static const std::vector<DispatchKernelNode> single_chip_arch_1cq = {
 };
 
 static const std::vector<DispatchKernelNode> single_chip_arch_2cq = {
-    {0, 0, 0, 0, PREFETCH_HD, {x, x, x, x}, {1, x, x, x}, NOC::NOC_0, NOC::NOC_0, NOC::NOC_0},
-    {1, 0, 0, 0, DISPATCH_HD, {0, x, x, x}, {x, x, x, x}, NOC::NOC_0, NOC::NOC_1, NOC::NOC_0},
-    {2, 0, 0, 1, PREFETCH_HD, {x, x, x, x}, {3, x, x, x}, NOC::NOC_0, NOC::NOC_0, NOC::NOC_0},
-    {3, 0, 0, 1, DISPATCH_HD, {2, x, x, x}, {x, x, x, x}, NOC::NOC_0, NOC::NOC_1, NOC::NOC_0},
+    {0, 0, 0, 0, PREFETCH_HD, {x, x, x, x}, {2, x, x, x}, NOC::NOC_0, NOC::NOC_0, NOC::NOC_0},
+    {1, 0, 0, 1, PREFETCH_HD, {x, x, x, x}, {3, x, x, x}, NOC::NOC_0, NOC::NOC_0, NOC::NOC_0},
+    {2, 0, 0, 0, DISPATCH_HD, {0, x, x, x}, {x, x, x, x}, NOC::NOC_0, NOC::NOC_1, NOC::NOC_0},
+    {3, 0, 0, 1, DISPATCH_HD, {1, x, x, x}, {x, x, x, x}, NOC::NOC_0, NOC::NOC_1, NOC::NOC_0},
 };
 
 static const std::vector<DispatchKernelNode> single_chip_arch_2cq_dispatch_s = {
@@ -692,7 +692,7 @@ void configure_dispatch_cores(IDevice* device) {
     // Set up completion_queue_writer core. This doesn't actually have a kernel so keep it out of the struct and config
     // it here. TODO: should this be in the struct?
     CoreType dispatch_core_type = dispatch_core_manager::instance().get_dispatch_core_type(device->id());
-    auto& my_dispatch_constants = dispatch_constants::get(dispatch_core_type);
+    auto& my_dispatch_constants = DispatchMemMap::get(dispatch_core_type);
     uint32_t cq_start = my_dispatch_constants.get_host_command_queue_addr(CommandQueueHostAddrType::UNRESERVED);
     uint32_t cq_size = device->sysmem_manager().get_cq_size();
     std::vector<uint32_t> zero = {0x0};
