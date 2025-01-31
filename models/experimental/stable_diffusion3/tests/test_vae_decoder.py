@@ -19,10 +19,12 @@ from ..tt.vae_decoder import TtVaeDecoder, TtVaeDecoderParameters
     "image_size",
     [
         128,
+        # 256,
+        # 512,
         # 1024,
     ],
 )
-@pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 716800}], indirect=True)
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 16384, "trace_region_size": 716800}], indirect=True)
 @pytest.mark.parametrize(
     ("use_program_cache", "use_tracing"),
     [
