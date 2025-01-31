@@ -2,8 +2,6 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import TYPE_CHECKING
-
 import pytest
 import torch
 import ttnn
@@ -25,8 +23,18 @@ from ..tt.vae_decoder import TtVaeDecoder, TtVaeDecoderParameters
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 716800}], indirect=True)
-# @pytest.mark.usefixtures("use_program_cache")
-def test_vae_decoder(*, device: ttnn.Device, image_size: int) -> None:
+@pytest.mark.parametrize(
+    ("use_program_cache", "use_tracing"),
+    [
+        (False, False),
+        (True, False),
+        (True, True),
+    ],
+)
+def test_vae_decoder(*, device: ttnn.Device, use_program_cache: bool, use_tracing: bool, image_size: int) -> None:
+    if use_program_cache:
+        ttnn.enable_program_cache(device)
+
     torch_dtype = torch.float32
     ttnn_dtype = ttnn.bfloat16
 
@@ -50,20 +58,30 @@ def test_vae_decoder(*, device: ttnn.Device, image_size: int) -> None:
 
     tt_latent = allocate_tensor_on_device_like(tt_latent_host, device=device)
 
-    # cache
-    # tt_image = tt_model.forward(tt_latent)
+    if use_tracing:
+        # cache
+        logger.info("caching...")
+        tt_model(tt_latent)
 
-    # # trace
-    # tid = ttnn.begin_trace_capture(device)
-    # tt_image = tt_model(tt_latent)
-    # ttnn.end_trace_capture(device, tid)
+        # trace
+        logger.info("tracing...")
+        tid = ttnn.begin_trace_capture(device)
+        tt_image = tt_model(tt_latent)
+        ttnn.end_trace_capture(device, tid)
 
-    # # execute
-    # ttnn.copy_host_to_device_tensor(tt_latent_host, tt_latent)
-    # ttnn.execute_trace(device, tid)
+        # execute
+        logger.info("executing...")
+        ttnn.copy_host_to_device_tensor(tt_latent_host, tt_latent)
+        ttnn.execute_trace(device, tid)
+        logger.info("done...")
+    else:
+        logger.info("compiling...")
+        tt_model(tt_latent)
 
-    ttnn.copy_host_to_device_tensor(tt_latent_host, tt_latent)
-    tt_image = tt_model(tt_latent)
+        logger.info("executing...")
+        ttnn.copy_host_to_device_tensor(tt_latent_host, tt_latent)
+        tt_image = tt_model(tt_latent)
+        logger.info("done...")
 
     tt_image_torch = ttnn.to_torch(tt_image).permute(0, 3, 1, 2)
 
