@@ -95,6 +95,7 @@ class TtConv2d:
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         result, shape = self.call_without_reshape(x)
+        # TODO: deallocate result
         result = utils.untilize(result)
         return result.reshape(shape)
 
