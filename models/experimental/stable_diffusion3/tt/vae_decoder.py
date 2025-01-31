@@ -279,12 +279,8 @@ class TtAttention:
 
         x = self._group_norm(x)
 
-        x = ttnn.permute(x, [0, 3, 1, 2])
-
-        batch_size, features, height, width = list(x.shape)
-        x = x.reshape([batch_size, features, height * width])
-
-        x = ttnn.transpose(x, 1, 2)
+        batch_size, height, width, features = list(x.shape)
+        x = x.reshape([batch_size, height * width, features])
 
         q = self.to_q(x)
         k = self.to_k(x)
@@ -321,14 +317,9 @@ class TtAttention:
         ttnn.deallocate(k)
         ttnn.deallocate(v)
 
-        x = ttnn.transpose(x, 1, 2)
-        x = x.reshape([batch_size, -1, features])  # TODO: is this the correct shape?
+        x = x.reshape([batch_size, height, width, features])  # from [batch_size, height * width, 1, features]
 
         x = self.to_out(x)
-
-        x = ttnn.transpose(x, -1, -2).reshape([batch_size, features, height, width])
-
-        x = ttnn.permute(x, [0, 2, 3, 1])  # TODO: remove
 
         return x + residual
 
