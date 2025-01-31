@@ -66,7 +66,7 @@ class TtVaeDecoder:
         for up_block in self._up_blocks:
             x = up_block(x)
 
-        x = self._conv_norm_out(x, inplace=False)  # TODO: change to inplace=True
+        x = self._conv_norm_out(x)
 
         x = ttnn.silu(x)
         return self._conv_out(x)
@@ -218,13 +218,13 @@ class TtResnetBlock2D:
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         residual = x
 
-        x = self.norm1(x, inplace=False)  # TODO: change to inplace=True
+        x = self.norm1(x)
 
         x = ttnn.silu(x)
         x = self.conv1(x)
         x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)  # TODO: remove
 
-        x = self.norm2(x, inplace=False)  # TODO: change to inplace=True
+        x = self.norm2(x)
 
         x = ttnn.silu(x)
         x = self.conv2(x)
@@ -277,11 +277,10 @@ class TtAttention:
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         residual = x
 
-        # x = ttnn.permute(x, [0, 3, 1, 2])  # TODO: remove
-        # x = x.reshape([batch_size, features, height * width])
+        x = self._group_norm(x)
 
-        x = self._group_norm(x, inplace=False)  # TODO: inplace=True
-        x = ttnn.permute(x, [0, 3, 1, 2])  # TODO: remove
+        x = ttnn.permute(x, [0, 3, 1, 2])
+
         batch_size, features, height, width = list(x.shape)
         x = x.reshape([batch_size, features, height * width])
 
@@ -411,7 +410,7 @@ class TtGroupNorm:
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
-    def __call__(self, x: ttnn.Tensor, *, inplace: bool = False) -> ttnn.Tensor:
+    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         [batch_size, height, width, in_channels] = list(x.shape)
 
         x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
@@ -431,7 +430,7 @@ class TtGroupNorm:
         x = ttnn.to_memory_config(x, memory_config)
         x = ttnn.reallocate(x)
 
-        x = ttnn.group_norm(
+        ttnn.group_norm(
             x,
             weight=self._weight,
             bias=self._bias,
@@ -440,7 +439,7 @@ class TtGroupNorm:
             epsilon=self._eps,
             core_grid=core_grid,
             memory_config=memory_config,
-            inplace=inplace,
+            inplace=True,
         )
 
         x = x.reshape([batch_size, height, width, in_channels])
