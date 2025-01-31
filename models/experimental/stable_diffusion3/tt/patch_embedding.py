@@ -55,7 +55,7 @@ class TtPatchEmbed:
     def __call__(self, latent: ttnn.Tensor) -> ttnn.Tensor:
         latent, [batch_size, out_height, out_width, c] = self._proj.call_without_reshape(latent)
 
-        assert list(latent.shape) == list(latent.shape.with_tile_padding())
+        assert list(latent.shape) == list(latent.padded_shape)
         assert (out_height * out_width) % 32 == 0
         latent = latent.reshape([batch_size, out_height * out_width, c])
 
