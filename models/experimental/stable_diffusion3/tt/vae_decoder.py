@@ -411,21 +411,7 @@ class TtGroupNorm:
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
-        self._torch_weight = ttnn.to_torch(parameters.weight).squeeze(0)
-        self._torch_bias = ttnn.to_torch(parameters.bias).squeeze(0)
-
     def __call__(self, x: ttnn.Tensor, *, inplace: bool = False) -> ttnn.Tensor:
-        if x.shape[1] > 0:
-            assert not inplace
-
-            torch_x = ttnn.to_torch(x).permute([0, 3, 1, 2])
-            torch_result = torch.nn.functional.group_norm(
-                torch_x, self._num_groups, self._torch_weight, self._torch_bias, eps=self._eps
-            )
-            torch_result = torch_result.permute([0, 2, 3, 1])
-
-            return ttnn.from_torch(torch_result, device=x.device(), layout=x.layout, memory_config=x.memory_config())
-
         [batch_size, height, width, in_channels] = list(x.shape)
 
         x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
