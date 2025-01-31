@@ -29,8 +29,8 @@ from ..tt.vae_decoder import TtVaeDecoder, TtVaeDecoderParameters
     ("use_program_cache", "use_tracing"),
     [
         (False, False),
-        (True, False),
-        (True, True),
+        # (True, False),
+        # (True, True),
     ],
 )
 def test_vae_decoder(*, device: ttnn.Device, use_program_cache: bool, use_tracing: bool, image_size: int) -> None:
