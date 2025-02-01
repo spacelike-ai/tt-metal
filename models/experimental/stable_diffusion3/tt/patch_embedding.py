@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 
 import ttnn
 
-from . import utils
 from .conv2d import TtConv2d, TtConv2dParameters
 from .substate import substate
 
@@ -60,7 +59,7 @@ class TtPatchEmbed:
         latent = latent.reshape([batch_size, out_height * out_width, c])
 
         pos_embed = self._cropped_pos_embed(out_height, out_width)
-        pos_embed = utils.tilize(pos_embed)
+        pos_embed = ttnn.to_layout(pos_embed, ttnn.TILE_LAYOUT)
 
         return latent + pos_embed
 

@@ -4,17 +4,15 @@
 
 from __future__ import annotations
 
-import itertools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import ttnn
 from models.experimental.stable_diffusion3.tt.linear import TtLinear, TtLinearParameters
 
-from . import utils
 from .normalization import TtLayerNorm, TtLayerNormParameters
 from .patch_embedding import TtPatchEmbed, TtPatchEmbedParameters
-from .substate import has_substate, indexed_substates, substate
+from .substate import indexed_substates, substate
 from .timestep_embedding import TtCombinedTimestepTextProjEmbeddings, TtCombinedTimestepTextProjEmbeddingsParameters
 from .transformer_block import TtTransformerBlock, TtTransformerBlockParameters, chunk_time
 
@@ -97,9 +95,7 @@ class TtSD3Transformer2DModel:
         prompt = self._context_embedder(prompt)
 
         # time_embed = time_embed.unsqueeze(1)
-        time_embed = utils.untilize(time_embed)
         time_embed = time_embed.reshape([time_embed.shape[0], 1, time_embed.shape[1]])
-        time_embed = utils.tilize(time_embed)
 
         for block in self._transformer_blocks:
             spatial, prompt = block(

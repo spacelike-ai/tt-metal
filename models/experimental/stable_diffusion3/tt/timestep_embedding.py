@@ -11,7 +11,6 @@ import torch
 import ttnn
 from models.experimental.stable_diffusion3.tt.linear import TtLinear, TtLinearParameters
 
-from . import utils
 from .substate import substate
 
 
@@ -73,7 +72,7 @@ class TtCombinedTimestepTextProjEmbeddings:
         batch_size = timestep.shape[0]
 
         time_proj_factor = ttnn.repeat(self._time_proj_factor, ttnn.Shape([batch_size, 1]))
-        time_proj_factor = utils.tilize(time_proj_factor)
+        time_proj_factor = ttnn.to_layout(time_proj_factor, ttnn.TILE_LAYOUT)
 
         emb = timestep * time_proj_factor
         c = ttnn.cos(emb)
