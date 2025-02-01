@@ -103,10 +103,12 @@ class TtAttention:
         spatial: N ⊗ S1 ⊗ (H * E1)
         prompt: N ⊗ S2 ⊗ (H * E2)
         """
+        device = spatial.device()
+
         q, k, v = self._spatial_attn.qkv(spatial, num_heads=self._num_heads)
 
         program_config = ttnn.SDPAProgramConfig(
-            compute_with_storage_grid_size=[8, 8],
+            compute_with_storage_grid_size=device.compute_with_storage_grid_size(),
             q_chunk_size=256,
             k_chunk_size=512,
             exp_approx_mode=True,
