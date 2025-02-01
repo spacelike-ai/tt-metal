@@ -142,7 +142,7 @@ class TtStableDiffusion3Pipeline:
         negative_prompt_2: list[str],
         negative_prompt_3: list[str],
         num_inference_steps: int = 40,
-        seed: int = 0,
+        seed: int | None = None,
     ) -> None:
         start_time = time.time()
 
@@ -189,7 +189,8 @@ class TtStableDiffusion3Pipeline:
 
         logger.info("preparing latents...")
 
-        torch.manual_seed(seed)
+        if seed is not None:
+            torch.manual_seed(seed)
         latents = torch.randn(latents_shape, dtype=prompt_embeds.dtype).permute([0, 2, 3, 1])
 
         tt_prompt_embeds = ttnn.from_torch(prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
