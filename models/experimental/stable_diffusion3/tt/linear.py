@@ -16,7 +16,8 @@ if TYPE_CHECKING:
 @dataclass
 class TtLinearParameters:
     weight: ttnn.Tensor
-    bias: ttnn.Tensor | None = None
+    bias: ttnn.Tensor | None
+    on_host: bool
 
     @classmethod
     def from_torch(
@@ -24,7 +25,7 @@ class TtLinearParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,
+        device: ttnn.Device | None,
         unsqueeze_bias: bool = False,
     ) -> TtLinearParameters:
         # There appears to be an issue when using `ttnn.linear` if the input tensor has
@@ -44,6 +45,7 @@ class TtLinearParameters:
             bias=ttnn.from_torch(bias, layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
             if bias is not None
             else None,
+            on_host=device is None,
         )
 
     @property
@@ -68,6 +70,7 @@ class TtLinear:
         self._in_channels = parameters.in_channels
         self._weight = parameters.weight
         self._bias = parameters.bias
+        self._paramters_on_host = parameters.on_host
 
         self._memory_config = memory_config
         self._program_config = program_config
@@ -77,15 +80,30 @@ class TtLinear:
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         assert x.shape[-1] == self._in_channels, "input tensor does not have the expected shape"
 
-        return ttnn.linear(
+        if self._paramters_on_host:
+            device = x.device()
+            weight = self._weight.to(device)
+            bias = self._bias.to(device) if self._bias is not None else None
+        else:
+            weight = self._weight
+            bias = self._bias
+
+        output = ttnn.linear(
             x,
-            self._weight,
-            bias=self._bias,
+            weight,
+            bias=bias,
             memory_config=self._memory_config,
             program_config=self._program_config,
             core_grid=self._core_grid,
             output_tile=self._output_tile,
         )
+
+        if self._paramters_on_host:
+            ttnn.deallocate(weight)
+            if bias is not None:
+                ttnn.deallocate(bias)
+
+        return output
 
     @property
     def device(self) -> ttnn.Device:

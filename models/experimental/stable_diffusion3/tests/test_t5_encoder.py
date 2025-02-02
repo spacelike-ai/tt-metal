@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+
+# SPDX-License-Identifier: Apache-2.0
+
+import pytest
+import torch
+import ttnn
+from loguru import logger
+from transformers.models.t5.modeling_t5 import T5EncoderModel
+
+from tests.ttnn.utils_for_testing import assert_with_pcc
+
+from ..reference.t5_encoder import T5Config, T5Encoder
+from ..tt.t5_encoder import TtT5Encoder, TtT5EncoderParameters
+from ..tt.utils import allocate_tensor_on_device_like
+
+
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
+@pytest.mark.parametrize(("use_program_cache"), [False, True])
+def test_t5_encoder(*, device: ttnn.Device, use_program_cache: bool) -> None:
+    if use_program_cache:
+        ttnn.enable_program_cache(device)
+
+    hf_model = T5EncoderModel.from_pretrained("stabilityai/stable-diffusion-3.5-medium", subfolder="text_encoder_3")
+
+    with torch.device("meta"):
+        torch_model = T5Encoder(
+            T5Config(
+                vocab_size=hf_model.config.vocab_size,
+                d_model=hf_model.config.d_model,
+                d_ff=hf_model.config.d_ff,
+                d_kv=hf_model.config.d_kv,
+                num_layers=hf_model.config.num_layers,
+                num_heads=hf_model.config.num_heads,
+                relative_attention_num_buckets=hf_model.config.relative_attention_num_buckets,
+                relative_attention_max_distance=hf_model.config.relative_attention_max_distance,
+                layer_norm_epsilon=hf_model.config.layer_norm_epsilon,
+            )
+        )
+    torch_model.load_state_dict(hf_model.state_dict(), assign=True)
+    torch_model.eval()
+
+    parameters = TtT5EncoderParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat16)
+    tt_model = TtT5Encoder(
+        parameters,
+        num_heads=hf_model.config.num_heads,
+        relative_attention_num_buckets=hf_model.config.relative_attention_num_buckets,
+        relative_attention_max_distance=hf_model.config.relative_attention_max_distance,
+        layer_norm_epsilon=hf_model.config.layer_norm_epsilon,
+    )
+
+    torch.manual_seed(0)
+    tokens = torch.randint(hf_model.config.vocab_size, [1, 256])
+
+    tt_tokens_host = ttnn.from_torch(tokens, layout=ttnn.TILE_LAYOUT)
+
+    with torch.no_grad():
+        output = torch_model(tokens)
+
+    tt_tokens = allocate_tensor_on_device_like(tt_tokens_host, device=device)
+
+    logger.info("compiling...")
+    tt_model(tt_tokens)
+
+    logger.info("executing...")
+    ttnn.copy_host_to_device_tensor(tt_tokens_host, tt_tokens)
+    tt_output = tt_model(tt_tokens)
+    logger.info("done...")
+
+    tt_output_torch = ttnn.to_torch(tt_output)
+
+    assert output.shape == tt_output_torch.shape
+    mse = torch.nn.functional.mse_loss(
+        output.to(dtype=torch.float32),
+        tt_output_torch.to(dtype=torch.float32),
+    ).item()
+    logger.info(f"mse: {mse:.6f}")
+    assert_with_pcc(output, tt_output_torch, pcc=0.945)
