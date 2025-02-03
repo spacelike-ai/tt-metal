@@ -86,6 +86,8 @@ class TtT5Encoder:
         torch_token_embedding = ttnn.to_torch(self._token_embedding)
         torch_inputs_embeds = torch.nn.functional.embedding(torch_input_ids, torch_token_embedding)
         inputs_embeds = ttnn.from_torch(torch_inputs_embeds, device=input_ids.device(), layout=ttnn.TILE_LAYOUT)
+        # does not give the correct result:
+        # inputs_embeds = ttnn.embedding(input_ids, self._token_embedding, layout=ttnn.TILE_LAYOUT)
 
         position_bias = _compute_bias(
             seq_length=seq_length,
