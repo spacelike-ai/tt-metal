@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 import ttnn
 
+from .utils import from_torch_fast
+
 if TYPE_CHECKING:
     import torch
 
@@ -26,6 +28,7 @@ class TtLinearParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | None,
+        on_host: bool = False,
         unsqueeze_bias: bool = False,
     ) -> TtLinearParameters:
         # There appears to be an issue when using `ttnn.linear` if the input tensor has
@@ -38,14 +41,20 @@ class TtLinearParameters:
         else:
             bias = None
 
+        on_host = on_host or device is None
+
         return cls(
-            weight=ttnn.from_torch(
-                state["weight"].transpose(0, 1), layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device
+            weight=from_torch_fast(
+                state["weight"].transpose(0, 1),
+                layout=ttnn.TILE_LAYOUT,
+                dtype=dtype,
+                device=device,
+                to_host=on_host,
             ),
-            bias=ttnn.from_torch(bias, layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
+            bias=from_torch_fast(bias, layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device, to_host=on_host)
             if bias is not None
             else None,
-            on_host=device is None,
+            on_host=on_host,
         )
 
     @property

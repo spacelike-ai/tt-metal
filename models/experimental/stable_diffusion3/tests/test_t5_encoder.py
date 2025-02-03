@@ -42,6 +42,7 @@ def test_t5_encoder(*, device: ttnn.Device, use_program_cache: bool) -> None:
     torch_model.load_state_dict(hf_model.state_dict(), assign=True)
     torch_model.eval()
 
+    start_time = time.time()
     parameters = TtT5EncoderParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat16)
     tt_model = TtT5Encoder(
         parameters,
@@ -50,6 +51,7 @@ def test_t5_encoder(*, device: ttnn.Device, use_program_cache: bool) -> None:
         relative_attention_max_distance=hf_model.config.relative_attention_max_distance,
         layer_norm_epsilon=hf_model.config.layer_norm_epsilon,
     )
+    logger.info(f"model creation time: {time.time() - start_time}")
 
     torch.manual_seed(0)
     tokens = torch.randint(hf_model.config.vocab_size, [1, 256])

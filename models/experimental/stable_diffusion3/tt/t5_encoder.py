@@ -178,13 +178,13 @@ class TtT5AttentionParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,  # noqa: ARG003
+        device: ttnn.Device,
     ) -> TtT5AttentionParameters:
         return cls(
-            q_proj=TtLinearParameters.from_torch(substate(state, "q"), dtype=dtype, device=None),
-            k_proj=TtLinearParameters.from_torch(substate(state, "k"), dtype=dtype, device=None),
-            v_proj=TtLinearParameters.from_torch(substate(state, "v"), dtype=dtype, device=None),
-            o_proj=TtLinearParameters.from_torch(substate(state, "o"), dtype=dtype, device=None),
+            q_proj=TtLinearParameters.from_torch(substate(state, "q"), dtype=dtype, device=device, on_host=True),
+            k_proj=TtLinearParameters.from_torch(substate(state, "k"), dtype=dtype, device=device, on_host=True),
+            v_proj=TtLinearParameters.from_torch(substate(state, "v"), dtype=dtype, device=device, on_host=True),
+            o_proj=TtLinearParameters.from_torch(substate(state, "o"), dtype=dtype, device=device, on_host=True),
         )
 
 
@@ -261,12 +261,12 @@ class TtT5DenseGatedActDenseParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,  # noqa: ARG003
+        device: ttnn.Device,
     ) -> TtT5DenseGatedActDenseParameters:
         return cls(
-            wi0=TtLinearParameters.from_torch(substate(state, "wi_0"), dtype=dtype, device=None),
-            wi1=TtLinearParameters.from_torch(substate(state, "wi_1"), dtype=dtype, device=None),
-            wo=TtLinearParameters.from_torch(substate(state, "wo"), dtype=dtype, device=None),
+            wi0=TtLinearParameters.from_torch(substate(state, "wi_0"), dtype=dtype, device=device, on_host=True),
+            wi1=TtLinearParameters.from_torch(substate(state, "wi_1"), dtype=dtype, device=device, on_host=True),
+            wo=TtLinearParameters.from_torch(substate(state, "wo"), dtype=dtype, device=device, on_host=True),
         )
 
 
