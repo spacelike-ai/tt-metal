@@ -18,11 +18,12 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchE
 from loguru import logger
 from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
 
+from .t5_encoder import TtT5Encoder, TtT5EncoderParameters
 from .transformer import TtSD3Transformer2DModel, TtSD3Transformer2DModelParameters
 
 
 class TtStableDiffusion3Pipeline:
-    def __init__(self, *, checkpoint: str, device: ttnn.Device) -> None:
+    def __init__(self, *, checkpoint: str, device: ttnn.Device, enable_t5_text_encoder: bool = True) -> None:
         self._device = device
 
         logger.info("loading models...")
@@ -31,7 +32,8 @@ class TtStableDiffusion3Pipeline:
         self._tokenizer_3 = T5TokenizerFast.from_pretrained(checkpoint, subfolder="tokenizer_3")
         self._text_encoder_1 = CLIPTextModelWithProjection.from_pretrained(checkpoint, subfolder="text_encoder")
         self._text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(checkpoint, subfolder="text_encoder_2")
-        self._text_encoder_3 = T5EncoderModel.from_pretrained(checkpoint, subfolder="text_encoder_3")
+        if enable_t5_text_encoder:
+            torch_text_encoder_3 = T5EncoderModel.from_pretrained(checkpoint, subfolder="text_encoder_3")
         self._scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(checkpoint, subfolder="scheduler")
         self._vae = AutoencoderKL.from_pretrained(checkpoint, subfolder="vae")
         torch_transformer = SD3Transformer2DModel.from_pretrained(
@@ -43,12 +45,12 @@ class TtStableDiffusion3Pipeline:
         assert isinstance(self._tokenizer_3, T5TokenizerFast)
         assert isinstance(self._text_encoder_1, CLIPTextModelWithProjection)
         assert isinstance(self._text_encoder_2, CLIPTextModelWithProjection)
-        assert isinstance(self._text_encoder_3, T5EncoderModel)
         assert isinstance(self._scheduler, FlowMatchEulerDiscreteScheduler)
         assert isinstance(self._vae, AutoencoderKL)
         assert isinstance(torch_transformer, SD3Transformer2DModel)
 
-        logger.info("creating tt transformer...")
+        logger.info("creating TT-NN transformer...")
+
         parameters = TtSD3Transformer2DModelParameters.from_torch(
             torch_transformer.state_dict(), device=device, dtype=ttnn.bfloat8_b
         )
@@ -64,6 +66,22 @@ class TtStableDiffusion3Pipeline:
 
         self._vae_scale_factor = 2 ** (len(self._block_out_channels) - 1)
         self._image_processor = VaeImageProcessor(vae_scale_factor=self._vae_scale_factor)
+
+        if enable_t5_text_encoder:
+            logger.info("creating TT-NN text encoder...")
+
+            parameters = TtT5EncoderParameters.from_torch(
+                torch_text_encoder_3.state_dict(), device=device, dtype=ttnn.bfloat16
+            )
+            self._text_encoder_3 = TtT5Encoder(
+                parameters,
+                num_heads=torch_text_encoder_3.config.num_heads,
+                relative_attention_num_buckets=torch_text_encoder_3.config.relative_attention_num_buckets,
+                relative_attention_max_distance=torch_text_encoder_3.config.relative_attention_max_distance,
+                layer_norm_epsilon=torch_text_encoder_3.config.layer_norm_epsilon,
+            )
+        else:
+            self._text_encoder_3 = None
 
     def prepare(
         self,
@@ -84,6 +102,18 @@ class TtStableDiffusion3Pipeline:
 
         do_classifier_free_guidance = guidance_scale > 1
 
+        prompt_embeds, pooled_prompt_embeds = self._encode_prompts(
+            prompt_1=[""],
+            prompt_2=[""],
+            prompt_3=[""],
+            negative_prompt_1=[""],
+            negative_prompt_2=[""],
+            negative_prompt_3=[""],
+            num_images_per_prompt=num_images_per_prompt,
+            max_t5_sequence_length=max_t5_sequence_length,
+            do_classifier_free_guidance=do_classifier_free_guidance,
+        )
+
         latents_shape = (
             batch_size * num_images_per_prompt,
             height // self._vae_scale_factor,
@@ -91,12 +121,14 @@ class TtStableDiffusion3Pipeline:
             self._num_channels_latents,
         )
 
+        tt_prompt_embeds = ttnn.from_torch(
+            prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+        )
+        tt_pooled_prompt_embeds = ttnn.from_torch(
+            pooled_prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+        )
         tt_timestep = ttnn.allocate_tensor_on_device([1, 1], ttnn.float32, ttnn.ROW_MAJOR_LAYOUT, self._device)
         tt_sigma_difference = ttnn.allocate_tensor_on_device([1, 1], ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
-        tt_prompt_embeds = ttnn.allocate_tensor_on_device([2, 333, 4096], ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
-        tt_pooled_prompt_embeds = ttnn.allocate_tensor_on_device(
-            [2, 2048], ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device
-        )
         tt_latents = ttnn.allocate_tensor_on_device(latents_shape, ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
 
         # cache
@@ -316,6 +348,7 @@ class TtStableDiffusion3Pipeline:
         clip_prompt_embeds = torch.cat([prompt_embed, prompt_2_embed], dim=-1)
 
         t5_prompt_embed = _get_t5_prompt_embeds(
+            device=self._device,
             prompt=prompt_3,
             num_images_per_prompt=num_images_per_prompt,
             max_sequence_length=max_t5_sequence_length,
@@ -353,6 +386,7 @@ class TtStableDiffusion3Pipeline:
         negative_clip_prompt_embeds = torch.cat([negative_prompt_embed, negative_prompt_2_embed], dim=-1)
 
         t5_negative_prompt_embed = _get_t5_prompt_embeds(
+            device=self._device,
             prompt=negative_prompt_3,
             num_images_per_prompt=num_images_per_prompt,
             max_sequence_length=max_t5_sequence_length,
@@ -448,17 +482,15 @@ def _get_clip_prompt_embeds(
 def _get_t5_prompt_embeds(
     prompt: list[str],
     *,
-    device: torch.device | None = None,
-    dtype: torch.dtype | None = None,
+    torch_device: torch.device | None = None,
+    device: ttnn.Device,
     joint_attention_dim: int,
     max_sequence_length: int,
     num_images_per_prompt: int,
-    text_encoder: T5EncoderModel | None,
+    text_encoder: TtT5Encoder | None,
     tokenizer_max_length: int,
     tokenizer: T5TokenizerFast,
 ) -> torch.Tensor:
-    dtype = dtype or text_encoder.dtype
-
     prompt = [prompt] if isinstance(prompt, str) else prompt
     batch_size = len(prompt)
 
@@ -469,8 +501,8 @@ def _get_t5_prompt_embeds(
                 tokenizer_max_length,
                 joint_attention_dim,
             ),
-            device=device,
-            dtype=dtype,
+            device=torch_device,
+            dtype=torch.bfloat16,
         )
 
     text_inputs = tokenizer(
@@ -491,10 +523,11 @@ def _get_t5_prompt_embeds(
             f" {max_sequence_length} tokens: {removed_text}"
         )
 
-    prompt_embeds = text_encoder(text_input_ids.to(device))[0]
+    tt_text_input_ids = ttnn.from_torch(text_input_ids, device=device, layout=ttnn.TILE_LAYOUT)
+    tt_prompt_embeds = text_encoder(tt_text_input_ids)
+    prompt_embeds = ttnn.to_torch(tt_prompt_embeds)
 
-    dtype = text_encoder.dtype
-    prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
+    prompt_embeds = prompt_embeds.to(device=torch_device)
 
     _, seq_len, _ = prompt_embeds.shape
 

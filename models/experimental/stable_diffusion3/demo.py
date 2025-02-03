@@ -20,7 +20,11 @@ def test_sd3(
     *,
     device: ttnn.Device,
 ) -> None:
-    pipeline = TtStableDiffusion3Pipeline(checkpoint="stabilityai/stable-diffusion-3.5-medium", device=device)
+    pipeline = TtStableDiffusion3Pipeline(
+        checkpoint="stabilityai/stable-diffusion-3.5-medium",
+        device=device,
+        enable_t5_text_encoder=True,
+    )
 
     pipeline.prepare(
         batch_size=1,

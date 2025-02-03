@@ -2,6 +2,8 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+import time
+
 import pytest
 import torch
 import ttnn
@@ -54,8 +56,10 @@ def test_t5_encoder(*, device: ttnn.Device, use_program_cache: bool) -> None:
 
     tt_tokens_host = ttnn.from_torch(tokens, layout=ttnn.TILE_LAYOUT)
 
+    start_time = time.time()
     with torch.no_grad():
         output = torch_model(tokens)
+    logger.info(f"CPU runtime: {time.time() - start_time}")
 
     tt_tokens = allocate_tensor_on_device_like(tt_tokens_host, device=device)
 
@@ -64,7 +68,9 @@ def test_t5_encoder(*, device: ttnn.Device, use_program_cache: bool) -> None:
 
     logger.info("executing...")
     ttnn.copy_host_to_device_tensor(tt_tokens_host, tt_tokens)
+    start_time = time.time()
     tt_output = tt_model(tt_tokens)
+    logger.info(f"TT-NN runtime: {time.time() - start_time}")
     logger.info("done...")
 
     tt_output_torch = ttnn.to_torch(tt_output)
