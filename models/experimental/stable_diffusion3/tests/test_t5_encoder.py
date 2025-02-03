@@ -14,7 +14,6 @@ from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from ..reference.t5_encoder import T5Config, T5Encoder
 from ..tt.t5_encoder import TtT5Encoder, TtT5EncoderParameters
-from ..tt.utils import allocate_tensor_on_device_like
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
@@ -63,13 +62,12 @@ def test_t5_encoder(*, device: ttnn.Device, use_program_cache: bool) -> None:
         output = torch_model(tokens)
     logger.info(f"CPU runtime: {time.time() - start_time}")
 
-    tt_tokens = allocate_tensor_on_device_like(tt_tokens_host, device=device)
+    tt_tokens = tt_tokens_host.to(device)
 
     logger.info("compiling...")
     tt_model(tt_tokens)
 
     logger.info("executing...")
-    ttnn.copy_host_to_device_tensor(tt_tokens_host, tt_tokens)
     start_time = time.time()
     tt_output = tt_model(tt_tokens)
     logger.info(f"TT-NN runtime: {time.time() - start_time}")
