@@ -12,7 +12,7 @@ from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from ..reference.vae_decoder import VaeDecoder
 from ..tt.utils import allocate_tensor_on_device_like
-from ..tt.vae_decoder import TtVaeDecoder, TtVaeDecoderParameters
+from ..tt.vae_decoder import TtGroupNorm, TtGroupNormParameters, TtVaeDecoder, TtVaeDecoderParameters
 
 
 @pytest.mark.skip(reason="broken since last merge to main")
