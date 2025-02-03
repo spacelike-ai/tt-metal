@@ -23,7 +23,7 @@ def test_sd3(
     pipeline = TtStableDiffusion3Pipeline(
         checkpoint="stabilityai/stable-diffusion-3.5-medium",
         device=device,
-        enable_t5_text_encoder=True,
+        enable_t5_text_encoder=False,
     )
 
     pipeline.prepare(
