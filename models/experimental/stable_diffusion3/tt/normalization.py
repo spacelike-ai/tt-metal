@@ -72,5 +72,19 @@ class TtLayerNorm:
         self._weight = parameters.weight
         self._bias = parameters.bias
 
-    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        return ttnn.layer_norm(x, weight=self._weight, bias=self._bias, epsilon=self._eps)
+    def __call__(
+        self,
+        x: ttnn.Tensor,
+        memory_config: ttnn.MemoryConfig | None = None,
+        program_config: ttnn.ProgramConfig | None = None,
+        compute_kernel_config: ttnn.DeviceComputeKernelConfig | None = None,
+    ) -> ttnn.Tensor:
+        return ttnn.layer_norm(
+            x,
+            weight=self._weight,
+            bias=self._bias,
+            epsilon=self._eps,
+            memory_config=memory_config,
+            program_config=program_config,
+            compute_kernel_config=compute_kernel_config,
+        )

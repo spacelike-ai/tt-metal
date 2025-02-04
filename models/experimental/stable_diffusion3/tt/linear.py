@@ -67,26 +67,21 @@ class TtLinearParameters:
 
 
 class TtLinear:
-    def __init__(
-        self,
-        parameters: TtLinearParameters,
-        *,
-        memory_config: ttnn.MemoryConfig | None = None,
-        program_config: ttnn.MatmulProgramConfig | None = None,
-        core_grid: ttnn.CoreGrid | None = None,
-        output_tile: list[int] | None = None,
-    ) -> None:
+    def __init__(self, parameters: TtLinearParameters) -> None:
         self._in_channels = parameters.in_channels
         self._weight = parameters.weight
         self._bias = parameters.bias
         self._paramters_on_host = parameters.on_host
 
-        self._memory_config = memory_config
-        self._program_config = program_config
-        self._core_grid = core_grid
-        self._output_tile = output_tile
-
-    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
+    def __call__(
+        self,
+        x: ttnn.Tensor,
+        *,
+        memory_config: ttnn.MemoryConfig | None = None,
+        program_config: ttnn.MatmulProgramConfig | None = None,
+        core_grid: ttnn.CoreGrid | None = None,
+        output_tile: list[int] | None = None,
+    ) -> ttnn.Tensor:
         assert x.shape[-1] == self._in_channels, "input tensor does not have the expected shape"
 
         if self._paramters_on_host:
@@ -101,10 +96,10 @@ class TtLinear:
             x,
             weight,
             bias=bias,
-            memory_config=self._memory_config,
-            program_config=self._program_config,
-            core_grid=self._core_grid,
-            output_tile=self._output_tile,
+            memory_config=memory_config,
+            program_config=program_config,
+            core_grid=core_grid,
+            output_tile=output_tile,
         )
 
         if self._paramters_on_host:

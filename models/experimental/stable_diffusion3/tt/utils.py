@@ -12,8 +12,10 @@ if TYPE_CHECKING:
     import torch
 
 
-def allocate_tensor_on_device_like(t: ttnn.Tensor, *, device: ttnn.Device) -> ttnn.Tensor:
-    return ttnn.allocate_tensor_on_device(t.shape, t.dtype, t.layout, device)
+def allocate_tensor_on_device_like(
+    t: ttnn.Tensor, *, device: ttnn.Device, memory_config: ttnn.MemoryConfig | None = None
+) -> ttnn.Tensor:
+    return ttnn.allocate_tensor_on_device(t.shape, t.dtype, t.layout, device, memory_config=memory_config)
 
 
 def from_torch_fast(
