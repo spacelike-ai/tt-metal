@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import tracy
 import ttnn
 
 from .linear import TtLinear, TtLinearParameters
@@ -72,12 +73,16 @@ class TtAttentionPart:
         self._norm_k = TtRmsNorm(parameters.norm_k, eps=eps)
 
     def qkv(self, x: ttnn.Tensor, *, num_heads: int) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
+        tracy.signpost("enter TtAttentionPart")
+
         qkv = self._qkv_proj(x)
 
         q, k, v = ttnn.transformer.split_query_key_value_and_split_heads(qkv, num_heads=num_heads, transpose_key=False)
 
         q = self._norm_q(q)
         k = self._norm_k(k)
+
+        tracy.signpost("exit TtAttentionPart")
 
         return q, k, v
 
@@ -104,6 +109,8 @@ class TtAttention:
         prompt: N ⊗ S2 ⊗ (H * E2)
         """
         device = spatial.device()
+
+        tracy.signpost("enter TtAttention")
 
         q, k, v = self._spatial_attn.qkv(spatial, num_heads=self._num_heads)
 
@@ -161,6 +168,8 @@ class TtAttention:
 
         spatial = self._spatial_attn.out_proj(spatial)
         prompt = self._prompt_attn.out_proj(prompt)
+
+        tracy.signpost("exit TtAttention")
 
         return spatial, prompt
 
