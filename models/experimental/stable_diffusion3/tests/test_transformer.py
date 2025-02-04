@@ -42,7 +42,7 @@ def test_transformer(
     tt_model = TtSD3Transformer2DModel(parameters, num_attention_heads=torch_model.config.num_attention_heads)
 
     torch.manual_seed(0)
-    spatial = torch.randn((batch_size, 16, 64, 64), dtype=torch_dtype)
+    spatial = torch.randn((batch_size, 16, 128, 128), dtype=torch_dtype)
     prompt = torch.randn((batch_size, prompt_sequence_length, 4096), dtype=torch_dtype)
     pooled_projection = torch.randn((batch_size, 2048), dtype=torch_dtype)
     timestep = torch.randint(1000, (batch_size,), dtype=torch.float32)
