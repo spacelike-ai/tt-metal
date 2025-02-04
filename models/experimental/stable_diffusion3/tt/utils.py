@@ -22,6 +22,7 @@ def from_torch_fast(
     device: ttnn.Device | None = None,
     layout: ttnn.Layout | None = None,
     dtype: ttnn.DataType | None = None,
+    memory_config: ttnn.MemoryConfig | None = None,
     to_host: bool = False,
 ) -> ttnn.Tensor:
     if device is None:
@@ -29,13 +30,8 @@ def from_torch_fast(
 
     tensor = ttnn.from_torch(t, device=device)
 
-    if layout is not None:
-        new = ttnn.to_layout(tensor, layout)
-        ttnn.deallocate(tensor)
-        tensor = new
-
-    if dtype is not None:
-        new = ttnn.clone(tensor, dtype=dtype)
+    if layout is not None or dtype is not None:
+        new = ttnn.to_layout(tensor, layout, dtype=dtype, memory_config=memory_config)
         ttnn.deallocate(tensor)
         tensor = new
 
