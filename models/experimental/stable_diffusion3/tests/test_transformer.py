@@ -47,8 +47,8 @@ def test_transformer(
     tt_spatial_host = ttnn.from_torch(
         spatial.permute([0, 2, 3, 1]), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
     )  # BCYX -> BYXC
-    tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-    tt_pooled_projection_host = ttnn.from_torch(pooled_projection, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
+    tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
+    tt_pooled_projection_host = ttnn.from_torch(pooled_projection, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
     tt_timestep_host = ttnn.from_torch(timestep.unsqueeze(1), layout=ttnn.TILE_LAYOUT)
 
     with torch.no_grad():
