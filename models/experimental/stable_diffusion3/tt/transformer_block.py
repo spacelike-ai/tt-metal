@@ -217,6 +217,9 @@ class TtTransformerBlock:
         spatial_normed = self._spatial_norm_1(spatial)
         prompt_normed = self._prompt_norm_1(prompt)
 
+        spatial_normed = ttnn.clone(spatial_normed, dtype=ttnn.bfloat8_b)
+        prompt_normed = ttnn.clone(prompt_normed, dtype=ttnn.bfloat8_b)
+
         spatial_attn, prompt_attn = self._dual_attn_block(
             spatial=spatial_normed,
             prompt=prompt_normed,
@@ -253,6 +256,11 @@ class TtTransformerBlock:
             ttnn.deallocate(spatial_shift_attn)
 
         spatial_normed = self._spatial_norm_2(spatial)
+
+        # Chaning the input datatype for the feed foreward block to bfloat8_b results in noisy,
+        # low-frequency brightness variations in the image.
+        assert spatial_normed.dtype not in [ttnn.bfloat4_b, ttnn.bfloat8_b]
+
         spatial += self._spatial_ff_block(
             spatial_normed, gate=spatial_gate_ff, scale=spatial_scale_ff, shift=spatial_shift_ff
         )
