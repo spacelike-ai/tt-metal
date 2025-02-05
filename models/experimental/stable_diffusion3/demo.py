@@ -23,32 +23,40 @@ def test_sd3(
     pipeline = TtStableDiffusion3Pipeline(
         checkpoint="stabilityai/stable-diffusion-3.5-medium",
         device=device,
-        enable_t5_text_encoder=False,
+        enable_t5_text_encoder=True,
     )
 
     pipeline.prepare(
         batch_size=1,
-        width=1024,
-        height=1024,
+        width=512,
+        height=512,
     )
 
-    prompt = (
-        "An epic, high-definition cinematic shot of a rustic snowy cabin glowing "
-        "warmly at dusk, nestled in a serene winter landscape. Surrounded by gentle "
-        "snow-covered pines and delicate falling snowflakes - captured in a rich, "
-        "atmospheric, wide-angle scene with deep cinematic depth and warmth."
-    )
-    negative_prompt = ""
+    while 1:
+        print("Enter the input prompt, or q to exit:")
+        new_prompt = input()
+        if len(new_prompt) > 0:
+            prompt = new_prompt
+        if prompt[0] == "q":
+            break
 
-    images = pipeline(
-        prompt_1=[prompt],
-        prompt_2=[prompt],
-        prompt_3=[prompt],
-        negative_prompt_1=[negative_prompt],
-        negative_prompt_2=[negative_prompt],
-        negative_prompt_3=[negative_prompt],
-        num_inference_steps=40,
-        seed=0,
-    )
+        # prompt = (
+        #     "An epic, high-definition cinematic shot of a rustic snowy cabin glowing "
+        #     "warmly at dusk, nestled in a serene winter landscape. Surrounded by gentle "
+        #     "snow-covered pines and delicate falling snowflakes - captured in a rich, "
+        #     "atmospheric, wide-angle scene with deep cinematic depth and warmth."
+        # )
+        negative_prompt = ""
 
-    images[0].save("sd3.png")
+        images = pipeline(
+            prompt_1=[prompt],
+            prompt_2=[prompt],
+            prompt_3=[prompt],
+            negative_prompt_1=[negative_prompt],
+            negative_prompt_2=[negative_prompt],
+            negative_prompt_3=[negative_prompt],
+            num_inference_steps=40,
+            seed=0,
+        )
+
+        images[0].save("sd3_512_yesT5.png")
