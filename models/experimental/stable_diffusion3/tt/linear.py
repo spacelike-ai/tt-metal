@@ -81,6 +81,7 @@ class TtLinear:
         program_config: ttnn.MatmulProgramConfig | None = None,
         core_grid: ttnn.CoreGrid | None = None,
         output_tile: list[int] | None = None,
+        dtype: ttnn.DataType | None = None,
     ) -> ttnn.Tensor:
         assert x.shape[-1] == self._in_channels, "input tensor does not have the expected shape"
 
@@ -100,6 +101,7 @@ class TtLinear:
             program_config=program_config,
             core_grid=core_grid,
             output_tile=output_tile,
+            dtype=dtype,
         )
 
         if self._paramters_on_host:
