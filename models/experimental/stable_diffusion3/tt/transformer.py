@@ -98,11 +98,14 @@ class TtSD3Transformer2DModel:
         time_embed = time_embed.reshape([time_embed.shape[0], 1, time_embed.shape[1]])
 
         for i, block in enumerate(self._transformer_blocks, start=1):
-            spatial, prompt = block(
+            spatial, prompt_out = block(
                 spatial=spatial,
                 prompt=prompt,
                 time_embed=time_embed,
             )
+
+            if prompt_out is not None:
+                prompt = prompt_out
 
             if i % 6 == 0:
                 ttnn.DumpDeviceProfiler(spatial.device())
