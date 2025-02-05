@@ -117,18 +117,18 @@ class TtTransformerBlock:
         spatial_scale: ttnn.Tensor,
         spatial_shift: ttnn.Tensor,
     ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
-        spatial_memory_config = ttnn.create_sharded_memory_config(
-            spatial.shape,
-            core_grid=spatial.device().core_grid,
-            strategy=ttnn.ShardStrategy.BLOCK,
-            orientation=ttnn.ShardOrientation.ROW_MAJOR,
-        )
-        spatial = ttnn.to_memory_config(spatial, spatial_memory_config)
+        # spatial_memory_config = ttnn.create_sharded_memory_config(
+        #     spatial.shape,
+        #     core_grid=spatial.device().core_grid,
+        #     strategy=ttnn.ShardStrategy.BLOCK,
+        #     orientation=ttnn.ShardOrientation.ROW_MAJOR,
+        # )
+        # spatial = ttnn.to_memory_config(spatial, spatial_memory_config)
 
-        spatial_scaled0 = spatial * (1 + spatial_scale) + spatial_shift
-        ttnn.deallocate(spatial)
-        spatial_scaled = ttnn.to_memory_config(spatial_scaled0, ttnn.DRAM_MEMORY_CONFIG)
-        ttnn.deallocate(spatial_scaled0)
+        spatial_scaled = spatial * (1 + spatial_scale) + spatial_shift
+        # ttnn.deallocate(spatial)
+        # spatial_scaled = ttnn.to_memory_config(spatial_scaled, ttnn.DRAM_MEMORY_CONFIG)
+        # ttnn.deallocate(spatial_scaled)
 
         prompt_scaled = prompt * (1 + prompt_scale) + prompt_shift
 

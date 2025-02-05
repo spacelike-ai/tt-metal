@@ -112,6 +112,8 @@ class TtAttention:
 
         tracy.signpost("enter TtAttention")
 
+        spatial = ttnn.clone(spatial, dtype=ttnn.bfloat8_b)
+
         q, k, v = self._spatial_attn.qkv(spatial, num_heads=self._num_heads)
 
         program_config = ttnn.SDPAProgramConfig(
@@ -145,9 +147,14 @@ class TtAttention:
             ttnn.deallocate(attn)
 
             spatial = self._spatial_attn.out_proj(concatenated_attn)
+
+            spatial = ttnn.clone(spatial, dtype=ttnn.bfloat16)
+
             return spatial, None
 
         assert self._prompt_attn is not None
+
+        prompt = ttnn.clone(prompt, dtype=ttnn.bfloat8_b)
 
         q2, k2, v2 = self._prompt_attn.qkv(prompt, num_heads=self._num_heads)
 
@@ -170,6 +177,9 @@ class TtAttention:
         prompt = self._prompt_attn.out_proj(prompt)
 
         tracy.signpost("exit TtAttention")
+
+        spatial = ttnn.clone(spatial, dtype=ttnn.bfloat16)
+        prompt = ttnn.clone(prompt, dtype=ttnn.bfloat16)
 
         return spatial, prompt
 
