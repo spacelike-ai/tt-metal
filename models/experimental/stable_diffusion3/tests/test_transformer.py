@@ -28,11 +28,8 @@ def test_transformer(
     batch_size: int,
     prompt_sequence_length: int,
 ) -> None:
-    torch_dtype = torch.float32
-    ttnn_dtype = ttnn.bfloat16
-
     torch_model = SD3Transformer2DModel.from_pretrained(
-        "stabilityai/stable-diffusion-3.5-medium", subfolder="transformer", torch_dtype=torch_dtype
+        "stabilityai/stable-diffusion-3.5-medium", subfolder="transformer"
     )
     torch_model.eval()
 
@@ -42,16 +39,16 @@ def test_transformer(
     tt_model = TtSD3Transformer2DModel(parameters, num_attention_heads=torch_model.config.num_attention_heads)
 
     torch.manual_seed(0)
-    spatial = torch.randn((batch_size, 16, 128, 128), dtype=torch_dtype)
-    prompt = torch.randn((batch_size, prompt_sequence_length, 4096), dtype=torch_dtype)
-    pooled_projection = torch.randn((batch_size, 2048), dtype=torch_dtype)
+    spatial = torch.randn((batch_size, 16, 128, 128))
+    prompt = torch.randn((batch_size, prompt_sequence_length, 4096))
+    pooled_projection = torch.randn((batch_size, 2048))
     timestep = torch.randint(1000, (batch_size,), dtype=torch.float32)
 
     tt_spatial_host = ttnn.from_torch(
-        spatial.permute([0, 2, 3, 1]), layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype
+        spatial.permute([0, 2, 3, 1]), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
     )  # BCYX -> BYXC
-    tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
-    tt_pooled_projection_host = ttnn.from_torch(pooled_projection, layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
+    tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+    tt_pooled_projection_host = ttnn.from_torch(pooled_projection, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
     tt_timestep_host = ttnn.from_torch(timestep.unsqueeze(1), layout=ttnn.TILE_LAYOUT)
 
     with torch.no_grad():

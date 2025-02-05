@@ -122,7 +122,7 @@ class TtStableDiffusion3Pipeline:
         )
 
         tt_prompt_embeds = ttnn.from_torch(
-            prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+            prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b
         )
         tt_pooled_prompt_embeds = ttnn.from_torch(
             pooled_prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
@@ -225,7 +225,7 @@ class TtStableDiffusion3Pipeline:
             torch.manual_seed(seed)
         latents = torch.randn(latents_shape, dtype=prompt_embeds.dtype).permute([0, 2, 3, 1])
 
-        tt_prompt_embeds = ttnn.from_torch(prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+        tt_prompt_embeds = ttnn.from_torch(prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
         tt_pooled_prompt_embeds = ttnn.from_torch(pooled_prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
         tt_initial_latents = ttnn.from_torch(latents, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
 

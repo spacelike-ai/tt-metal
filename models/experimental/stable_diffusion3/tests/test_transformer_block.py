@@ -36,11 +36,8 @@ def test_transformer_block(
     spatial_sequence_length: int,
     prompt_sequence_length: int,
 ) -> None:
-    torch_dtype = torch.float32
-    ttnn_dtype = ttnn.bfloat16
-
     parent_torch_model = SD3Transformer2DModel.from_pretrained(
-        "stabilityai/stable-diffusion-3.5-medium", subfolder="transformer", torch_dtype=torch_dtype
+        "stabilityai/stable-diffusion-3.5-medium", subfolder="transformer"
     )
     torch_model: TransformerBlock = parent_torch_model.transformer_blocks[block_index]
     torch_model.eval()
@@ -51,13 +48,13 @@ def test_transformer_block(
     embedding_dim = 1536
 
     torch.manual_seed(0)
-    spatial = torch.randn((batch_size, spatial_sequence_length, embedding_dim), dtype=torch_dtype)
-    prompt = torch.randn((batch_size, prompt_sequence_length, embedding_dim), dtype=torch_dtype)
+    spatial = torch.randn((batch_size, spatial_sequence_length, embedding_dim))
+    prompt = torch.randn((batch_size, prompt_sequence_length, embedding_dim))
     time = torch.randn((batch_size, embedding_dim))
 
-    tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
-    tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
-    tt_time_host = ttnn.from_torch(time.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn_dtype)
+    tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+    tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
+    tt_time_host = ttnn.from_torch(time.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
 
     with torch.no_grad():
         spatial_output, prompt_output = torch_model(spatial=spatial, prompt=prompt, time_embed=time)
