@@ -32,20 +32,20 @@ def test_sd3(
         height=512,
     )
 
-    while 1:
-        print("Enter the input prompt, or q to exit:")
-        new_prompt = input()
-        if len(new_prompt) > 0:
+    prompt = (
+        "An epic, high-definition cinematic shot of a rustic snowy cabin glowing "
+        "warmly at dusk, nestled in a serene winter landscape. Surrounded by gentle "
+        "snow-covered pines and delicate falling snowflakes - captured in a rich, "
+        "atmospheric, wide-angle scene with deep cinematic depth and warmth."
+    )
+
+    while True:
+        new_prompt = input("Enter the input prompt, or q to exit:")
+        if new_prompt:
             prompt = new_prompt
         if prompt[0] == "q":
             break
 
-        # prompt = (
-        #     "An epic, high-definition cinematic shot of a rustic snowy cabin glowing "
-        #     "warmly at dusk, nestled in a serene winter landscape. Surrounded by gentle "
-        #     "snow-covered pines and delicate falling snowflakes - captured in a rich, "
-        #     "atmospheric, wide-angle scene with deep cinematic depth and warmth."
-        # )
         negative_prompt = ""
 
         images = pipeline(
