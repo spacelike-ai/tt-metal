@@ -12,6 +12,7 @@ import ttnn
 
 from .linear import TtLinear, TtLinearParameters
 from .substate import indexed_substates, substate
+from .utils import from_torch_fast
 
 
 @dataclass
@@ -296,7 +297,7 @@ class TtT5LayerNormParameters:
         device: ttnn.Device,
     ) -> TtT5LayerNormParameters:
         return cls(
-            weight=ttnn.from_torch(state["weight"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device),
+            weight=from_torch_fast(state["weight"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device),
         )
 
 
@@ -357,7 +358,7 @@ def _compute_bias(
     output = output.permute([2, 0, 1]).unsqueeze(0)
     output = output[:, :, -seq_length:, :]
 
-    return ttnn.from_torch(output, device=device, layout=ttnn.TILE_LAYOUT)
+    return from_torch_fast(output, device=device, layout=ttnn.TILE_LAYOUT)
 
 
 def new_gelu_activation(x: ttnn.Tensor) -> ttnn.Tensor:

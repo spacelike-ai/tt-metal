@@ -27,15 +27,18 @@ def from_torch_fast(
     memory_config: ttnn.MemoryConfig | None = None,
     to_host: bool = False,
 ) -> ttnn.Tensor:
-    if device is None:
-        return ttnn.from_torch(t, layout=layout, dtype=dtype)
+    # ttnn.to_layout does not support changing the datatype or memory_config if the layout already matches. ttnn.clone
+    # does not support changing the datatype if the input is not tiled. An option could be to tilize the input before
+    # changing the datatype and then untilize again, but it was not tested if this would be faster than converting the
+    # datatype on the host.
+    if device is None or layout is None or layout == ttnn.ROW_MAJOR_LAYOUT:
+        return ttnn.from_torch(t, device=device, layout=layout, dtype=dtype)
 
     tensor = ttnn.from_torch(t, device=device)
 
-    if layout is not None or dtype is not None:
-        new = ttnn.to_layout(tensor, layout, dtype=dtype, memory_config=memory_config)
-        ttnn.deallocate(tensor)
-        tensor = new
+    new = ttnn.to_layout(tensor, layout, dtype=dtype, memory_config=memory_config)
+    ttnn.deallocate(tensor)
+    tensor = new
 
     if to_host:
         new = tensor.cpu()

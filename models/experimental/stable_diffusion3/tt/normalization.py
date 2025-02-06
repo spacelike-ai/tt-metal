@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 import ttnn
 
+from .utils import from_torch_fast
+
 if TYPE_CHECKING:
     import torch
 
@@ -26,7 +28,7 @@ class TtRmsNormParameters:
         device: ttnn.Device,
     ) -> TtRmsNormParameters:
         return cls(
-            weight=ttnn.from_torch(state["weight"].unsqueeze(0), layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
+            weight=from_torch_fast(state["weight"].unsqueeze(0), layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
         )
 
 
@@ -55,10 +57,10 @@ class TtLayerNormParameters:
         device: ttnn.Device,
     ) -> TtLayerNormParameters:
         return cls(
-            weight=ttnn.from_torch(state["weight"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
+            weight=from_torch_fast(state["weight"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
             if "weight" in state
             else None,
-            bias=ttnn.from_torch(state["bias"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
+            bias=from_torch_fast(state["bias"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
             if "bias" in state
             else None,
         )

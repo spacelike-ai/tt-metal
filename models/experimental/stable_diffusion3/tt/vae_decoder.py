@@ -12,6 +12,7 @@ import ttnn
 from .conv2d import TtConv2d, TtConv2dParameters
 from .linear import TtLinear, TtLinearParameters
 from .substate import has_substate, indexed_substates, substate
+from .utils import from_torch_fast
 
 if TYPE_CHECKING:
     import torch
@@ -337,10 +338,10 @@ class TtGroupNormParameters:
         device: ttnn.Device,
     ) -> TtGroupNormParameters:
         return cls(
-            weight=ttnn.from_torch(state["weight"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
+            weight=from_torch_fast(state["weight"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
             if "weight" in state
             else None,
-            bias=ttnn.from_torch(state["bias"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
+            bias=from_torch_fast(state["bias"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
             if "bias" in state
             else None,
         )
