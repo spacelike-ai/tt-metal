@@ -15,4 +15,5 @@ ignore = [
     "TID252",  # allow relative imports
     "PLR0913", # allow many function parameters
     "TD",      # allow any todos
+    "PLR2004", # allow magic constants
 ]

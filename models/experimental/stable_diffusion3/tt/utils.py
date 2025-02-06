@@ -46,3 +46,15 @@ def from_torch_fast(
         tensor = new
 
     return tensor
+
+
+def to_memory_config(
+    t: ttnn.Tensor, memory_config: ttnn.MemoryConfig, *, dtype: ttnn.DataType | None = None, deallocate: bool = False
+) -> ttnn.Tensor:
+    result = ttnn.to_memory_config(t, memory_config, dtype=dtype)
+
+    result_is_same = result.memory_config() == t.memory_config() and result.buffer_address() == t.buffer_address()
+    if deallocate and not result_is_same:
+        ttnn.deallocate(t)
+
+    return result

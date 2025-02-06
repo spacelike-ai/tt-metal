@@ -82,6 +82,7 @@ class TtLinear:
         core_grid: ttnn.CoreGrid | None = None,
         output_tile: list[int] | None = None,
         dtype: ttnn.DataType | None = None,
+        deallocate: bool = False,
     ) -> ttnn.Tensor:
         assert x.shape[-1] == self._in_channels, "input tensor does not have the expected shape"
 
@@ -103,6 +104,9 @@ class TtLinear:
             output_tile=output_tile,
             dtype=dtype,
         )
+
+        if deallocate:
+            ttnn.deallocate(x)
 
         if self._paramters_on_host:
             ttnn.deallocate(weight)

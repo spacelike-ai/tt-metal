@@ -97,7 +97,7 @@ class TtTransformerBlock:
         assert self._spatial_attn is not None
 
         scaled = inp * (1 + scale) + shift
-        attn, _ = self._spatial_attn(spatial=scaled)
+        attn, _ = self._spatial_attn(spatial=scaled, deallocate=True)
 
         result = gate * attn
 
@@ -132,7 +132,7 @@ class TtTransformerBlock:
 
         prompt_scaled = prompt * (1 + prompt_scale) + prompt_shift
 
-        spatial_attn, prompt_attn = self._dual_attn(spatial=spatial_scaled, prompt=prompt_scaled)
+        spatial_attn, prompt_attn = self._dual_attn(spatial=spatial_scaled, prompt=prompt_scaled, deallocate=True)
 
         spatial_attn_scaled = spatial_gate * spatial_attn
         prompt_attn_scaled = prompt_gate * prompt_attn if prompt_gate is not None else None
