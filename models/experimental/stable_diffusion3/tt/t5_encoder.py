@@ -82,12 +82,10 @@ class TtT5Encoder:
     def __call__(self, input_ids: ttnn.Tensor) -> ttnn.Tensor:
         _batch_size, seq_length = input_ids.shape
 
-        torch_input_ids = ttnn.to_torch(input_ids)
-        torch_token_embedding = ttnn.to_torch(self._token_embedding)
-        torch_inputs_embeds = torch.nn.functional.embedding(torch_input_ids, torch_token_embedding)
-        inputs_embeds = ttnn.from_torch(torch_inputs_embeds, device=input_ids.device(), layout=ttnn.TILE_LAYOUT)
-        # does not give the correct result:
-        # inputs_embeds = ttnn.embedding(input_ids, self._token_embedding, layout=ttnn.TILE_LAYOUT)
+        # TODO: Remove the conversion to row major layout once ttnn.embedding works with tiled input
+        # https://github.com/tenstorrent/tt-metal/issues/17643
+        input_ids = ttnn.to_layout(input_ids, ttnn.ROW_MAJOR_LAYOUT)
+        inputs_embeds = ttnn.embedding(input_ids, self._token_embedding, layout=ttnn.TILE_LAYOUT)
 
         position_bias = _compute_bias(
             seq_length=seq_length,
