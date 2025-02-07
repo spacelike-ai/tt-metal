@@ -38,19 +38,12 @@ namespace {
 template <typename T>
 Tensor create_owned_tensor_from_row_major_data(
     std::vector<T>&& data, const TensorSpec& spec, std::optional<ttnn::AnyDevice> device = std::nullopt) {
-    TensorSpec result_cpu_spec(
-        spec.logical_shape(),
-        TensorLayout(spec.data_type(), PageConfig(Layout::ROW_MAJOR, spec.tile()), MemoryConfig{}));
+    auto physical_data = tensor_impl::encode_tensor_data(std::move(data), spec);
 
-    Tensor output(OwnedStorage{owned_buffer::create(std::move(data))}, result_cpu_spec);
-
-    if (spec.layout() == Layout::TILE) {
-        // TODO: whenever possible, perform tiliziation on device.
-        output = output.to(Layout::TILE);
-    }
+    Tensor output(OwnedStorage{owned_buffer::create(std::move(physical_data))}, spec);
 
     if (device.has_value()) {
-        output = output.to(device->get_devices(), spec.memory_config());
+        output = output.to_device(device->get_devices(), spec.memory_config());
     }
 
     return output;
@@ -68,7 +61,7 @@ std::vector<T> unpad_tensor_to_vec(const Tensor& cpu_tensor) {
 
     std::vector<T> untiled_data(total_size);
 
-    auto compute_flat_index = [](const std::vector<uint32_t>& indices, const ttnn::SimpleShape& shape) -> uint32_t {
+    auto compute_flat_index = [](const std::vector<uint32_t>& indices, const ttnn::Shape& shape) -> uint32_t {
         uint32_t flat_index = 0;
         uint32_t multiplier = 1;
         for (int i = (int)indices.size() - 1; i >= 0; --i) {
@@ -104,7 +97,7 @@ std::vector<T> unpad_tensor_to_vec(const Tensor& cpu_tensor) {
 
 Tensor::TensorAttributes::TensorAttributes() :
     tensor_spec(
-        ttnn::SimpleShape(std::array<uint32_t, 4>{0xff, 0xff, 0xff, 0xff}),
+        ttnn::Shape(std::array<uint32_t, 4>{0xff, 0xff, 0xff, 0xff}),
         TensorLayout(DataType::INVALID, PageConfig(Layout::INVALID), MemoryConfig{})) {}
 
 Tensor::TensorAttributes::TensorAttributes(Storage storage, TensorSpec tensor_spec) :
@@ -153,8 +146,8 @@ void Tensor::TensorAttributes::update_main_thread_ref_count(IDevice* worker, uin
 
 Tensor::Tensor(
     Storage storage,
-    const ttnn::SimpleShape& logical_shape,
-    const ttnn::SimpleShape& padded_shape,
+    const ttnn::Shape& logical_shape,
+    const ttnn::Shape& padded_shape,
     DataType dtype,
     Layout layout,
     const std::optional<Tile>& tile) {
@@ -284,7 +277,7 @@ Tensor::Tensor(uint32_t num_buffers, std::optional<DistributedTensorConfig> dist
         storage.buffers = std::vector<OwnedBuffer>(num_buffers, OwnedBuffer());
         storage.specs = std::vector<ttnn::TensorSpec>(
             num_buffers,
-            TensorSpec(SimpleShape{}, TensorLayout(DataType::FLOAT32, PageConfig(Layout::ROW_MAJOR), MemoryConfig{})));
+            TensorSpec(Shape{}, TensorLayout(DataType::FLOAT32, PageConfig(Layout::ROW_MAJOR), MemoryConfig{})));
         return Storage(std::move(storage));
     }();
     tensor_attributes->num_shards_to_be_populated = num_buffers;
@@ -327,7 +320,7 @@ Tensor::~Tensor() {
 }
 
 Tensor::Tensor(
-    Storage storage, const ttnn::SimpleShape& shape, DataType dtype, Layout layout, const std::optional<Tile>& tile) :
+    Storage storage, const ttnn::Shape& shape, DataType dtype, Layout layout, const std::optional<Tile>& tile) :
     Tensor(std::move(storage), /* logical_shape */ shape, /* padded_shape */ shape, dtype, layout, tile) {}
 
 void Tensor::deallocate(bool force) { deallocate_impl(force, /*deallocation_through_destructor=*/false); }
@@ -580,12 +573,12 @@ const TensorSpec& Tensor::get_tensor_spec() const {
     return tensor_spec();
 }
 
-const ttnn::SimpleShape& Tensor::get_logical_shape() const {
+const ttnn::Shape& Tensor::get_logical_shape() const {
     wait_for_tensor_metadata_populated();
     return logical_shape();
 }
 
-const ttnn::SimpleShape& Tensor::get_padded_shape() const {
+const ttnn::Shape& Tensor::get_padded_shape() const {
     wait_for_tensor_metadata_populated();
     return padded_shape();
 }
@@ -606,12 +599,8 @@ Tensor Tensor::from_span<float>(
             return create_owned_tensor_from_row_major_data(
                 std::vector<float>(buffer.begin(), buffer.end()), spec, device);
         case DataType::BFLOAT16: {
-            std::vector<bfloat16> bfloat16_data;
-            bfloat16_data.reserve(buffer.size());
-            std::transform(std::begin(buffer), std::end(buffer), std::back_inserter(bfloat16_data), [](float value) {
-                return bfloat16(value);
-            });
-            return create_owned_tensor_from_row_major_data(std::move(bfloat16_data), spec, device);
+            return create_owned_tensor_from_row_major_data(
+                std::vector<bfloat16>(buffer.begin(), buffer.end()), spec, device);
         }
         case DataType::BFLOAT8_B:
         case DataType::BFLOAT4_B: {
@@ -631,7 +620,7 @@ Tensor Tensor::from_span<float>(
 
             Tensor tensor(OwnedStorage{owned_buffer::create(std::move(packed_block_floats))}, spec);
             if (device.has_value()) {
-                tensor = tensor.to(device->get_devices(), spec.memory_config());
+                tensor = tensor.to_device(device->get_devices(), spec.memory_config());
             }
             return tensor;
         }
@@ -685,8 +674,8 @@ template <>
 std::vector<float> Tensor::to_vector<float>() const {
     Tensor cpu_tensor = this->cpu();
     switch (cpu_tensor.get_dtype()) {
-        case DataType::BFLOAT16: return unpad_tensor_to_vec<float, bfloat16>(cpu_tensor.to(Layout::ROW_MAJOR));
-        case DataType::FLOAT32: return unpad_tensor_to_vec<float, float>(cpu_tensor.to(Layout::ROW_MAJOR));
+        case DataType::BFLOAT16: return unpad_tensor_to_vec<float, bfloat16>(cpu_tensor.to_layout(Layout::ROW_MAJOR));
+        case DataType::FLOAT32: return unpad_tensor_to_vec<float, float>(cpu_tensor.to_layout(Layout::ROW_MAJOR));
         case DataType::BFLOAT8_B:
         case DataType::BFLOAT4_B: {
             const auto& tile = cpu_tensor.get_tensor_spec().tile();
@@ -709,7 +698,7 @@ std::vector<float> Tensor::to_vector<float>() const {
 
 template <typename T>
 std::vector<T> Tensor::to_vector() const {
-    auto cpu_tensor = this->cpu().to(Layout::ROW_MAJOR);
+    auto cpu_tensor = this->cpu().to_layout(Layout::ROW_MAJOR);
     TT_FATAL(
         cpu_tensor.get_dtype() == convert_to_data_type<T>(),
         "Unsupported data type for to_vector: got {}, expected: {}",
@@ -746,17 +735,17 @@ template std::vector<uint8_t> Tensor::to_vector<uint8_t>() const;
 template std::vector<uint16_t> Tensor::to_vector<uint16_t>() const;
 template std::vector<uint32_t> Tensor::to_vector<uint32_t>() const;
 
-Tensor Tensor::to(IDevice* target_device, const MemoryConfig& mem_config, uint8_t cq_id) const {
-    return tensor_ops::tensor_to(*this, target_device, mem_config, cq_id);
+Tensor Tensor::to_device(IDevice* target_device, const MemoryConfig& mem_config, uint8_t cq_id) const {
+    return tensor_ops::tensor_to_device(*this, target_device, mem_config, cq_id);
 }
 
-Tensor Tensor::to(distributed::MeshDevice* mesh_device, const MemoryConfig& mem_config, uint8_t cq_id) const {
+Tensor Tensor::to_device(distributed::MeshDevice* mesh_device, const MemoryConfig& mem_config, uint8_t cq_id) const {
     std::vector<IDevice*> workers_to_use = ttnn::distributed::get_mapped_devices(*this, *mesh_device);
-    return tensor_ops::tensor_to(*this, workers_to_use, mem_config, cq_id);
+    return tensor_ops::tensor_to_device(*this, workers_to_use, mem_config, cq_id);
 }
 
-Tensor Tensor::to(const std::vector<IDevice*>& workers, const MemoryConfig& mem_config, uint8_t cq_id) const {
-    return tensor_ops::tensor_to(*this, workers, mem_config, cq_id);
+Tensor Tensor::to_device(const std::vector<IDevice*>& workers, const MemoryConfig& mem_config, uint8_t cq_id) const {
+    return tensor_ops::tensor_to_device(*this, workers, mem_config, cq_id);
 }
 
 Tensor Tensor::cpu(bool blocking, uint8_t cq_id) const { return tensor_ops::tensor_cpu(*this, blocking, cq_id); }
@@ -772,12 +761,12 @@ Tensor Tensor::extract_shard(const uint32_t& core_id) const {
     return tensor_impl::extract_shard_wrapper(*this, core_id);
 }
 
-Tensor Tensor::to(Layout target_layout, IDevice* worker) const {
-    return tensor_ops::tensor_to(*this, target_layout, worker);
+Tensor Tensor::to_layout(Layout target_layout, IDevice* worker) const {
+    return tensor_ops::tensor_to_layout(*this, target_layout, worker);
 }
 
-Tensor Tensor::to(Layout target_layout, distributed::MeshDevice* mesh_device) const {
-    return tensor_ops::tensor_to(*this, target_layout, mesh_device);
+Tensor Tensor::to_layout(Layout target_layout, distributed::MeshDevice* mesh_device) const {
+    return tensor_ops::tensor_to_layout(*this, target_layout, mesh_device);
 }
 
 const std::string Tensor::write_to_string() const { return tensor_impl::to_string_wrapper(*this); }
@@ -785,17 +774,17 @@ const std::string Tensor::write_to_string() const { return tensor_impl::to_strin
 void Tensor::print() const { tensor_ops::tensor_print(*this); }
 
 Tensor Tensor::pad(
-    const ttnn::SimpleShape& output_padded_shape, const ttnn::SimpleShape& input_tensor_start, float pad_value) const {
+    const ttnn::Shape& output_padded_shape, const ttnn::Shape& input_tensor_start, float pad_value) const {
     return tensor_ops::tensor_pad(*this, output_padded_shape, input_tensor_start, pad_value);
 }
 
-Tensor Tensor::unpad(const ttnn::SimpleShape& output_tensor_start, const ttnn::SimpleShape& output_tensor_end) const {
+Tensor Tensor::unpad(const ttnn::Shape& output_tensor_start, const ttnn::Shape& output_tensor_end) const {
     return tensor_ops::tensor_unpad(*this, output_tensor_start, output_tensor_end);
 }
 
 Tensor Tensor::pad_to_tile(float pad_value) const { return tensor_ops::tensor_pad_to_tile(*this, pad_value); }
 
-Tensor Tensor::unpad_from_tile(const ttnn::SimpleShape& output_tensor_shape) const {
+Tensor Tensor::unpad_from_tile(const ttnn::Shape& output_tensor_shape) const {
     return tensor_ops::tensor_unpad_from_tile(*this, output_tensor_shape);
 }
 
@@ -805,11 +794,9 @@ const bool Tensor::is_sharded() const {
 
 uint32_t Tensor::element_size() const { return tensor_impl::element_size_bytes(this->get_dtype()); }
 
-Tensor Tensor::reshape(const ttnn::SimpleShape& new_shape) const {
-    return tensor_ops::tensor_reshape(*this, new_shape);
-}
+Tensor Tensor::reshape(const ttnn::Shape& new_shape) const { return tensor_ops::tensor_reshape(*this, new_shape); }
 
-Tensor Tensor::reshape(const ttnn::SimpleShape& new_logical_shape, const ttnn::SimpleShape& new_padded_shape) const {
+Tensor Tensor::reshape(const ttnn::Shape& new_logical_shape, const ttnn::Shape& new_padded_shape) const {
     return tensor_ops::tensor_reshape(*this, new_logical_shape, new_padded_shape);
 }
 
@@ -847,8 +834,8 @@ StorageType Tensor::storage_type() const {
         this->get_storage());
 }
 
-const ttnn::SimpleShape Tensor::strides() const {
-    return ttnn::SimpleShape(tt::tt_metal::compute_strides(this->get_padded_shape()));
+const ttnn::Shape Tensor::strides() const {
+    return ttnn::Shape(tt::tt_metal::compute_strides(this->get_padded_shape()));
 }
 
 uint32_t Tensor::volume() const { return get_padded_shape().volume(); }
@@ -856,7 +843,7 @@ uint32_t Tensor::volume() const { return get_padded_shape().volume(); }
 uint32_t Tensor::get_logical_volume() const { return get_logical_shape().volume(); }
 
 bool Tensor::is_scalar() const {
-    const ttnn::SimpleShape logical_shape = this->get_logical_shape();
+    const ttnn::Shape logical_shape = this->get_logical_shape();
     return logical_shape.rank() == 0 || logical_shape.volume() == 1;
 }
 
@@ -880,7 +867,7 @@ Tensor create_device_tensor(const TensorSpec& tensor_spec, IDevice* device) {
 }
 
 Tensor create_device_tensor(
-    const ttnn::SimpleShape& shape,
+    const ttnn::Shape& shape,
     DataType data_type,
     Layout layout,
     IDevice* device,
@@ -1029,29 +1016,7 @@ Tensor allocate_tensor_on_mesh(const TensorSpec& tensor_spec, distributed::MeshD
     TT_FATAL(
         tt::tt_metal::detail::InMainThread(), "Allocation of a tensor on mesh must be called from the main thread");
     auto mesh_buffer = tensor_impl::allocate_mesh_buffer_on_device(mesh_device, tensor_spec);
-
-    const auto [num_rows, num_cols] = mesh_device->shape();
-    std::vector<int> ordered_device_ids;
-    std::unordered_map<int, std::shared_ptr<Buffer>> buffers;
-    std::unordered_map<int, TensorSpec> specs;
-
-    ordered_device_ids.reserve(num_rows * num_cols);
-    buffers.reserve(num_rows * num_cols);
-    specs.reserve(num_rows * num_cols);
-
-    for (int row = 0; row < num_rows; ++row) {
-        for (int col = 0; col < num_cols; ++col) {
-            auto buffer = mesh_buffer->get_device_buffer(distributed::Coordinate{row, col});
-            const int device_id = buffer->device()->id();
-            ordered_device_ids.push_back(device_id);
-            buffers.emplace(device_id, std::move(buffer));
-            specs.emplace(device_id, tensor_spec);
-        }
-    }
-
-    MultiDeviceStorage multi_device_storage(
-        ReplicateTensor{}, std::move(ordered_device_ids), std::move(buffers), std::move(specs), std::move(mesh_buffer));
-
+    MultiDeviceStorage multi_device_storage(std::move(mesh_buffer), tensor_spec);
     return Tensor(std::move(multi_device_storage), tensor_spec);
 }
 

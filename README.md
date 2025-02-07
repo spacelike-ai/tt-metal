@@ -39,9 +39,9 @@
 | [Falcon 7B (DP=32)](./models/demos/tg/falcon7b)               | 1024  | [Galaxy](https://tenstorrent.com/hardware/galaxy)        | 223       | 4.8   | 26              | 4915.2 | [v0.55.0-rc18](https://github.com/tenstorrent/tt-metal/tree/v0.55.0-rc18) |                                                                                                   |
 | [Llama 3.1 70B (DP=4, TP=8)](./models/demos/t3000/llama3_70b) | 128   | [Galaxy](https://tenstorrent.com/hardware/galaxy)        | 190       | 14.3  | 20              | 1835.5 | [v0.52.0-rc31](https://github.com/tenstorrent/tt-metal/tree/v0.52.0-rc31) |                                                                                                   |
 | [Llama 3.1 70B (TP=32)](./models/demos/llama3)                | 32   | [Galaxy](https://tenstorrent.com/hardware/galaxy)        | 763       | 13.5  | 80              | 432.0 | [v0.55.0-rc12](https://github.com/tenstorrent/tt-metal/tree/v0.55.0-rc12) | [2f33504](https://github.com/tenstorrent/vllm/tree/2f33504bad49a6202d3685155107a6126a5b5e6e) |
-| [DeepSeek R1 Distill Llama 3.3 70B (TP=8)](https://github.com/tenstorrent/tt-metal/tree/hf-llama/models/demos/llama3)       | 32    | [QuietBox](https://tenstorrent.com/hardware/tt-quietbox) | 1113       | 16.4  | 33              |386.4 | [hf-llama](https://github.com/tenstorrent/tt-metal/tree/hf-llama) | [2f33504](https://github.com/tenstorrent/vllm/tree/2f33504bad49a6202d3685155107a6126a5b5e6e)      |
+| [DeepSeek R1 Distill Llama 3.3 70B (TP=8)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/llama3)       | 32    | [QuietBox](https://tenstorrent.com/hardware/tt-quietbox) | 1113       | 16.4  | 33              |524.8 | [main](https://github.com/tenstorrent/tt-metal/) | [b9564bf](https://github.com/tenstorrent/vllm/tree/b9564bf364e95a3850619fc7b2ed968cc71e30b7)      |
 
-> **Last Update:** January 27, 2025
+> **Last Update:** February 5, 2025
 >
 > **Notes:**
 >
@@ -65,6 +65,7 @@
 | [Stable Diffusion 1.4 (512x512)](./models/demos/wormhole/stable_diffusion)  | 1     | [n150](https://tenstorrent.com/hardware/wormhole)        | 0.167   | 0.3        |             |
 | [YOLOv4 (320x320)](./models/demos/yolov4)                                   | 1     | [n150](https://tenstorrent.com/hardware/wormhole)        | 95      | 300        |             |
 | [SegFormer Semantic Segmentation (512x512)](./models/demos/segformer)       | 1     | [n150](https://tenstorrent.com/hardware/wormhole)        | 90      | 300        |             |
+| [Stable Diffusion 3.5 medium (512x512)](https://github.com/tenstorrent/tt-metal/blob/mbahnas/sd35_medium_512_spacelike_feb05/models/experimental/stable_diffusion3)  | 1     | [n150](https://tenstorrent.com/hardware/wormhole)        | 0.06   | 0.3        |             |
 
 ## NLPs
 
@@ -78,6 +79,10 @@
 ## Model Updates
 
 For the latest model updates and features, please see [MODEL_UPDATES.md](models/MODEL_UPDATES.md)
+
+## Model Bring-Up and Testing
+
+For information on initial model procedures, please see [Model Bring-Up and Testing](https://github.com/tenstorrent/tt-metal/tree/main/models/bringup_testing)
 
 ## TT-NN Tech Reports
 

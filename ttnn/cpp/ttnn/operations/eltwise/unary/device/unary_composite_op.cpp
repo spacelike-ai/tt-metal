@@ -600,7 +600,7 @@ Tensor ExecuteUnaryCompositeThreshold::invoke(
 std::vector<Tensor> split_tensor_for_glu(
     const Tensor& input_a, int32_t dim, const std::optional<MemoryConfig>& output_mem_config) {
     std::vector<Tensor> t_split;
-    ttnn::SimpleShape inshape(input_a.padded_shape());
+    ttnn::Shape inshape(input_a.padded_shape());
     TT_FATAL(((inshape[dim] / 2) % tt::constants::TILE_WIDTH == 0), "Split tensor dimension should be in full tile");
     ttnn::SmallVector<uint32_t> s_a = {0, 0, 0, 0};
     ttnn::SmallVector<uint32_t> e_a = {input_a.padded_shape()[0], inshape[1], inshape[2], inshape[3] / 2};
@@ -828,13 +828,24 @@ Tensor _logit(const Tensor& input_a, float eps, const std::optional<MemoryConfig
         tt::tt_metal::experimental::hal::get_inf(),
         std::nullopt,
         output_mem_config);
-    Tensor logit_result = ttnn::where(
-        ttnn::eq(logit_input, 1.0, std::nullopt, output_mem_config),
-        t_inf,
-        ttnn::where(
-            ttnn::ltz(log_input, output_mem_config),
-            tt::tt_metal::experimental::hal::get_nan(),
-            ttnn::log(log_input, output_mem_config)));
+    Tensor logit_result;
+    if (eps == 0.0 || eps == 1.0) {
+        logit_result = ttnn::where(
+            ttnn::eqz(logit_input, output_mem_config),
+            t_inf,
+            ttnn::where(
+                ttnn::eq(logit_input, 1.0, std::nullopt, output_mem_config),
+                tt::tt_metal::experimental::hal::get_inf(),
+                ttnn::log(log_input, output_mem_config)));
+    } else {
+        logit_result = ttnn::where(
+            ttnn::eq(logit_input, 1.0, std::nullopt, output_mem_config),
+            t_inf,
+            ttnn::where(
+                ttnn::ltz(log_input, output_mem_config),
+                tt::tt_metal::experimental::hal::get_nan(),
+                ttnn::log(log_input, output_mem_config)));
+    }
     return logit_result;
 }
 
@@ -877,7 +888,7 @@ Tensor _make_global_from_hw_impl(
     // format to HW
     Tensor y_hw = ttnn::reshape_on_device(
         y,
-        ttnn::SimpleShape{
+        ttnn::Shape{
             1,
             1,
             y.get_padded_shape()[2],
@@ -891,7 +902,7 @@ Tensor _make_global_from_hw_impl(
     // reformat
     Tensor z_1 = ttnn::reshape_on_device(
         z_0,
-        ttnn::SimpleShape{
+        ttnn::Shape{
             y.get_padded_shape()[0], y.get_padded_shape()[1], y.get_padded_shape()[2], y.get_padded_shape()[3]});
     z_0.deallocate();
 

@@ -135,7 +135,6 @@ public:
     std::shared_ptr<TraceBuffer> get_trace(uint32_t tid) override;
     uint32_t get_trace_buffers_size() const override { return trace_buffers_size_; }
     void set_trace_buffers_size(uint32_t size) override { trace_buffers_size_ = size; }
-
     // Light Metal
     void load_trace(uint8_t cq_id, uint32_t trace_id, const TraceDescriptor& trace_desc) override;
 
@@ -150,7 +149,6 @@ public:
     void initialize_and_launch_firmware() override;
     void init_command_queue_host() override;
     void init_command_queue_device() override;
-    void update_dispatch_cores_for_multi_cq_eth_dispatch() override;
 
     // Puts device into reset
     bool close() override;
@@ -158,10 +156,7 @@ public:
     void enable_async(bool enable) override;
     void synchronize() override;
     WorkExecutorMode get_worker_mode() override { return work_executor_.get_worker_mode(); }
-    void set_worker_queue_mode(const WorkerQueueMode& mode) override { this->work_executor_.set_worker_queue_mode(mode); }
-    WorkerQueueMode get_worker_queue_mode() override { return this->work_executor_.get_worker_queue_mode(); }
     bool is_worker_queue_empty() const override { return work_executor_.worker_queue.empty(); }
-    bool can_use_passthrough_scheduling() const override;
 
     void push_work(std::function<void()> work, bool blocking) override;
 
@@ -214,6 +209,8 @@ private:
     void initialize_firmware(const HalProgrammableCoreType &core_type, CoreCoord virtual_core, launch_msg_t *launch_msg, go_msg_t* go_msg);
 
     void initialize_default_sub_device_state(size_t l1_small_size, size_t trace_region_size, tt::stl::Span<const std::uint32_t> l1_bank_remap);
+
+    void update_dispatch_cores_for_multi_cq_eth_dispatch();
 
     void compile_command_queue_programs();
     void configure_command_queue_programs();

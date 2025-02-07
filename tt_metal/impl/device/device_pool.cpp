@@ -12,6 +12,8 @@
 #include <set>
 #include <utility>
 
+#include "dispatch_core_manager.hpp"
+#include "dispatch_settings.hpp"
 #include "dprint_server.hpp"
 #include "host_api.hpp"
 #include <tt_metal.hpp>
@@ -157,8 +159,6 @@ void bind_current_thread_to_free_cores(const std::unordered_set<uint32_t>& free_
 }  // namespace device_cpu_allocator
 
 DevicePool* DevicePool::_inst = nullptr;
-// Should probably add a dispatch_core_manager.cpp and move this there
-tt_metal::dispatch_core_manager* tt_metal::dispatch_core_manager::_inst = nullptr;
 
 void DevicePool::init_profiler_devices() const {
 #if defined(TRACY_ENABLE)
@@ -203,6 +203,8 @@ void DevicePool::initialize(
     tt::tt_metal::dispatch_core_manager::initialize(dispatch_core_config, num_hw_cqs);
     // Initialize the dispatch query layer, used by runtime command generation
     tt_metal::DispatchQueryManager::initialize(num_hw_cqs);
+    // Initialize DispatchSettings with defaults
+    tt_metal::DispatchSettings::initialize(tt::Cluster::instance());
 
     if (_inst == nullptr) {
         static DevicePool device_pool{};
@@ -302,7 +304,6 @@ void DevicePool::activate_device(chip_id_t id) {
             false,
             worker_core_thread_core,
             completion_queue_reader_core);
-        device->update_dispatch_cores_for_multi_cq_eth_dispatch();
         if (!this->firmware_built_keys.contains(device->build_key())) {
             device->build_firmware();
             this->firmware_built_keys.insert(device->build_key());
@@ -311,11 +312,6 @@ void DevicePool::activate_device(chip_id_t id) {
     } else {
         log_debug(tt::LogMetal, "DevicePool re-initialize device {}", id);
         if (not device->is_initialized()) {
-            if (device->num_hw_cqs() != num_hw_cqs) {
-                // The dispatch core manager was reset, since the number of CQs was toggled.
-                // Account for chip specific idle eth dispatch cores.
-                device->update_dispatch_cores_for_multi_cq_eth_dispatch();
-            }
             device->initialize(num_hw_cqs, this->l1_small_size, this->trace_region_size, this->l1_bank_remap);
             if (!this->firmware_built_keys.contains(device->build_key())) {
                 device->build_firmware();

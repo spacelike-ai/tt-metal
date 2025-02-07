@@ -35,6 +35,7 @@
 #include "tracy/Tracy.hpp"
 
 #include <graph_tracking.hpp>
+#include "lightmetal/host_api_capture_helpers.hpp"
 
 #include "llrt.hpp"
 
@@ -43,22 +44,6 @@ namespace tt {
 namespace tt_metal {
 
 namespace {
-
-#if defined(TRACY_ENABLE)
-
-std::unordered_map<int, std::string> global_mempool_names;
-std::mutex global_mempool_names_mutex;
-
-static const char* get_buffer_location_name(BufferType buffer_type, int device_id) {
-    std::scoped_lock<std::mutex> lock(global_mempool_names_mutex);
-    int name_combo = (int)buffer_type * 1000 + device_id;
-    if (global_mempool_names.find(name_combo) == global_mempool_names.end()) {
-        std::string global_mempool_name = fmt::format("Device {} {}", device_id, magic_enum::enum_name(buffer_type));
-        global_mempool_names.emplace(name_combo, global_mempool_name);
-    }
-    return global_mempool_names[name_combo].c_str();
-}
-#endif
 
 CoreRangeSet GetCoreRangeSet(const std::variant<CoreCoord, CoreRange, CoreRangeSet>& specified_core_spec) {
     ZoneScoped;
@@ -888,61 +873,6 @@ void CompileProgram(IDevice* device, Program& program, bool fd_bootloader_mode) 
     program.compile(device, fd_bootloader_mode);
 }
 
-DeviceAddr AllocateBuffer(Buffer* buffer) {
-    if (GraphTracker::instance().hook_allocate(buffer)) {
-        GraphTracker::instance().track_allocate(buffer);
-        return 0;
-    }
-    if (buffer->sub_device_manager_id().has_value()) {
-        TT_FATAL(
-            *(buffer->sub_device_manager_id()) == buffer->device()->get_active_sub_device_manager_id(),
-            "Sub-device manager id mismatch. Buffer sub-device manager id: {}, Device active sub-device manager id: {}",
-            *buffer->sub_device_manager_id(),
-            buffer->device()->get_active_sub_device_manager_id());
-    }
-
-    DeviceAddr allocated_addr = buffer->allocator()->allocate_buffer(buffer);
-
-    // Assertion here because buffer class returns a u32 when address is queried
-    // Requires updating all use cases of buffer address to accept a u64 to remove
-    TT_ASSERT(allocated_addr <= std::numeric_limits<uint32_t>::max());
-
-    GraphTracker::instance().track_allocate(buffer);
-
-#if defined(TRACY_ENABLE)
-    if (tt::llrt::RunTimeOptions::get_instance().get_profiler_buffer_usage_enabled()) {
-        TracyAllocN(
-            reinterpret_cast<void const*>(allocated_addr),
-            buffer->size(),
-            get_buffer_location_name(buffer->buffer_type(), buffer->device()->id()));
-    }
-#endif
-    return allocated_addr;
-}
-
-void DeallocateBuffer(Buffer* buffer) {
-    GraphTracker::instance().track_deallocate(buffer);
-    if (GraphTracker::instance().hook_deallocate(buffer)) {
-        return;
-    }
-
-#if defined(TRACY_ENABLE)
-    if (tt::llrt::RunTimeOptions::get_instance().get_profiler_buffer_usage_enabled()) {
-        TracyFreeN(
-            reinterpret_cast<void const*>(buffer->address()),
-            get_buffer_location_name(buffer->buffer_type(), buffer->device()->id()));
-    }
-#endif
-    if (buffer->sub_device_manager_id().has_value()) {
-        TT_FATAL(
-            *(buffer->sub_device_manager_id()) == buffer->device()->get_active_sub_device_manager_id(),
-            "Sub-device manager id mismatch. Buffer sub-device manager id: {}, Device active sub-device manager id: {}",
-            *buffer->sub_device_manager_id(),
-            buffer->device()->get_active_sub_device_manager_id());
-    }
-    buffer->allocator()->deallocate_buffer(buffer);
-}
-
 void SynchronizeWorkerThreads(const std::vector<IDevice*>& workers) {
     if (tt::tt_metal::detail::InWorkerThread()) {
         // Early exit if in a worker thread, since waiting for the worker
@@ -992,6 +922,7 @@ IDevice* CreateDeviceMinimal(
     ZoneScoped;
     tt::tt_metal::dispatch_core_manager::initialize(dispatch_core_config, num_hw_cqs);
     tt_metal::DispatchQueryManager::initialize(num_hw_cqs);
+    tt_metal::DispatchSettings::initialize(tt::Cluster::instance());
     auto dev = new Device(device_id, num_hw_cqs, DEFAULT_L1_SMALL_SIZE, DEFAULT_TRACE_REGION_SIZE, {}, true);
     tt::Cluster::instance().set_internal_routing_info_for_ethernet_cores(true);
     return dev;
@@ -1003,7 +934,12 @@ bool CloseDevice(IDevice* device) {
     return tt::DevicePool::instance().close_device(device_id);
 }
 
-Program CreateProgram() { return Program(); }
+Program CreateProgram() {
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
+    auto program = Program();
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureCreateProgram, program);
+    return program;
+}
 
 KernelHandle CreateDataMovementKernel(
     Program& program,
@@ -1089,7 +1025,8 @@ KernelHandle CreateKernel(
     const std::string& file_name,
     const std::variant<CoreCoord, CoreRange, CoreRangeSet>& core_spec,
     const std::variant<DataMovementConfig, ComputeConfig, EthernetConfig>& config) {
-    return std::visit(
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
+    KernelHandle kernel = std::visit(
         [&](auto&& cfg) -> KernelHandle {
             CoreRangeSet core_ranges = GetCoreRangeSet(core_spec);
             KernelSource kernel_src(file_name, KernelSource::FILE_PATH);
@@ -1103,6 +1040,9 @@ KernelHandle CreateKernel(
             }
         },
         config);
+
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureCreateKernel, kernel, program, file_name, core_spec, config);
+    return kernel;
 }
 
 KernelHandle CreateKernelFromString(
@@ -1130,8 +1070,11 @@ CBHandle CreateCircularBuffer(
     Program& program,
     const std::variant<CoreCoord, CoreRange, CoreRangeSet>& core_spec,
     const CircularBufferConfig& config) {
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
     CoreRangeSet core_ranges = GetCoreRangeSet(core_spec);
-    return program.add_circular_buffer(core_ranges, config);
+    auto cb_handle = program.add_circular_buffer(core_ranges, config);
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureCreateCircularBuffer, cb_handle, program, core_spec, config);
+    return cb_handle;
 }
 
 const CircularBufferConfig& GetCircularBufferConfig(Program& program, CBHandle cb_handle) {
@@ -1211,7 +1154,8 @@ GlobalSemaphore CreateGlobalSemaphore(
 }
 
 std::shared_ptr<Buffer> CreateBuffer(const InterleavedBufferConfig& config) {
-    return Buffer::create(
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
+    auto buffer = Buffer::create(
         config.device,
         config.size,
         config.page_size,
@@ -1220,6 +1164,9 @@ std::shared_ptr<Buffer> CreateBuffer(const InterleavedBufferConfig& config) {
         std::nullopt,
         std::nullopt,
         std::nullopt);
+
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureCreateBuffer, buffer, config);
+    return buffer;
 }
 std::shared_ptr<Buffer> CreateBuffer(const InterleavedBufferConfig& config, DeviceAddr address) {
     return Buffer::create(
@@ -1278,7 +1225,11 @@ std::shared_ptr<Buffer> CreateBuffer(const ShardedBufferConfig& config, SubDevic
         sub_device_id);
 }
 
-void DeallocateBuffer(Buffer& buffer) { buffer.deallocate(); }
+void DeallocateBuffer(Buffer& buffer) {
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureDeallocateBuffer, buffer);
+    buffer.deallocate();
+}
 
 void AssignGlobalBufferToProgram(const std::shared_ptr<Buffer>& buffer, Program& program) {
     detail::DispatchStateCheck(not buffer->device()->using_slow_dispatch());
@@ -1290,6 +1241,8 @@ void SetRuntimeArgs(
     KernelHandle kernel_id,
     const std::variant<CoreCoord, CoreRange, CoreRangeSet>& core_spec,
     stl::Span<const uint32_t> runtime_args) {
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureSetRuntimeArgsUint32, program, kernel_id, core_spec, runtime_args);
     ZoneScoped;
     std::visit([&](auto&& core_spec) { SetRuntimeArgsImpl(program, kernel_id, core_spec, runtime_args); }, core_spec);
 }
@@ -1316,7 +1269,9 @@ void SetRuntimeArgs(
     const std::shared_ptr<Kernel>& kernel,
     const std::variant<CoreCoord, CoreRange, CoreRangeSet>& core_spec,
     const std::shared_ptr<RuntimeArgs>& runtime_args) {
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
     detail::DispatchStateCheck(not device->using_slow_dispatch());
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureSetRuntimeArgs, device, kernel, core_spec, runtime_args);
     SetRuntimeArgsImpl(kernel, core_spec, std::move(runtime_args), false);
 }
 
@@ -1359,22 +1314,51 @@ uint32_t BeginTraceCapture(IDevice* device, const uint8_t cq_id) {
     return tid;
 }
 
-void EndTraceCapture(IDevice* device, const uint8_t cq_id, const uint32_t tid) { device->end_trace(cq_id, tid); }
+void EndTraceCapture(IDevice* device, const uint8_t cq_id, const uint32_t tid) {
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
+    device->end_trace(cq_id, tid);
+    // When light metal tracing is enabled, TraceDescriptor will be serialized via end_trace() and this
+    // will serialize the LightMetalLoadTraceId call to be used during replay to load trace back to device.
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureLoadTrace, device, cq_id, tid);
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureReplayTrace, device, cq_id, tid, true);  // blocking=true
+}
 
 void ReplayTrace(IDevice* device, const uint8_t cq_id, const uint32_t tid, const bool blocking) {
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureReplayTrace, device, cq_id, tid, blocking);
     device->replay_trace(cq_id, tid, blocking);
 }
 
-void ReleaseTrace(IDevice* device, const uint32_t tid) { device->release_trace(tid); }
-
-// Light Metal Begin/End Capture APIs are stubs for now, filled in soon.
-void LightMetalBeginCapture() {
-    log_warning(tt::LogMetalTrace, "Begin LightMetalBinary Capture - not yet implemented.");
+void ReleaseTrace(IDevice* device, const uint32_t tid) {
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureReleaseTrace, device, tid);
+    device->release_trace(tid);
 }
 
+// This is nop if compile time define not set.
+void LightMetalBeginCapture() {
+#if defined(TT_ENABLE_LIGHT_METAL_TRACE) && (TT_ENABLE_LIGHT_METAL_TRACE == 1)
+    log_debug(tt::LogMetalTrace, "Begin LightMetalBinary Capture");
+    auto& lm_capture_ctx = LightMetalCaptureContext::get();
+    lm_capture_ctx.reset();            // Clear previous traces if any, ensure tracing disabled
+    lm_capture_ctx.set_tracing(true);  // Enable tracing
+#else
+    log_warning(tt::LogMetalTrace, "TT_ENABLE_LIGHT_METAL_TRACE!=1, ignoring LightMetalBeginCapture()");
+#endif
+}
+
+// This is nop if compile time define not set, return empty vector.
 LightMetalBinary LightMetalEndCapture() {
-    log_warning(tt::LogMetalTrace, "End LightMetalBinary Capture - not yet implemented.");
+#if defined(TT_ENABLE_LIGHT_METAL_TRACE) && (TT_ENABLE_LIGHT_METAL_TRACE == 1)
+    log_debug(tt::LogMetalTrace, "End LightMetalBinary Capture");
+    auto& lm_capture_ctx = LightMetalCaptureContext::get();
+    TT_ASSERT(lm_capture_ctx.is_tracing(), "Light Metal Capture was not enabled.");
+    lm_capture_ctx.set_tracing(false);  // Disable tracing
+    return lm_capture_ctx.create_light_metal_binary();
+#else
+    log_warning(tt::LogMetalTrace, "TT_ENABLE_LIGHT_METAL_TRACE!=1, ignoring LightMetalEndCapture()");
     return {};
+#endif
 }
 
 void LoadTrace(IDevice* device, const uint8_t cq_id, const uint32_t trace_id, const TraceDescriptor& trace_desc) {

@@ -38,7 +38,7 @@ struct LegacyShape {
     Padding padding_;
 
     LegacyShape() = default;
-    LegacyShape(const ttnn::SimpleShape& logical_shape, const ttnn::SimpleShape& padded_shape) {
+    LegacyShape(const ttnn::Shape& logical_shape, const ttnn::Shape& padded_shape) {
         rank_ = padded_shape.rank();
         padding_.rank_ = padded_shape.rank();
         for (int index = 0; index < padded_shape.rank(); index++) {
@@ -51,21 +51,21 @@ struct LegacyShape {
         }
     }
 
-    ttnn::SimpleShape logical_shape() const {
+    ttnn::Shape logical_shape() const {
         ttnn::SmallVector<uint32_t> values(rank_);
         for (size_t i = 0; i < values.size(); i++) {
             auto [front_pad, back_pad] = padding_.pad_dimensions_[i];
             values[i] = dimensions_[i] - front_pad - back_pad;
         }
-        return ttnn::SimpleShape(std::move(values));
+        return ttnn::Shape(std::move(values));
     }
 
-    ttnn::SimpleShape padded_shape() const {
+    ttnn::Shape padded_shape() const {
         ttnn::SmallVector<uint32_t> values(rank_);
         for (size_t i = 0; i < values.size(); i++) {
             values[i] = dimensions_[i];
         }
-        return ttnn::SimpleShape(std::move(values));
+        return ttnn::Shape(std::move(values));
     }
 };
 
@@ -353,7 +353,7 @@ Tensor load_tensor_helper(const std::string& file_name, T device) {
                 TensorLayout::fromPaddedShape(
                     data_type, layout, MemoryConfig{}, shape.logical_shape(), shape.padded_shape())));
         if (device != nullptr) {
-            tensor = tensor.to(device, memory_config);
+            tensor = tensor.to_device(device, memory_config);
         } else if (has_memory_config) {
             tt::log_warning("Memory config is ignored when loading the tensor because device is not provided");
         }
@@ -377,7 +377,7 @@ Tensor load_tensor_helper(const std::string& file_name, T device) {
                 TensorLayout::fromPaddedShape(
                     data_type, layout, MemoryConfig{}, shape.logical_shape(), shape.padded_shape())));
         if (device != nullptr) {
-            tensor = tensor.to(device);
+            tensor = tensor.to_device(device);
         }
         return tensor;
     }
