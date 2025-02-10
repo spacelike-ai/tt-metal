@@ -31,13 +31,15 @@ class TtLinearParameters:
         on_host: bool = False,
         unsqueeze_bias: bool = False,
     ) -> TtLinearParameters:
-        # There appears to be an issue when using `ttnn.linear` if the input tensor has
-        # shape (n, 1, m) and the bias has rank two. `unsqueeze_bias` makes bias a rank three
-        # tensor to circumvent that.
         if "bias" in state:
             bias = state["bias"].unsqueeze(0)
             if unsqueeze_bias:
+                # TODO: Remove this workaround for issue https://github.com/tenstorrent/tt-metal/issues/16599
                 bias = bias.unsqueeze(0)
+
+                # TODO: Remove this workaround for issue https://github.com/tenstorrent/tt-metal/issues/17741
+                # This fixes the batch size to two for now.
+                bias = bias.repeat([2, 1, 1])
         else:
             bias = None
 
