@@ -650,6 +650,8 @@ set(TTNN_SUBLIBRARIES
 set(TTNN_SRC)
 
 set(PYBIND_SRC
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/pybind11/__init__.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/cpp/pybind11/types.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/pybind11/events.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/pybind11/global_circular_buffer.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/pybind11/global_semaphore.cpp
@@ -679,13 +681,16 @@ set(TTNN_PUBLIC_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR} # ${PROJECT_SOURCE_DIR}/ttnn
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp/ttnn/deprecated # symlink to tt_eager; should become native folder once merge complete
     ${CMAKE_CURRENT_SOURCE_DIR}/cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/flatbuffers
 )
 set(TTNN_PUBLIC_LINK_LIBRARIES
     metal_common_libs
     Metalium::Metal
+    Metalium::Metal::STL
     xtensor
     xtensor-blas
     xtl
+    FlatBuffers::FlatBuffers
 )
 set(TTNN_PUBLIC_LINK_DIRS "")
 
@@ -708,7 +713,6 @@ if(WITH_PYTHON_BINDINGS)
     list(
         APPEND
         TTNN_BASE_SRCS
-        ${PROJECT_SOURCE_DIR}/ttnn/cpp/pybind11/__init__.cpp
         ${TT_LIB_SRCS}
         ${PYBIND_SRC}
     ) # TT_LIB_SRCS from tt_eager/tt_lib/CMakeLists.txt for python bindigns
@@ -801,6 +805,8 @@ endforeach(
     ${TTNN_SUBLIBRARIES}
 )
 
+GENERATE_FBS_HEADER(${CMAKE_CURRENT_SOURCE_DIR}/cpp/ttnn/tensor/flatbuffer/tensor_types.fbs)
+list(APPEND TENSOR_SRCS ${FBS_GENERATED_HEADER_FILE})
 add_ttnn_sublibrary(ttnn_tensor ${TENSOR_SRCS})
 add_ttnn_sublibrary(ttnn_ccl ${CCL_TTNN_SRCS})
 add_ttnn_sublibrary(ttnn_ccl_exp ${CCL_EXPERIMENTAL_TTNN_SRCS})
