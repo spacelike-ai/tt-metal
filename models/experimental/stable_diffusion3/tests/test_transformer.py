@@ -5,13 +5,10 @@
 import pytest
 import torch
 import ttnn
-from loguru import logger
-
-from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from ..reference.transformer import SD3Transformer2DModel
 from ..tt.transformer import TtSD3Transformer2DModel, TtSD3Transformer2DModelParameters
-from ..tt.utils import allocate_tensor_on_device_like
+from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
 
 @pytest.mark.parametrize(
@@ -73,11 +70,4 @@ def test_transformer(
         timestep=tt_timestep_host,
     )
 
-    tt_output_torch = ttnn.to_torch(tt_output)
-
-    mse = torch.nn.functional.mse_loss(
-        torch_output.to(dtype=torch.float32),
-        tt_output_torch.to(dtype=torch.float32),
-    ).item()
-    logger.info(f"mse: {mse:.6f}")
-    assert_with_pcc(torch_output, tt_output_torch, pcc=0.990)
+    assert_quality(torch_output, tt_output, mse=0.1, pcc=0.999_500)

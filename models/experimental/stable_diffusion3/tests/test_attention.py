@@ -7,13 +7,10 @@ from typing import TYPE_CHECKING
 import pytest
 import torch
 import ttnn
-from loguru import logger
-
-from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from ..reference import SD3Transformer2DModel
 from ..tt.attention import TtAttention, TtAttentionParameters
-from ..tt.utils import allocate_tensor_on_device_like
+from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
 if TYPE_CHECKING:
     from ..reference.attention import Attention
@@ -77,21 +74,7 @@ def test_attention(
         ttnn.copy_host_to_device_tensor(tt_prompt_host, tt_prompt)
     ttnn.execute_trace(device, tid)
 
-    tt_spatial_output_torch = ttnn.to_torch(tt_spatial_output)
-
-    mse = torch.nn.functional.mse_loss(
-        spatial_output.to(dtype=torch.float32),
-        tt_spatial_output_torch.to(dtype=torch.float32),
-    ).item()
-    logger.info(f"spatial mse: {mse:.6f}")
-    assert_with_pcc(spatial_output, tt_spatial_output_torch, pcc=0.990)
+    assert_quality(spatial_output, tt_spatial_output, pcc=0.990)
 
     if joint_attention:
-        tt_prompt_output_torch = ttnn.to_torch(tt_prompt_output)
-
-        mse = torch.nn.functional.mse_loss(
-            prompt_output.to(dtype=torch.float32),
-            tt_prompt_output_torch.to(dtype=torch.float32),
-        ).item()
-        logger.info(f"prompt mse: {mse:.6f}")
-        assert_with_pcc(prompt_output, tt_prompt_output_torch, pcc=0.990)
+        assert_quality(prompt_output, tt_prompt_output, pcc=0.990)

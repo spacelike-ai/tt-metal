@@ -7,15 +7,13 @@ from typing import TYPE_CHECKING
 import pytest
 import torch
 import ttnn
-from loguru import logger
-
-from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from ..reference import SD3Transformer2DModel
 from ..tt.timestep_embedding import (
     TtCombinedTimestepTextProjEmbeddings,
     TtCombinedTimestepTextProjEmbeddingsParameters,
 )
+from ..tt.utils import assert_quality
 
 if TYPE_CHECKING:
     from ..reference.timestep_embedding import CombinedTimestepTextProjEmbeddings
@@ -56,11 +54,5 @@ def test_timestep_embedding(
     torch_output = torch_model(timestep, pooled_projection)
 
     tt_output = tt_model(timestep=tt_timestep, pooled_projection=tt_pooled_projection)
-    tt_output_torch = ttnn.to_torch(tt_output)
 
-    mse = torch.nn.functional.mse_loss(
-        torch_output.to(dtype=torch.float32),
-        tt_output_torch.to(dtype=torch.float32),
-    ).item()
-    logger.info(f"mse: {mse:.6f}")
-    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_900)
+    assert_quality(torch_output, tt_output, pcc=0.999_900)

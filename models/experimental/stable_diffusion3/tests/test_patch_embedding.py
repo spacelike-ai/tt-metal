@@ -7,12 +7,10 @@ from typing import TYPE_CHECKING
 import pytest
 import torch
 import ttnn
-from loguru import logger
-
-from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from ..reference import SD3Transformer2DModel
 from ..tt.patch_embedding import TtPatchEmbed, TtPatchEmbedParameters
+from ..tt.utils import assert_quality
 
 if TYPE_CHECKING:
     from ..reference.patch_embedding import PatchEmbed
@@ -53,11 +51,5 @@ def test_patch_embedding(
     torch_output = torch_model(torch_input_tensor)
 
     tt_output = tt_model(tt_input_tensor)
-    tt_output_torch = ttnn.to_torch(tt_output)
 
-    mse = torch.nn.functional.mse_loss(
-        torch_output.to(dtype=torch.float32),
-        tt_output_torch.to(dtype=torch.float32),
-    ).item()
-    logger.info(f"mse: {mse:.6f}")
-    assert_with_pcc(torch_output, tt_output_torch, pcc=0.999_990)
+    assert_quality(torch_output, tt_output, pcc=0.999_990)

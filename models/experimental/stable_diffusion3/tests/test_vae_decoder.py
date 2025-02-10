@@ -8,10 +8,8 @@ import ttnn
 from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
 from loguru import logger
 
-from tests.ttnn.utils_for_testing import assert_with_pcc
-
 from ..reference.vae_decoder import VaeDecoder
-from ..tt.utils import allocate_tensor_on_device_like
+from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 from ..tt.vae_decoder import TtGroupNorm, TtGroupNormParameters, TtVaeDecoder, TtVaeDecoderParameters
 
 
@@ -89,12 +87,7 @@ def test_vae_decoder(*, device: ttnn.Device, use_program_cache: bool, use_tracin
     tt_image_torch = ttnn.to_torch(tt_image).permute(0, 3, 1, 2)
 
     assert image.shape == tt_image_torch.shape
-    mse = torch.nn.functional.mse_loss(
-        image.to(dtype=torch.float32),
-        tt_image_torch.to(dtype=torch.float32),
-    ).item()
-    logger.info(f"latent mse: {mse:.6f}")
-    assert_with_pcc(image, tt_image_torch, pcc=0.990)
+    assert_quality(image, tt_image_torch, pcc=0.990)
 
 
 @pytest.mark.skip(reason="broken since last merge to main")
@@ -178,9 +171,4 @@ def test_vae_decoder_norm(
 
     tt_out_torch = ttnn.to_torch(tt_out).permute(0, 3, 1, 2)
 
-    mse = torch.nn.functional.mse_loss(
-        out.to(dtype=torch.float32),
-        tt_out_torch.to(dtype=torch.float32),
-    ).item()
-    logger.info(f"mse: {mse:.6f}")
-    assert_with_pcc(out, tt_out_torch, pcc=0.999)
+    assert_quality(out, tt_out_torch, pcc=0.999)
