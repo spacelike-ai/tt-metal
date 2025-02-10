@@ -15,9 +15,9 @@ from ..tt.utils import allocate_tensor_on_device_like
 
 
 @pytest.mark.parametrize(
-    ("batch_size", "prompt_sequence_length"),
+    ("batch_size", "prompt_sequence_length", "height", "width"),
     [
-        (2, 333),
+        (2, 333, 1024, 1024),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 15157248}], indirect=True)
@@ -27,6 +27,8 @@ def test_transformer(
     device: ttnn.Device,
     batch_size: int,
     prompt_sequence_length: int,
+    height: int,
+    width: int,
 ) -> None:
     torch_model = SD3Transformer2DModel.from_pretrained(
         "stabilityai/stable-diffusion-3.5-medium", subfolder="transformer"
@@ -39,7 +41,7 @@ def test_transformer(
     tt_model = TtSD3Transformer2DModel(parameters, num_attention_heads=torch_model.config.num_attention_heads)
 
     torch.manual_seed(0)
-    spatial = torch.randn((batch_size, 16, 128, 128))
+    spatial = torch.randn((batch_size, 16, height // 8, width // 8))
     prompt = torch.randn((batch_size, prompt_sequence_length, 4096))
     pooled_projection = torch.randn((batch_size, 2048))
     timestep = torch.randint(1000, (batch_size,), dtype=torch.float32)
