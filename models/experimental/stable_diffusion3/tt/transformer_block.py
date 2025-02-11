@@ -81,10 +81,8 @@ class TtTransformerBlock:
         self._prompt_norm_1 = TtLayerNorm(parameters.prompt_norm_1, eps=eps)
         self._prompt_norm_2 = TtLayerNorm(TtLayerNormParameters(), eps=eps)
 
-        self._spatial_ff = TtFeedForward(parameters.spatial_ff, approximate="tanh")
-        self._prompt_ff = (
-            TtFeedForward(parameters.prompt_ff, approximate="tanh") if parameters.prompt_ff is not None else None
-        )
+        self._spatial_ff = TtFeedForward(parameters.spatial_ff)
+        self._prompt_ff = TtFeedForward(parameters.prompt_ff) if parameters.prompt_ff is not None else None
 
         self._spatial_time_embed = TtLinear(parameters.spatial_time_embed)
         self._prompt_time_embed = TtLinear(parameters.prompt_time_embed)

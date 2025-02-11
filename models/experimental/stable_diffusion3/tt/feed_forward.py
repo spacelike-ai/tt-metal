@@ -36,20 +36,16 @@ class TtFeedForwardParameters:
 
 
 class TtFeedForward:
-    def __init__(
-        self,
-        parameters: TtFeedForwardParameters,
-        *,
-        approximate: str = "none",
-    ) -> None:
+    def __init__(self, parameters: TtFeedForwardParameters) -> None:
         super().__init__()
 
-        self._approximate = approximate
         self.in_proj = TtLinear(parameters.in_proj)
         self.out_proj = TtLinear(parameters.out_proj)
 
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         x2 = self.in_proj(x)
+        # Turning on fast_and_approximate_mode leads to big changes in the generated image.
+        # The image quality might still be okay.
         x3 = ttnn.gelu(x2, fast_and_approximate_mode=False)
         ttnn.deallocate(x2)
 
