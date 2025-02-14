@@ -11,7 +11,7 @@ from diffusers.loaders.single_file_model import FromOriginalModelMixin
 from diffusers.models.modeling_utils import ModelMixin
 
 from .normalization import AdaLayerNormDummy
-from .patch_embedding import FluxPosEmbed
+from .pos_embedding import FluxPosEmbed
 from .timestep_embedding import CombinedTimestepTextProjEmbeddings
 from .transformer_block import FluxSingleTransformerBlock, TransformerBlock
 

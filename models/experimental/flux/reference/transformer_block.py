@@ -17,12 +17,13 @@ class FluxSingleTransformerBlock(torch.nn.Module):
     def __init__(self, dim: int, num_heads: int, head_dim: int) -> None:
         super().__init__()
 
-        mlp_hidden_dim = 4 * dim
+        self.num_heads = num_heads
+        self.head_dim = head_dim
 
         self.norm = AdaLayerNormDummy(dim, 3 * dim)
-        self.proj_mlp = torch.nn.Linear(dim, mlp_hidden_dim)
+        self.proj_mlp = torch.nn.Linear(dim, 4 * dim)
         self.act_mlp = torch.nn.GELU(approximate="tanh")
-        self.proj_out = torch.nn.Linear(dim + mlp_hidden_dim, dim)
+        self.proj_out = torch.nn.Linear(5 * dim, dim)
 
         self.attn = Attention(
             query_dim=dim,
@@ -35,28 +36,28 @@ class FluxSingleTransformerBlock(torch.nn.Module):
 
     def forward(
         self,
-        state: torch.Tensor,
+        combined: torch.Tensor,
         *,
         time_embed: torch.Tensor,
         image_rotary_emb: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        residual = state
+        residual = combined
 
         emb = self.norm.linear(torch.nn.functional.silu(time_embed))
         shift_msa, scale_msa, gate_msa = emb.chunk(3, dim=1)
-        norm_state = self.norm.norm(state) * (1 + scale_msa[:, None]) + shift_msa[:, None]
+        norm_combined = self.norm.norm(combined) * (1 + scale_msa[:, None]) + shift_msa[:, None]
 
-        mlp_state = self.act_mlp(self.proj_mlp(norm_state))
-        attn_output, _ = self.attn(spatial=norm_state, image_rotary_emb=image_rotary_emb)
+        mlp_combined = self.act_mlp(self.proj_mlp(norm_combined))
+        attn_output, _ = self.attn(spatial=norm_combined, image_rotary_emb=image_rotary_emb)
 
-        state = torch.cat([attn_output, mlp_state], dim=2)
+        combined = torch.cat([attn_output, mlp_combined], dim=2)
         gate_msa = gate_msa.unsqueeze(1)
-        state = gate_msa * self.proj_out(state)
-        state = residual + state
-        if state.dtype == torch.float16:
-            state = state.clip(-65504, 65504)
+        combined = gate_msa * self.proj_out(combined)
+        combined = residual + combined
+        if combined.dtype == torch.float16:
+            combined = combined.clip(-65504, 65504)
 
-        return state
+        return combined
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/models/attention.py

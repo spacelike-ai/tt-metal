@@ -127,12 +127,13 @@ class Attention(torch.nn.Module):
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/models/embeddings.py
-def _apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
+def _apply_rotary_emb(x: torch.Tensor, freqs_cis: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
     cos, sin = freqs_cis
+
     cos = cos[None, None]
     sin = sin[None, None]
 
     x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(-1)
     x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(3)
 
-    return (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
+    return (x * cos + x_rotated * sin).to(x.dtype)
