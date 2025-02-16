@@ -543,6 +543,8 @@ def _reshape_noise_pred(
     width: int,
     patch_size: int,
 ) -> ttnn.Tensor:
+    # B, H * W, P * Q * C -> B, H * P, W * Q, C
+
     patch_count_y = height // patch_size
     patch_count_x = width // patch_size
 
