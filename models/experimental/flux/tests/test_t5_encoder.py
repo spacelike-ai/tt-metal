@@ -21,7 +21,7 @@ def test_t5_encoder(*, device: ttnn.Device, use_program_cache: bool) -> None:
     if use_program_cache:
         ttnn.enable_program_cache(device)
 
-    hf_model = T5EncoderModel.from_pretrained("black-forest-labs/FLUX.1-schnell", subfolder="text_encoder_3")
+    hf_model = T5EncoderModel.from_pretrained("black-forest-labs/FLUX.1-schnell", subfolder="text_encoder_2")
 
     with torch.device("meta"):
         torch_model = T5Encoder(
