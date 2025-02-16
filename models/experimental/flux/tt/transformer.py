@@ -80,7 +80,7 @@ class TtFluxTransformer2DModel:
         super().__init__()
 
         self._x_embedder = TtLinear(parameters.x_embedder)
-        self._pos_embed = TtFluxPosEmbed(axes_dim=axes_dims_rope)
+        self._pos_embed = TtFluxPosEmbed(theta=10000, axes_dim=axes_dims_rope)
         self._time_text_embed = TtCombinedTimestepTextProjEmbeddings(parameters.time_text_embed)
         self._context_embedder = TtLinear(parameters.context_embedder)
         self._transformer_blocks = [

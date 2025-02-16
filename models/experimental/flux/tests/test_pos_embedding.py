@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import torch
+
 import ttnn
 
 from ..reference import FluxTransformer2DModel
@@ -30,7 +31,7 @@ def test_pos_embedding(
     torch_model: FluxPosEmbed = parent_torch_model.pos_embed
     torch_model.eval()
 
-    tt_model = TtFluxPosEmbed(axes_dim=torch_model.axes_dim)
+    tt_model = TtFluxPosEmbed(theta=torch_model.theta, axes_dim=torch_model.axes_dim)
 
     torch_input_tensor = torch.randn([1536, 3], dtype=dtype)
 

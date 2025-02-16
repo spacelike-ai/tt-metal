@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.loaders.single_file_model import FromOriginalModelMixin
@@ -14,6 +16,9 @@ from .normalization import AdaLayerNormDummy
 from .pos_embedding import FluxPosEmbed
 from .timestep_embedding import CombinedTimestepTextProjEmbeddings
 from .transformer_block import FluxSingleTransformerBlock, TransformerBlock
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/models/transformers/transformer_flux.py
@@ -32,7 +37,7 @@ class FluxTransformer2DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         pooled_projection_dim: int = 768,
         out_channels: int | None = None,
         guidance_embeds: bool = False,
-        axes_dims_rope: tuple[int, ...] = (16, 56, 56),
+        axes_dims_rope: Sequence[int] = (16, 56, 56),
     ) -> None:
         super().__init__()
 
@@ -44,7 +49,7 @@ class FluxTransformer2DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
         assert not guidance_embeds
 
-        self.pos_embed = FluxPosEmbed(theta=10000, axes_dim=axes_dims_rope)
+        self.pos_embed = FluxPosEmbed(theta=10000, axes_dim=list(axes_dims_rope))
 
         self.time_text_embed = CombinedTimestepTextProjEmbeddings(
             embedding_dim=inner_dim,

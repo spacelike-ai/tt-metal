@@ -31,16 +31,15 @@ class FluxPosEmbed(torch.nn.Module):
 
         return freqs_cos, freqs_sin
 
-    @staticmethod
     def _get_1d_rotary_pos_embed(
+        self,
         dim: int,
         pos: torch.Tensor,
-        theta: float = 10000.0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert dim % 2 == 0
 
         range_ = torch.arange(0, dim, step=2, dtype=torch.float32, device=pos.device)
-        freqs = 1.0 / (theta ** (range_[: dim // 2] / dim))
+        freqs = 1.0 / (self.theta ** (range_[: dim // 2] / dim))
         freqs = torch.outer(pos, freqs)
 
         freqs_cos = freqs.cos().repeat_interleave(2, dim=1).float()
