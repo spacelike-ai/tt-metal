@@ -40,13 +40,8 @@ def test_transformer(
         ttnn.enable_program_cache(device)
 
     logger.info("loading model...")
-    torch_model = FluxTransformer2DModel.from_pretrained(
-        "black-forest-labs/FLUX.1-schnell", subfolder="transformer", torch_dtype=torch.bfloat16
-    )
+    torch_model = FluxTransformer2DModel.from_pretrained("black-forest-labs/FLUX.1-schnell", subfolder="transformer")
     torch_model.eval()
-
-    logger.info("converting PyTorch model...")
-    torch_model32 = torch_model.to(torch.float32)
 
     torch.manual_seed(0)
     spatial = torch.randn([batch_size, spatial_sequence_lenght, 64])
@@ -58,7 +53,7 @@ def test_transformer(
 
     logger.info("running PyTorch model...")
     with torch.no_grad():
-        torch_output = torch_model32(
+        torch_output = torch_model(
             spatial=spatial,
             prompt_embed=prompt,
             pooled_projections=pooled_projection,
@@ -67,16 +62,22 @@ def test_transformer(
             image_ids=image_ids,
         )
 
-    del torch_model32
+    del torch_model
+
+    logger.info("loading model...")
+    torch_model_bfloat16 = FluxTransformer2DModel.from_pretrained(
+        "black-forest-labs/FLUX.1-schnell", subfolder="transformer", torch_dtype=torch.bfloat16
+    )
+    torch_model_bfloat16.eval()
 
     logger.info("creating TT-NN model...")
     parameters = TtFluxTransformer2DModelParameters.from_torch(
-        torch_model.state_dict(), device=device, dtype=ttnn.bfloat16
+        torch_model_bfloat16.state_dict(), device=device, dtype=ttnn.bfloat16
     )
     tt_model = TtFluxTransformer2DModel(
         parameters,
-        num_attention_heads=torch_model.config.num_attention_heads,
-        axes_dims_rope=torch_model.config.axes_dims_rope,
+        num_attention_heads=torch_model_bfloat16.config.num_attention_heads,
+        axes_dims_rope=torch_model_bfloat16.config.axes_dims_rope,
     )
 
     tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
@@ -137,4 +138,4 @@ def test_transformer(
         ttnn.copy_host_to_device_tensor(tt_image_ids_host, tt_image_ids)
         tt_output = tt_model(**model_args)
 
-    assert_quality(torch_output, tt_output, pcc=0.9987, mse=12)
+    assert_quality(torch_output, tt_output, pcc=0.999_500, mse=6.8)
