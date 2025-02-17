@@ -73,11 +73,7 @@ def test_transformer(
     parameters = TtFluxTransformer2DModelParameters.from_torch(
         torch_model_bfloat16.state_dict(), device=device, dtype=ttnn.bfloat16
     )
-    tt_model = TtFluxTransformer2DModel(
-        parameters,
-        num_attention_heads=torch_model_bfloat16.config.num_attention_heads,
-        axes_dims_rope=torch_model_bfloat16.config.axes_dims_rope,
-    )
+    tt_model = TtFluxTransformer2DModel(parameters, num_attention_heads=torch_model_bfloat16.config.num_attention_heads)
 
     tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
     tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)

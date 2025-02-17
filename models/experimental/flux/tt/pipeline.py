@@ -18,6 +18,7 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchE
 from loguru import logger
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
 
+from ..reference.pos_embedding import FluxPosEmbed
 from ..reference.transformer import FluxTransformer2DModel
 from .t5_encoder import TtT5Encoder, TtT5EncoderParameters
 from .transformer import TtFluxTransformer2DModel, TtFluxTransformer2DModelParameters
@@ -27,7 +28,27 @@ class TtFluxPipeline:
     def __init__(self, *, checkpoint: str, device: ttnn.Device) -> None:
         self._device = device
 
-        logger.info("loading models...")
+        logger.info("loading transformer...")
+
+        torch_transformer = FluxTransformer2DModel.from_pretrained(
+            checkpoint, subfolder="transformer", torch_dtype=torch.bfloat16
+        )
+        assert isinstance(torch_transformer, FluxTransformer2DModel)
+
+        logger.info("creating TT-NN transformer...")
+
+        parameters = TtFluxTransformer2DModelParameters.from_torch(
+            torch_transformer.state_dict(), device=device, dtype=ttnn.bfloat16
+        )
+        self._tt_transformer = TtFluxTransformer2DModel(
+            parameters, num_attention_heads=torch_transformer.config.num_attention_heads
+        )
+
+        self._num_channels_latents = torch_transformer.in_channels // 4
+        self._pos_embed = torch_transformer.pos_embed
+        del torch_transformer
+
+        logger.info("loading other models...")
         self._tokenizer_1 = CLIPTokenizer.from_pretrained(checkpoint, subfolder="tokenizer")
         self._tokenizer_2 = T5TokenizerFast.from_pretrained(checkpoint, subfolder="tokenizer_2")
         self._text_encoder_1 = CLIPTextModel.from_pretrained(checkpoint, subfolder="text_encoder")
@@ -36,11 +57,6 @@ class TtFluxPipeline:
         # )  # TODO: change to bfloat16!
         self._scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(checkpoint, subfolder="scheduler")
         self._vae = AutoencoderKL.from_pretrained(checkpoint, subfolder="vae")
-        torch_transformer = FluxTransformer2DModel.from_pretrained(
-            checkpoint,
-            subfolder="transformer",
-            torch_dtype=torch.float32,  # TODO: change to bfloat16!
-        )
 
         assert isinstance(self._tokenizer_1, CLIPTokenizer)
         assert isinstance(self._tokenizer_2, T5TokenizerFast)
@@ -48,23 +64,9 @@ class TtFluxPipeline:
         # assert isinstance(torch_text_encoder_2, T5EncoderModel)
         assert isinstance(self._scheduler, FlowMatchEulerDiscreteScheduler)
         assert isinstance(self._vae, AutoencoderKL)
-        # assert isinstance(torch_transformer, FluxTransformer2DModel)
 
         self._text_encoder_1.eval()
         self._vae.eval()
-        torch_transformer.eval()
-
-        logger.info("creating TT-NN transformer...")
-
-        # parameters = TtFluxTransformer2DModelParameters.from_torch(
-        #     torch_transformer.state_dict(), device=device, dtype=ttnn.bfloat16
-        # )
-        # self._tt_transformer = TtFluxTransformer2DModel(
-        #     parameters, num_attention_heads=torch_transformer.config.num_attention_heads
-        # )
-        # self._tt_transformer = torch_transformer
-        self._transformer = torch_transformer
-        self._num_channels_latents = torch_transformer.config.in_channels // 4
 
         self._vae_scaling_factor = self._vae.config.scaling_factor
         self._vae_shift_factor = self._vae.config.shift_factor
@@ -108,22 +110,32 @@ class TtFluxPipeline:
             max_t5_sequence_length=max_t5_sequence_length,
         )
 
-        # latents_shape = (
-        #     prompt_count * num_images_per_prompt,
-        #     height // self._vae_scale_factor,
-        #     width // self._vae_scale_factor,
-        #     self._num_channels_latents,
-        # )
+        latents_height = height // self._vae_scale_factor
+        latents_width = width // self._vae_scale_factor
+        spatial_sequence_lenght = latents_width * latents_height
 
-        # tt_prompt_embeds = ttnn.from_torch(
-        #     prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
-        # )
-        # tt_pooled_prompt_embeds = ttnn.from_torch(
-        #     pooled_prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
-        # )
-        # tt_timestep = ttnn.allocate_tensor_on_device([1, 1], ttnn.float32, ttnn.ROW_MAJOR_LAYOUT, self._device)
-        # tt_sigma_difference = ttnn.allocate_tensor_on_device([1, 1], ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
-        # tt_latents = ttnn.allocate_tensor_on_device(latents_shape, ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
+        latents_shape = (
+            prompt_count * num_images_per_prompt,
+            spatial_sequence_lenght,
+            self._num_channels_latents * 4,
+        )
+        print("latents_shape", latents_shape)  # [batch_size, spatial_sequence_lenght, 64]
+
+        tt_prompt_embeds = ttnn.from_torch(
+            prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+        )
+        tt_pooled_prompt_embeds = ttnn.from_torch(
+            pooled_prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+        )
+        tt_timestep = ttnn.allocate_tensor_on_device([1, 1], ttnn.float32, ttnn.ROW_MAJOR_LAYOUT, self._device)
+        tt_sigma_difference = ttnn.allocate_tensor_on_device([1, 1], ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
+        tt_latents = ttnn.allocate_tensor_on_device(latents_shape, ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
+        tt_imagerot1 = ttnn.allocate_tensor_on_device(
+            [spatial_sequence_lenght + max_t5_sequence_length, 128], ttnn.float32, ttnn.TILE_LAYOUT, self._device
+        )
+        tt_imagerot2 = ttnn.allocate_tensor_on_device(
+            [spatial_sequence_lenght + max_t5_sequence_length, 128], ttnn.float32, ttnn.TILE_LAYOUT, self._device
+        )
 
         # # cache
         # self._step(
@@ -145,14 +157,16 @@ class TtFluxPipeline:
         # )
         # ttnn.end_trace_capture(self._device, tid)
 
-        # self._trace = PipelineTrace(
-        #     tid=tid,
-        #     spatial_input_output=tt_latents,
-        #     prompt_input=tt_prompt_embeds,
-        #     pooled_projection_input=tt_pooled_prompt_embeds,
-        #     timestep_input=tt_timestep,
-        #     sigma_difference_input=tt_sigma_difference,
-        # )
+        self._trace = PipelineTrace(
+            tid=0,  # TODO
+            spatial_input_output=tt_latents,
+            prompt_input=tt_prompt_embeds,
+            pooled_projection_input=tt_pooled_prompt_embeds,
+            timestep_input=tt_timestep,
+            sigma_difference_input=tt_sigma_difference,
+            imagerot1_input=tt_imagerot1,
+            imagerot2_input=tt_imagerot2,
+        )
 
     def __call__(
         self,
@@ -231,61 +245,43 @@ class TtFluxPipeline:
         image_ids = _latent_image_ids(height=latents_height, width=latents_width).to(dtype=prompt_embeds.dtype)
 
         ids = torch.cat((text_ids, image_ids), dim=0)
-        image_rotary_emb = self._transformer.pos_embed(ids)
+        image_rotary_emb = self._pos_embed(ids)
 
         tt_prompt_embeds = ttnn.from_torch(prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
         tt_pooled_prompt_embeds = ttnn.from_torch(pooled_prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
         tt_initial_latents = ttnn.from_torch(latents, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-        tt_image_rotary_emb = (
-            ttnn.from_torch(image_rotary_emb[0], layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16),
-            ttnn.from_torch(image_rotary_emb[1], layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16),
-        )
+        tt_imagerot1 = ttnn.from_torch(image_rotary_emb[0], layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
+        tt_imagerot2 = ttnn.from_torch(image_rotary_emb[1], layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
 
         logger.info("denoising...")
         denoising_start_time = time.time()
 
-        # ttnn.copy_host_to_device_tensor(tt_prompt_embeds, self._trace.prompt_input)
-        # ttnn.copy_host_to_device_tensor(tt_pooled_prompt_embeds, self._trace.pooled_projection_input)
-        # ttnn.copy_host_to_device_tensor(tt_initial_latents, self._trace.spatial_input_output)
-        # ttnn.copy_host_to_device_tensor(tt_image_rotary_emb[0], self._trace.image_rotary_emb_input[0])
-        # ttnn.copy_host_to_device_tensor(tt_image_rotary_emb[1], self._trace.image_rotary_emb_input[1])
+        ttnn.copy_host_to_device_tensor(tt_prompt_embeds, self._trace.prompt_input)
+        ttnn.copy_host_to_device_tensor(tt_pooled_prompt_embeds, self._trace.pooled_projection_input)
+        ttnn.copy_host_to_device_tensor(tt_initial_latents, self._trace.spatial_input_output)
+        ttnn.copy_host_to_device_tensor(tt_imagerot1, self._trace.imagerot1_input)
+        ttnn.copy_host_to_device_tensor(tt_imagerot2, self._trace.imagerot2_input)
 
         for i, t in enumerate(tqdm.tqdm(timesteps)):
             tt_timestep = ttnn.full([1, 1], fill_value=t, dtype=ttnn.float32)
 
             sigma_difference = self._scheduler.sigmas[i + 1] - self._scheduler.sigmas[i]
-            # tt_sigma_difference = ttnn.full(
-            #     [1, 1], fill_value=sigma_difference, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
-            # )
+            tt_sigma_difference = ttnn.full(
+                [1, 1], fill_value=sigma_difference, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+            )
 
-            # ttnn.copy_host_to_device_tensor(tt_timestep, self._trace.timestep_input)
-            # ttnn.copy_host_to_device_tensor(tt_sigma_difference, self._trace.sigma_difference_input)
+            ttnn.copy_host_to_device_tensor(tt_timestep, self._trace.timestep_input)
+            ttnn.copy_host_to_device_tensor(tt_sigma_difference, self._trace.sigma_difference_input)
 
             # self._trace.execute()
-
-            # tt_noise_pred = self._transformer(
-            #     spatial=self._trace.spatial_input_output,
-            #     timestep=self._trace.timestep_input,
-            #     pooled_projections=self._trace.pooled_projection_input,
-            #     prompt_embed=self._trace.prompt_input,
-            #     image_rotary_emb=self._trace.image_rotary_emb_input,
-            # )
-
-            # noise_pred = ttnn.to_torch(tt_noise_pred)
-
-            with torch.no_grad():
-                noise_pred = self._transformer(
-                    spatial=latents,
-                    timestep=ttnn.to_torch(tt_timestep).squeeze(0),
-                    pooled_projections=pooled_prompt_embeds,
-                    prompt_embed=prompt_embeds,
-                    image_rotary_emb=image_rotary_emb,
-                )
-
-                latents += sigma_difference * noise_pred
-
-            # tt_latents = ttnn.from_torch(latents, device=self._device, layout=ttnn.TILE_LAYOUT)
-            # ttnn.copy_host_to_device_tensor(tt_latents, self._trace.spatial_input_output)
+            self._step(
+                latents=self._trace.spatial_input_output,
+                timestep=self._trace.timestep_input,
+                pooled_prompt_embeds=self._trace.pooled_projection_input,
+                prompt_embeds=self._trace.prompt_input,
+                sigma_difference=sigma_difference,
+                image_rotary_emb=(self._trace.imagerot1_input, self._trace.imagerot2_input),
+            )
 
         denoising_end_time = time.time()
 
@@ -293,7 +289,7 @@ class TtFluxPipeline:
 
         image_decoding_start_time = time.time()
 
-        # latents = ttnn.to_torch(self._trace.spatial_input_output).to(torch.float32)
+        latents = ttnn.to_torch(self._trace.spatial_input_output).to(torch.float32)
         latents = _unpack_latents(latents, height, width, self._vae_scale_factor)
         latents = latents / self._vae_scaling_factor + self._vae_shift_factor
 
@@ -315,44 +311,30 @@ class TtFluxPipeline:
 
         return output
 
-    # def _step(
-    #     self,
-    #     *,
-    #     do_classifier_free_guidance: bool,
-    #     guidance_scale: float,
-    #     latents: ttnn.Tensor,
-    #     timestep: ttnn.Tensor,
-    #     pooled_prompt_embeds: ttnn.Tensor,
-    #     prompt_embeds: ttnn.Tensor,
-    #     sigma_difference: ttnn.Tensor,
-    # ) -> None:
-    #     latent_model_input = ttnn.concat([latents, latents]) if do_classifier_free_guidance else latents
-    #     batch_size = latent_model_input.shape[0]
+    def _step(
+        self,
+        *,
+        latents: ttnn.Tensor,
+        timestep: ttnn.Tensor,
+        pooled_prompt_embeds: ttnn.Tensor,
+        prompt_embeds: ttnn.Tensor,
+        sigma_difference: ttnn.Tensor,
+        image_rotary_emb: tuple[ttnn.Tensor, ttnn.Tensor],
+    ) -> None:
+        batch_size = latents.shape[0]
 
-    #     timestep = ttnn.repeat(timestep, ttnn.Shape([batch_size, 1]))
-    #     timestep = ttnn.to_layout(timestep, ttnn.TILE_LAYOUT)
+        timestep = ttnn.repeat(timestep, ttnn.Shape([batch_size, 1]))
+        timestep = ttnn.to_layout(timestep, ttnn.TILE_LAYOUT)
 
-    #     noise_pred = self._tt_transformer(
-    #         spatial=latent_model_input,
-    #         prompt=prompt_embeds,
-    #         pooled_projection=pooled_prompt_embeds,
-    #         timestep=timestep,
-    #     )
+        noise_pred = self._tt_transformer(
+            spatial=latents,
+            prompt=prompt_embeds,
+            pooled_projection=pooled_prompt_embeds,
+            timestep=timestep,
+            image_rotary_emb=image_rotary_emb,
+        )
 
-    #     noise_pred = _reshape_noise_pred(
-    #         noise_pred,
-    #         height=latent_model_input.shape[-3],
-    #         width=latent_model_input.shape[-2],
-    #         patch_size=self._tt_transformer.patch_size,
-    #     )
-
-    #     if do_classifier_free_guidance:
-    #         split_pos = noise_pred.shape[0] // 2
-    #         uncond = noise_pred[0:split_pos]
-    #         cond = noise_pred[split_pos:]
-    #         noise_pred = uncond + guidance_scale * (cond - uncond)
-
-    #     ttnn.add_(latents, sigma_difference * noise_pred)
+        ttnn.add_(latents, sigma_difference * noise_pred)
 
     def _encode_prompts(
         self,
@@ -395,6 +377,8 @@ class PipelineTrace:
     pooled_projection_input: ttnn.Tensor
     timestep_input: ttnn.Tensor
     sigma_difference_input: ttnn.Tensor
+    imagerot1_input: ttnn.Tensor
+    imagerot2_input: ttnn.Tensor
     tid: int
 
     def execute(self) -> None:

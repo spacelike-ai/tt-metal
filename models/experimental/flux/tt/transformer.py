@@ -11,7 +11,6 @@ import ttnn
 
 from .linear import TtLinear, TtLinearParameters
 from .normalization import TtLayerNorm, TtLayerNormParameters
-from .pos_embedding import TtFluxPosEmbed
 from .substate import indexed_substates, substate
 from .timestep_embedding import TtCombinedTimestepTextProjEmbeddings, TtCombinedTimestepTextProjEmbeddingsParameters
 from .transformer_block import (
@@ -70,17 +69,10 @@ class TtFluxTransformer2DModelParameters:
 
 
 class TtFluxTransformer2DModel:
-    def __init__(
-        self,
-        parameters: TtFluxTransformer2DModelParameters,
-        *,
-        num_attention_heads: int,
-        axes_dims_rope: list[int],
-    ) -> None:
+    def __init__(self, parameters: TtFluxTransformer2DModelParameters, *, num_attention_heads: int) -> None:
         super().__init__()
 
         self._x_embedder = TtLinear(parameters.x_embedder)
-        self._pos_embed = TtFluxPosEmbed(theta=10000, axes_dim=axes_dims_rope)
         self._time_text_embed = TtCombinedTimestepTextProjEmbeddings(parameters.time_text_embed)
         self._context_embedder = TtLinear(parameters.context_embedder)
         self._transformer_blocks = [
@@ -93,9 +85,6 @@ class TtFluxTransformer2DModel:
         self._time_embed_out = TtLinear(parameters.time_embed_out)
         self._norm_out = TtLayerNorm(parameters.norm_out, eps=1e-6)
         self._proj_out = TtLinear(parameters.proj_out)
-
-    def pos_embed(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        return self._pos_embed(x)
 
     def __call__(
         self,
