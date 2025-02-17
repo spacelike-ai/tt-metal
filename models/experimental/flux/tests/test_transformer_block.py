@@ -31,9 +31,9 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize(
     ("use_program_cache", "use_tracing"),
     [
-        (False, False),
+        # (False, False),
         # (True, False),
-        # (True, True),
+        (True, True),
     ],
 )
 def test_single_transformer_block(
@@ -125,9 +125,9 @@ def test_single_transformer_block(
 @pytest.mark.parametrize(
     ("use_program_cache", "use_tracing"),
     [
-        (False, False),
+        # (False, False),
         # (True, False),
-        # (True, True),
+        (True, True),
     ],
 )
 def test_transformer_block(

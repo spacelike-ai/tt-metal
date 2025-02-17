@@ -2,6 +2,7 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -272,18 +273,24 @@ def _merge_qkv_proj(
 
 
 def _apply_rotary_emb(x: ttnn.Tensor, freqs_cis: tuple[ttnn.Tensor, ttnn.Tensor]) -> ttnn.Tensor:
+    [*batch_dims, _] = x.shape
+
     cos, sin = freqs_cis
+    cos = cos.reshape([1, 1, *cos.shape])
+    sin = sin.reshape([1, 1, *sin.shape])
 
-    torch_x = ttnn.to_torch(x)
-    torch_cos = ttnn.to_torch(cos)
-    torch_sin = ttnn.to_torch(sin)
+    x2 = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
+    x2 = x2.reshape([*batch_dims, -1, 2])
 
-    torch_cos = torch_cos[None, None]
-    torch_sin = torch_sin[None, None]
+    x2 = ttnn.permute(x2, [4, 0, 1, 2, 3])
+    x_real = ttnn.to_layout(x2[0:1], ttnn.TILE_LAYOUT)
+    x_imag = ttnn.to_layout(x2[1:2], ttnn.TILE_LAYOUT)
 
-    x_real, x_imag = torch_x.reshape(*torch_x.shape[:-1], -1, 2).unbind(-1)
-    x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(3)
+    x_real, x_imag = (ttnn.neg(x_imag), x_real)
 
-    result = (torch_x * torch_cos + x_rotated * torch_sin).to(torch_x.dtype)
+    x_rotated = ttnn.concat([x_real, x_imag], dim=0)
+    x_rotated = ttnn.permute(x_rotated, [1, 2, 3, 4, 0])
 
-    return ttnn.from_torch(result, device=x.device(), layout=ttnn.TILE_LAYOUT)
+    x_rotated = x_rotated.reshape(x.shape)
+
+    return x * cos + x_rotated * sin

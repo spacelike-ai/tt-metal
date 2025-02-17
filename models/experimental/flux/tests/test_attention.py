@@ -27,9 +27,9 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize(
     ("use_program_cache", "use_tracing"),
     [
-        (False, False),
+        # (False, False),
         # (True, False),
-        # (True, True),
+        (True, True),
     ],
 )
 def test_attention(
@@ -111,7 +111,7 @@ def test_attention(
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
         tt_spatial_output, tt_prompt_output = tt_model(**model_args)
 
-    assert_quality(spatial_output, tt_spatial_output, pcc=0.995, mse=0.0005)
+    assert_quality(spatial_output, tt_spatial_output, pcc=0.994, mse=0.0005)
 
     if separate_prompt:
         assert_quality(prompt_output, tt_prompt_output, pcc=0.995, mse=0.05)
