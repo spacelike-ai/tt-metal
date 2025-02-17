@@ -12,10 +12,9 @@ from ..tt.utils import assert_quality
 
 
 @pytest.mark.parametrize(
-    ("batch_size", "input_dim", "output_dim", "approximate"),
+    ("batch_size", "input_dim", "output_dim"),
     [
-        (32, 128, 256, "none"),
-        (32, 128, 256, "tanh"),
+        (32, 128, 256),
     ],
 )
 @pytest.mark.usefixtures("use_program_cache")
@@ -25,15 +24,14 @@ def test_feed_forward(
     batch_size: int,
     input_dim: int,
     output_dim: int,
-    approximate: str,
 ) -> None:
     dtype = torch.bfloat16
 
-    torch_model = FeedForward(dim=input_dim, dim_out=output_dim, approximate=approximate).to(dtype=dtype)
+    torch_model = FeedForward(dim=input_dim, dim_out=output_dim).to(dtype=dtype)
     torch_model.eval()
 
     parameters = TtFeedForwardParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b)
-    tt_model = TtFeedForward(parameters, approximate=approximate)
+    tt_model = TtFeedForward(parameters)
 
     torch_input_tensor = torch.randn((batch_size, input_dim), dtype=dtype)
 
