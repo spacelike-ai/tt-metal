@@ -39,7 +39,7 @@ class FluxSingleTransformerBlock(torch.nn.Module):
         combined: torch.Tensor,
         *,
         time_embed: torch.Tensor,
-        image_rotary_emb: torch.Tensor | None = None,
+        image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         residual = combined
 

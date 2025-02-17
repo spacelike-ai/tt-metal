@@ -94,6 +94,9 @@ class TtFluxTransformer2DModel:
         self._norm_out = TtLayerNorm(parameters.norm_out, eps=1e-6)
         self._proj_out = TtLinear(parameters.proj_out)
 
+    def pos_embed(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        return self._pos_embed(x)
+
     def __call__(
         self,
         *,
@@ -101,8 +104,7 @@ class TtFluxTransformer2DModel:
         prompt: ttnn.Tensor,
         pooled_projection: ttnn.Tensor,
         timestep: ttnn.Tensor,
-        text_ids: ttnn.Tensor,
-        image_ids: ttnn.Tensor,
+        image_rotary_emb: tuple[ttnn.Tensor, ttnn.Tensor],
     ) -> ttnn.Tensor:
         height, width = list(spatial.shape)[-2:]
 
@@ -111,9 +113,6 @@ class TtFluxTransformer2DModel:
         prompt = self._context_embedder(prompt)
 
         time_embed = time_embed.reshape([time_embed.shape[0], 1, time_embed.shape[1]])
-
-        ids = ttnn.concat((text_ids, image_ids), dim=0)
-        image_rotary_emb = self._pos_embed(ids)  # TODO: move out of the transformer?
 
         for i, block in enumerate(self._transformer_blocks, start=1):
             print(f"iteration {i}...")
@@ -147,57 +146,3 @@ class TtFluxTransformer2DModel:
         spatial = self._norm_out(spatial) * (1 + scale) + shift
 
         return self._proj_out(spatial)
-
-    def cache_and_trace(
-        self,
-        *,
-        spatial: ttnn.Tensor,
-        prompt: ttnn.Tensor,
-        pooled_projection: ttnn.Tensor,
-        timestep: ttnn.Tensor,
-    ) -> TtFluxTransformer2DModelTrace:
-        device = spatial.device()
-
-        self(spatial=spatial, prompt=prompt, pooled_projection=pooled_projection, timestep=timestep)
-
-        tid = ttnn.begin_trace_capture(device)
-        output = self(spatial=spatial, prompt=prompt, pooled_projection=pooled_projection, timestep=timestep)
-        ttnn.end_trace_capture(device, tid)
-
-        return TtFluxTransformer2DModelTrace(
-            spatial_input=spatial,
-            prompt_input=prompt,
-            pooled_projection_input=pooled_projection,
-            timestep_input=timestep,
-            output=output,
-            tid=tid,
-        )
-
-
-@dataclass
-class TtFluxTransformer2DModelTrace:
-    spatial_input: ttnn.Tensor
-    prompt_input: ttnn.Tensor
-    pooled_projection_input: ttnn.Tensor
-    timestep_input: ttnn.Tensor
-    output: ttnn.Tensor
-    tid: int
-
-    def __call__(
-        self,
-        *,
-        spatial: ttnn.Tensor,
-        prompt: ttnn.Tensor,
-        pooled_projection: ttnn.Tensor,
-        timestep: ttnn.Tensor,
-    ) -> ttnn.Tensor:
-        device = self.spatial_input.device()
-
-        ttnn.copy_host_to_device_tensor(spatial, self.spatial_input)
-        ttnn.copy_host_to_device_tensor(prompt, self.prompt_input)
-        ttnn.copy_host_to_device_tensor(pooled_projection, self.pooled_projection_input)
-        ttnn.copy_host_to_device_tensor(timestep, self.timestep_input)
-
-        ttnn.execute_trace(device, self.tid)
-
-        return self.output

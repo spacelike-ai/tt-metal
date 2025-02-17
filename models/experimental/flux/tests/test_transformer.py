@@ -47,9 +47,9 @@ def test_transformer(
     spatial = torch.randn([batch_size, spatial_sequence_lenght, 64])
     prompt = torch.randn([batch_size, prompt_sequence_length, 4096])
     pooled_projection = torch.randn([batch_size, 768])
-    timestep = torch.randint(1000, [batch_size], dtype=torch.float32)
-    text_ids = torch.randn([512, 3])
-    image_ids = torch.randn([1024, 3])
+    timestep = torch.randint(1000, [batch_size])
+    imagerot1 = torch.randn([spatial_sequence_lenght + prompt_sequence_length, 128])
+    imagerot2 = torch.randn([spatial_sequence_lenght + prompt_sequence_length, 128])
 
     logger.info("running PyTorch model...")
     with torch.no_grad():
@@ -58,8 +58,7 @@ def test_transformer(
             prompt_embed=prompt,
             pooled_projections=pooled_projection,
             timestep=timestep,
-            text_ids=text_ids,
-            image_ids=image_ids,
+            image_rotary_emb=(imagerot1, imagerot2),
         )
 
     del torch_model
@@ -84,23 +83,22 @@ def test_transformer(
     tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
     tt_pooled_projection_host = ttnn.from_torch(pooled_projection, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
     tt_timestep_host = ttnn.from_torch(timestep.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
-    tt_text_ids_host = ttnn.from_torch(text_ids, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-    tt_image_ids_host = ttnn.from_torch(image_ids, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+    tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
+    tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
 
     tt_spatial = allocate_tensor_on_device_like(tt_spatial_host, device=device)
     tt_prompt = allocate_tensor_on_device_like(tt_prompt_host, device=device)
     tt_pooled_projection = allocate_tensor_on_device_like(tt_pooled_projection_host, device=device)
     tt_timestep = allocate_tensor_on_device_like(tt_timestep_host, device=device)
-    tt_text_ids = allocate_tensor_on_device_like(tt_text_ids_host, device=device)
-    tt_image_ids = allocate_tensor_on_device_like(tt_image_ids_host, device=device)
+    tt_imagerot1 = allocate_tensor_on_device_like(tt_imagerot1_host, device=device)
+    tt_imagerot2 = allocate_tensor_on_device_like(tt_imagerot2_host, device=device)
 
     model_args = dict(  # noqa: C408
         spatial=tt_spatial,
         prompt=tt_prompt,
         pooled_projection=tt_pooled_projection,
         timestep=tt_timestep,
-        text_ids=tt_text_ids,
-        image_ids=tt_image_ids,
+        image_rotary_emb=(tt_imagerot1, tt_imagerot2),
     )
 
     if use_tracing:
@@ -120,8 +118,8 @@ def test_transformer(
         ttnn.copy_host_to_device_tensor(tt_prompt_host, tt_prompt)
         ttnn.copy_host_to_device_tensor(tt_pooled_projection_host, tt_pooled_projection)
         ttnn.copy_host_to_device_tensor(tt_timestep_host, tt_timestep)
-        ttnn.copy_host_to_device_tensor(tt_text_ids_host, tt_text_ids)
-        ttnn.copy_host_to_device_tensor(tt_image_ids_host, tt_image_ids)
+        ttnn.copy_host_to_device_tensor(tt_imagerot1_host, tt_imagerot1)
+        ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
         ttnn.execute_trace(device, tid)
     else:
         # compile
@@ -134,8 +132,8 @@ def test_transformer(
         ttnn.copy_host_to_device_tensor(tt_prompt_host, tt_prompt)
         ttnn.copy_host_to_device_tensor(tt_pooled_projection_host, tt_pooled_projection)
         ttnn.copy_host_to_device_tensor(tt_timestep_host, tt_timestep)
-        ttnn.copy_host_to_device_tensor(tt_text_ids_host, tt_text_ids)
-        ttnn.copy_host_to_device_tensor(tt_image_ids_host, tt_image_ids)
+        ttnn.copy_host_to_device_tensor(tt_imagerot1_host, tt_imagerot1)
+        ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
         tt_output = tt_model(**model_args)
 
-    assert_quality(torch_output, tt_output, pcc=0.999_500, mse=6.8)
+    assert_quality(torch_output, tt_output, pcc=0.999_500, mse=6.9)

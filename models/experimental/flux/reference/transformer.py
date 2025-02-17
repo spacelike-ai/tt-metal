@@ -93,8 +93,7 @@ class FluxTransformer2DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         prompt_embed: torch.Tensor,
         pooled_projections: torch.Tensor,
         timestep: torch.Tensor,
-        text_ids: torch.Tensor,
-        image_ids: torch.Tensor,
+        image_rotary_emb: tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
         spatial = self.x_embedder(spatial)
 
@@ -102,9 +101,6 @@ class FluxTransformer2DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
         time_embed = self.time_text_embed(timestep, pooled_projections)
         prompt_embed = self.context_embedder(prompt_embed)
-
-        ids = torch.cat((text_ids, image_ids), dim=0)
-        image_rotary_emb = self.pos_embed(ids)
 
         for block in self.transformer_blocks:
             spatial, prompt_embed = block(
