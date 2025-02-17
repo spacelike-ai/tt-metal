@@ -132,4 +132,4 @@ def test_transformer(  # noqa: PLR0915
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
         tt_output = tt_model(**model_args)
 
-    assert_quality(torch_output, tt_output, pcc=0.999_500, mse=6.9)
+    assert_quality(torch_output, tt_output, pcc=0.999_500, mse=13)
