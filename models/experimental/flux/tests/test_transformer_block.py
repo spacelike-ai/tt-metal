@@ -55,7 +55,7 @@ def test_single_transformer_block(
     torch_model.eval()
 
     parameters = TtFluxSingleTransformerBlockParameters.from_torch(
-        torch_model.state_dict(), device=device, dtype=ttnn.bfloat16
+        torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b
     )
     tt_model = TtFluxSingleTransformerBlock(parameters, num_heads=torch_model.num_heads)
 
@@ -112,7 +112,7 @@ def test_single_transformer_block(
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
         tt_combined_output = tt_model(**model_args)
 
-    assert_quality(combined_output, tt_combined_output, pcc=0.999, mse=500.0)
+    assert_quality(combined_output, tt_combined_output, pcc=0.999, mse=830.0)
 
 
 @pytest.mark.parametrize(
@@ -149,7 +149,7 @@ def test_transformer_block(
     torch_model: TransformerBlock = parent_torch_model.transformer_blocks[block_index]
     torch_model.eval()
 
-    parameters = TtTransformerBlockParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat16)
+    parameters = TtTransformerBlockParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b)
     tt_model = TtTransformerBlock(parameters, num_heads=torch_model.num_heads)
 
     embedding_dim = 3072

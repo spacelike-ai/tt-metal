@@ -71,7 +71,7 @@ def test_transformer(  # noqa: PLR0915
 
     logger.info("creating TT-NN model...")
     parameters = TtFluxTransformer2DModelParameters.from_torch(
-        torch_model_bfloat16.state_dict(), device=device, dtype=ttnn.bfloat16
+        torch_model_bfloat16.state_dict(), device=device, dtype=ttnn.bfloat8_b
     )
     tt_model = TtFluxTransformer2DModel(parameters, num_attention_heads=torch_model_bfloat16.config.num_attention_heads)
 
