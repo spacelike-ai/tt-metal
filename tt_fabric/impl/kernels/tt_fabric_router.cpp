@@ -5,6 +5,7 @@
 // clang-format off
 #include "dataflow_api.h"
 #include "tt_fabric/hw/inc/tt_fabric.h"
+#include "tt_fabric/hw/inc/tt_fabric_status.h"
 // clang-format on
 
 using namespace tt::tt_fabric;
@@ -17,8 +18,6 @@ fvcc_outbound_state_t fvcc_outbound_state __attribute__((aligned(16)));  // outb
 #endif
 volatile local_pull_request_t local_pull_request_temp __attribute__((aligned(16)));  // replicate for each fvc
 volatile local_pull_request_t* local_pull_request = &local_pull_request_temp;        // replicate for each fvc
-chan_payload_ptr inbound_rdptr_ack __attribute__((aligned(16)));
-volatile chan_payload_ptr remote_rdptr __attribute__((aligned(16)));
 
 constexpr uint32_t fvc_data_buf_size_words = get_compile_time_arg_val(0);
 constexpr uint32_t fvc_data_buf_size_bytes = fvc_data_buf_size_words * PACKET_WORD_SIZE_BYTES;
@@ -29,20 +28,6 @@ uint32_t sync_val;
 uint32_t router_mask;
 uint32_t gk_message_addr_l;
 uint32_t gk_message_addr_h;
-
-constexpr uint32_t PACKET_QUEUE_STAUS_MASK = 0xabc00000;
-constexpr uint32_t PACKET_QUEUE_TEST_STARTED = PACKET_QUEUE_STAUS_MASK | 0x0;
-constexpr uint32_t PACKET_QUEUE_TEST_PASS = PACKET_QUEUE_STAUS_MASK | 0x1;
-constexpr uint32_t PACKET_QUEUE_TEST_TIMEOUT = PACKET_QUEUE_STAUS_MASK | 0xdead0;
-constexpr uint32_t PACKET_QUEUE_TEST_BAD_HEADER = PACKET_QUEUE_STAUS_MASK | 0xdead1;
-constexpr uint32_t PACKET_QUEUE_TEST_DATA_MISMATCH = PACKET_QUEUE_STAUS_MASK | 0x3;
-
-// indexes of return values in test results buffer
-constexpr uint32_t PQ_TEST_STATUS_INDEX = 0;
-constexpr uint32_t PQ_TEST_WORD_CNT_INDEX = 2;
-constexpr uint32_t PQ_TEST_CYCLES_INDEX = 4;
-constexpr uint32_t PQ_TEST_ITER_INDEX = 6;
-constexpr uint32_t PQ_TEST_MISC_INDEX = 16;
 
 // careful, may be null
 tt_l1_ptr uint32_t* const kernel_status = reinterpret_cast<tt_l1_ptr uint32_t*>(kernel_status_buf_addr_arg);
@@ -92,32 +77,26 @@ void kernel_main() {
 
     tt_fabric_init();
 
-    write_kernel_status(kernel_status, PQ_TEST_STATUS_INDEX, PACKET_QUEUE_TEST_STARTED);
-    write_kernel_status(kernel_status, PQ_TEST_MISC_INDEX, 0xff000000);
-    write_kernel_status(kernel_status, PQ_TEST_MISC_INDEX + 1, 0xbb000000);
-    write_kernel_status(kernel_status, PQ_TEST_MISC_INDEX + 2, 0xAABBCCDD);
-    write_kernel_status(kernel_status, PQ_TEST_MISC_INDEX + 3, 0xDDCCBBAA);
+    write_kernel_status(kernel_status, TT_FABRIC_STATUS_INDEX, TT_FABRIC_STATUS_STARTED);
+    write_kernel_status(kernel_status, TT_FABRIC_MISC_INDEX, 0xff000000);
+    write_kernel_status(kernel_status, TT_FABRIC_MISC_INDEX + 1, 0xbb000000);
+    write_kernel_status(kernel_status, TT_FABRIC_MISC_INDEX + 2, 0xAABBCCDD);
+    write_kernel_status(kernel_status, TT_FABRIC_MISC_INDEX + 3, 0xDDCCBBAA);
 
     router_state.sync_in = 0;
     router_state.sync_out = 0;
-    inbound_rdptr_ack.ptr = 0;
-    inbound_rdptr_ack.ptr_cleared = 0;
-    inbound_rdptr_ack.pad[0] = 0;
-    inbound_rdptr_ack.pad[1] = 0;
 
     zero_l1_buf((tt_l1_ptr uint32_t*)fvc_consumer_req_buf, sizeof(chan_req_buf));
     zero_l1_buf((tt_l1_ptr uint32_t*)FVCC_IN_BUF_START, FVCC_IN_BUF_SIZE);
     zero_l1_buf((tt_l1_ptr uint32_t*)FVCC_OUT_BUF_START, FVCC_OUT_BUF_SIZE);
-    write_kernel_status(kernel_status, PQ_TEST_WORD_CNT_INDEX, (uint32_t)&router_state);
-    write_kernel_status(kernel_status, PQ_TEST_WORD_CNT_INDEX + 1, (uint32_t)&fvc_consumer_state);
-    write_kernel_status(kernel_status, PQ_TEST_STATUS_INDEX + 1, (uint32_t)&fvc_producer_state);
+    write_kernel_status(kernel_status, TT_FABRIC_WORD_CNT_INDEX, (uint32_t)&router_state);
+    write_kernel_status(kernel_status, TT_FABRIC_WORD_CNT_INDEX + 1, (uint32_t)&fvc_consumer_state);
+    write_kernel_status(kernel_status, TT_FABRIC_STATUS_INDEX + 1, (uint32_t)&fvc_producer_state);
 
-    fvc_consumer_state.init(
-        FABRIC_ROUTER_DATA_BUF_START, fvc_data_buf_size_words / 2, (uint32_t)&fvc_producer_state.inbound_wrptr);
+    fvc_consumer_state.init(FABRIC_ROUTER_DATA_BUF_START, fvc_data_buf_size_words / 2);
     fvc_producer_state.init(
         FABRIC_ROUTER_DATA_BUF_START + (fvc_data_buf_size_words * PACKET_WORD_SIZE_BYTES / 2),
-        fvc_data_buf_size_words / 2,
-        (uint32_t)&remote_rdptr);
+        fvc_data_buf_size_words / 2);
 
 #ifdef FVCC_SUPPORT
     fvcc_outbound_state.init(
@@ -129,14 +108,14 @@ void kernel_main() {
 #endif
 
     if (!wait_all_src_dest_ready(&router_state, timeout_cycles)) {
-        write_kernel_status(kernel_status, PQ_TEST_STATUS_INDEX, PACKET_QUEUE_TEST_TIMEOUT);
+        write_kernel_status(kernel_status, TT_FABRIC_STATUS_INDEX, TT_FABRIC_STATUS_TIMEOUT);
         return;
     }
 
     notify_gatekeeper();
     uint64_t start_timestamp = get_timestamp();
 
-    write_kernel_status(kernel_status, PQ_TEST_MISC_INDEX, 0xff000001);
+    write_kernel_status(kernel_status, TT_FABRIC_MISC_INDEX, 0xff000001);
     uint32_t loop_count = 0;
 
     uint32_t launch_msg_rd_ptr = *GET_MAILBOX_ADDRESS_DEV(launch_msg_rd_ptr);
@@ -149,7 +128,7 @@ void kernel_main() {
             pull_request_t* pull_req = &req->pull_request;
             if (req->bytes[47] == FORWARD) {
                 // Data is packetized.
-                pull_data_to_fvc_buffer(pull_req, &fvc_consumer_state);
+                fvc_consumer_state.pull_data_to_fvc_buffer(pull_req);
                 if (fvc_consumer_state.packet_words_remaining == 0 ||
                     fvc_consumer_state.pull_words_in_flight >= FVC_SYNC_THRESHOLD) {
                     fvc_consumer_state.total_words_to_forward += fvc_consumer_state.pull_words_in_flight;
@@ -159,7 +138,7 @@ void kernel_main() {
                     update_pull_request_words_cleared(pull_req);
                 }
             } else if (req->bytes[47] == INLINE_FORWARD) {
-                move_data_to_fvc_buffer(pull_req, &fvc_consumer_state);
+                fvc_consumer_state.move_data_to_fvc_buffer(pull_req);
             }
 
             if (fvc_consumer_state.packet_in_progress == 1 and fvc_consumer_state.packet_words_remaining == 0) {
@@ -176,12 +155,11 @@ void kernel_main() {
         }
 
         // Handle Ethernet Inbound Data
-        fvc_producer_state.update_remote_rdptr_sent();
         if (fvc_producer_state.get_curr_packet_valid()) {
             fvc_producer_state.process_inbound_packet();
             loop_count = 0;
         } else if (fvc_producer_state.packet_corrupted) {
-            write_kernel_status(kernel_status, PQ_TEST_STATUS_INDEX, PACKET_QUEUE_TEST_BAD_HEADER);
+            write_kernel_status(kernel_status, TT_FABRIC_STATUS_INDEX, TT_FABRIC_STATUS_BAD_HEADER);
             return;
         }
 
@@ -209,16 +187,16 @@ void kernel_main() {
     }
     uint64_t cycles_elapsed = fvc_producer_state.packet_timestamp - start_timestamp;
 
-    write_kernel_status(kernel_status, PQ_TEST_MISC_INDEX, 0xff000002);
+    write_kernel_status(kernel_status, TT_FABRIC_MISC_INDEX, 0xff000002);
 
-    write_kernel_status(kernel_status, PQ_TEST_MISC_INDEX, 0xff000003);
+    write_kernel_status(kernel_status, TT_FABRIC_MISC_INDEX, 0xff000003);
 
-    set_64b_result(kernel_status, cycles_elapsed, PQ_TEST_CYCLES_INDEX);
+    set_64b_result(kernel_status, cycles_elapsed, TT_FABRIC_CYCLES_INDEX);
 
     if (fvc_consumer_state.packet_in_progress) {
-        write_kernel_status(kernel_status, PQ_TEST_STATUS_INDEX, PACKET_QUEUE_TEST_TIMEOUT);
+        write_kernel_status(kernel_status, TT_FABRIC_STATUS_INDEX, TT_FABRIC_STATUS_TIMEOUT);
     } else {
-        write_kernel_status(kernel_status, PQ_TEST_STATUS_INDEX, PACKET_QUEUE_TEST_PASS);
+        write_kernel_status(kernel_status, TT_FABRIC_STATUS_INDEX, TT_FABRIC_STATUS_PASS);
     }
-    write_kernel_status(kernel_status, PQ_TEST_MISC_INDEX, 0xff00005);
+    write_kernel_status(kernel_status, TT_FABRIC_MISC_INDEX, 0xff00005);
 }

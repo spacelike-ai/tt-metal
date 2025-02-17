@@ -188,11 +188,16 @@ Result conv_transpose2d(
             output_height,
             output_width,
             weight_tensor.get_logical_shape()[3],
+            full_input_height,
             full_input_width,
             compute_grid_size,
             input_tensor.layout(),
             ttnn::is_tensor_on_device_or_multidevice(input_tensor) ? std::make_optional(input_tensor.memory_config())
-                                                                   : std::nullopt);
+                                                                   : std::nullopt,
+            kernel_size,
+            groups,
+            bias_tensor.has_value(),
+            compute_config);
         auto_shard = true;
     }
 
@@ -350,7 +355,7 @@ Result conv_transpose2d(
 }
 
 Result ConvTranpose2dOperation::invoke(
-    uint8_t queue_id,
+    QueueId queue_id,
     const ttnn::Tensor& input_tensor,
     const ttnn::Tensor& weight_tensor,
     IDevice* device,
@@ -393,7 +398,7 @@ Result ConvTranpose2dOperation::invoke(
 }
 
 Result ConvTranpose2dOperation::invoke(
-    uint8_t queue_id,
+    QueueId queue_id,
     const ttnn::Tensor& input_tensor,
     const ttnn::Tensor& weight_tensor,
     MeshDevice* device,
