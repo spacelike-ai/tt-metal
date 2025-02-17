@@ -4,12 +4,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
+import torch
 import ttnn
-
-if TYPE_CHECKING:
-    import torch
+from loguru import logger
+from models.utility_functions import comp_pcc
 
 
 def allocate_tensor_on_device_like(
@@ -58,3 +56,28 @@ def to_memory_config(
         ttnn.deallocate(t)
 
     return result
+
+
+def assert_quality(
+    a: ttnn.Tensor | torch.Tensor,
+    b: ttnn.Tensor | torch.Tensor,
+    *,
+    pcc: float | None = None,
+    mse: float | None = None,
+) -> None:
+    if isinstance(a, ttnn.Tensor):
+        a = ttnn.to_torch(a)
+    if isinstance(b, ttnn.Tensor):
+        b = ttnn.to_torch(b)
+
+    a = a.to(torch.float32)
+    b = b.to(torch.float32)
+
+    _, pcc_calculated = comp_pcc(a, b)
+    mse_calculated = torch.nn.functional.mse_loss(a, b).item()
+
+    logger.info(f"PCC={pcc_calculated:.6f}, MSE={mse_calculated:.6f}")
+    if pcc is not None:
+        assert pcc_calculated >= pcc, f"PCC={pcc_calculated:.6f}"
+    if mse is not None:
+        assert mse_calculated <= mse, f"MSE={mse_calculated:.6f}"

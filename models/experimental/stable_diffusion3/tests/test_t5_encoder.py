@@ -10,10 +10,9 @@ import ttnn
 from loguru import logger
 from transformers.models.t5.modeling_t5 import T5EncoderModel
 
-from tests.ttnn.utils_for_testing import assert_with_pcc
-
 from ..reference.t5_encoder import T5Config, T5Encoder
 from ..tt.t5_encoder import TtT5Encoder, TtT5EncoderParameters
+from ..tt.utils import assert_quality
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
@@ -76,9 +75,4 @@ def test_t5_encoder(*, device: ttnn.Device, use_program_cache: bool) -> None:
     tt_output_torch = ttnn.to_torch(tt_output)
 
     assert output.shape == tt_output_torch.shape
-    mse = torch.nn.functional.mse_loss(
-        output.to(dtype=torch.float32),
-        tt_output_torch.to(dtype=torch.float32),
-    ).item()
-    logger.info(f"mse: {mse:.6f}")
-    assert_with_pcc(output, tt_output_torch, pcc=0.945)
+    assert_quality(output, tt_output, pcc=0.945)

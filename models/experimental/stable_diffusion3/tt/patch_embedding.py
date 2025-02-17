@@ -52,7 +52,12 @@ class TtPatchEmbed:
         self._pos_embed = parameters.pos_embed
 
     def __call__(self, latent: ttnn.Tensor) -> ttnn.Tensor:
-        latent, [batch_size, out_height, out_width, c] = self._proj.call_without_reshape(latent)
+        latent, [batch_size, out_height, out_width, c] = self._proj.call_without_reshape(
+            latent,
+            conv_config=ttnn.Conv2dConfig(
+                shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED  # https://github.com/tenstorrent/tt-metal/issues/17787
+            ),
+        )
 
         assert list(latent.shape) == list(latent.padded_shape)
         assert (out_height * out_width) % 32 == 0

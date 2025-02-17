@@ -61,7 +61,9 @@ class TtConv2d:
         self._weight = parameters.weight
         self._bias = parameters.bias
 
-    def call_without_reshape(self, x: ttnn.Tensor) -> tuple[ttnn.Tensor, list[int]]:
+    def call_without_reshape(
+        self, x: ttnn.Tensor, *, conv_config: ttnn.Conv2dConfig | None = None
+    ) -> tuple[ttnn.Tensor, list[int]]:
         batch_size = x.shape[0]
         device = x.device()
         memory_config_in = ttnn.get_memory_config(x)
@@ -81,6 +83,7 @@ class TtConv2d:
             input_width=x.shape[2],
             return_output_dim=True,
             return_weights_and_bias=True,
+            conv_config=conv_config,
         )
 
         result = ttnn.to_memory_config(result, memory_config=memory_config_in)

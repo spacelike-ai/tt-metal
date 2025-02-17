@@ -7,13 +7,10 @@ from typing import TYPE_CHECKING
 import pytest
 import torch
 import ttnn
-from loguru import logger
-
-from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from ..reference import SD3Transformer2DModel
 from ..tt.transformer_block import TtTransformerBlock, TtTransformerBlockParameters
-from ..tt.utils import allocate_tensor_on_device_like
+from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
 if TYPE_CHECKING:
     from ..reference.transformer_block import TransformerBlock
@@ -79,21 +76,7 @@ def test_transformer_block(
 
     assert (prompt_output is None) == (tt_prompt_output is None)
 
-    tt_prompt_output_torch = ttnn.to_torch(tt_prompt_output) if tt_prompt_output is not None else None
-    tt_spatial_output_torch = ttnn.to_torch(tt_spatial_output)
+    if prompt_output is not None and tt_prompt_output is not None:
+        assert_quality(prompt_output, tt_prompt_output, pcc=0.995)
 
-    if prompt_output is not None and tt_prompt_output_torch is not None:
-        mse = torch.nn.functional.mse_loss(
-            prompt_output.to(dtype=torch.float32),
-            tt_prompt_output_torch.to(dtype=torch.float32),
-        ).item()
-        logger.info(f"prompt mse: {mse:.6f}")
-        assert_with_pcc(prompt_output, tt_prompt_output_torch, pcc=0.995)
-
-    assert spatial_output.shape == tt_spatial_output_torch.shape
-    mse = torch.nn.functional.mse_loss(
-        spatial_output.to(dtype=torch.float32),
-        tt_spatial_output_torch.to(dtype=torch.float32),
-    ).item()
-    logger.info(f"spatial mse: {mse:.6f}")
-    assert_with_pcc(spatial_output, tt_spatial_output_torch, pcc=0.995)
+    assert_quality(spatial_output, tt_spatial_output, pcc=0.995)
