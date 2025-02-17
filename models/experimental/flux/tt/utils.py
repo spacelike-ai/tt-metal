@@ -29,7 +29,7 @@ def from_torch_fast(
     # does not support changing the datatype if the input is not tiled. An option could be to tilize the input before
     # changing the datatype and then untilize again, but it was not tested if this would be faster than converting the
     # datatype on the host.
-    if device is None or layout is None or layout == ttnn.ROW_MAJOR_LAYOUT:
+    if device is None or layout is None or layout == ttnn.ROW_MAJOR_LAYOUT or isinstance(device, ttnn.MeshDevice):
         return ttnn.from_torch(t, device=device, layout=layout, dtype=dtype)
 
     tensor = ttnn.from_torch(t, device=device)

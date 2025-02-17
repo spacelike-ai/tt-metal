@@ -13,7 +13,6 @@ import ttnn
 from .linear import TtLinear, TtLinearParameters
 from .normalization import TtRmsNorm, TtRmsNormParameters
 from .substate import has_substate, substate
-from .utils import to_memory_config
 
 
 @dataclass
@@ -113,7 +112,7 @@ class TtAttentionPart:
             deallocate=deallocate,
         )
 
-        qkv = ttnn.reallocate(qkv)
+        # qkv = ttnn.reallocate(qkv)
         # qkv = to_memory_config(qkv, ttnn.L1_MEMORY_CONFIG, deallocate=True)
 
         q, k, v = ttnn.transformer.split_query_key_value_and_split_heads(qkv, num_heads=num_heads, transpose_key=False)
@@ -132,14 +131,14 @@ class TtAttentionPart:
         if self._out_proj is None:
             return x
 
-        result = self._out_proj(x)
+        return self._out_proj(x)
 
-        return to_memory_config(
-            result,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            # dtype=ttnn.bfloat16,
-            deallocate=True,
-        )
+        # return to_memory_config(
+        #     result,
+        #     memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        #     dtype=ttnn.bfloat16,
+        #     deallocate=True,
+        # )
 
 
 class TtAttention:
