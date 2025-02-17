@@ -27,7 +27,7 @@ from ..tt.utils import allocate_tensor_on_device_like, assert_quality
         # (True, True),
     ],
 )
-def test_transformer(
+def test_transformer(  # noqa: PLR0915
     *,
     device: ttnn.Device,
     use_program_cache: bool,

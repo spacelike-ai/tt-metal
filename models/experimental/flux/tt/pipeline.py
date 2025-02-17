@@ -53,8 +53,8 @@ class TtFluxPipeline:
         self._tokenizer_2 = T5TokenizerFast.from_pretrained(checkpoint, subfolder="tokenizer_2")
         self._text_encoder_1 = CLIPTextModel.from_pretrained(checkpoint, subfolder="text_encoder")
         # torch_text_encoder_2 = T5EncoderModel.from_pretrained(
-        #     checkpoint, subfolder="text_encoder_2"
-        # )  # TODO: change to bfloat16!
+        #     checkpoint, subfolder="text_encoder_2", torch_dtype=torch.bfloat16
+        # )
         self._scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(checkpoint, subfolder="scheduler")
         self._vae = AutoencoderKL.from_pretrained(checkpoint, subfolder="vae")
 
@@ -119,7 +119,6 @@ class TtFluxPipeline:
             spatial_sequence_lenght,
             self._num_channels_latents * 4,
         )
-        print("latents_shape", latents_shape)  # [batch_size, spatial_sequence_lenght, 64]
 
         tt_prompt_embeds = ttnn.from_torch(
             prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
