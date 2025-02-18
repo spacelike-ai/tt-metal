@@ -475,6 +475,7 @@ def _get_clip_prompt_embeds(
 #     return prompt_embeds.view(prompt_count * num_images_per_prompt, seq_len, -1)
 
 
+# adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/flux/pipeline_flux.py
 def _get_t5_prompt_embeds(
     prompt: list[str],
     *,
@@ -537,35 +538,6 @@ def _unpack_latents(latents: torch.Tensor, height: int, width: int, vae_scale_fa
     latents = latents.permute(0, 3, 1, 4, 2, 5)
 
     return latents.reshape(batch_size, channels // (2 * 2), height * 2, width * 2)
-
-
-# def _reshape_noise_pred(
-#     noise_pred: ttnn.Tensor,
-#     *,
-#     height: int,
-#     width: int,
-#     patch_size: int,
-# ) -> ttnn.Tensor:
-#     patch_count_y = height // patch_size
-#     patch_count_x = width // patch_size
-
-#     shape1 = (
-#         noise_pred.shape[0] * patch_count_y,
-#         patch_count_x,
-#         patch_size,
-#         -1,
-#     )
-
-#     shape2 = (
-#         noise_pred.shape[0],
-#         patch_count_y * patch_size,
-#         patch_count_x * patch_size,
-#         -1,
-#     )
-
-#     noise_pred = noise_pred.reshape(shape1)
-#     noise_pred = ttnn.transpose(noise_pred, 1, 2)
-#     return noise_pred.reshape(shape2)
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/flux/pipeline_flux.py
