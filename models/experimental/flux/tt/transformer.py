@@ -53,12 +53,12 @@ class TtFluxTransformer2DModelParameters:
                 substate(state, "context_embedder"), dtype=dtype, device=device
             ),
             transformer_blocks=[
-                TtTransformerBlockParameters.from_torch(s, dtype=dtype, device=device, linear_on_host=True)
+                TtTransformerBlockParameters.from_torch(s, dtype=dtype, device=device)
                 for s in indexed_substates(state, "transformer_blocks")
             ],
             single_transformer_blocks=[
-                TtFluxSingleTransformerBlockParameters.from_torch(s, dtype=dtype, device=device, linear_on_host=True)
-                for s in indexed_substates(state, "single_transformer_blocks")
+                TtFluxSingleTransformerBlockParameters.from_torch(s, dtype=dtype, device=device, linear_on_host=i > 20)
+                for i, s in enumerate(indexed_substates(state, "single_transformer_blocks"))
             ],
             time_embed_out=TtLinearParameters.from_torch(
                 substate(state, "norm_out.linear"), dtype=dtype, device=device, unsqueeze_bias=True
