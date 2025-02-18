@@ -72,17 +72,19 @@ def test_transformer(  # noqa: PLR0915
     torch_model_bfloat16.eval()
 
     logger.info("creating TT-NN model...")
-    parameters = TtFluxTransformer2DModelParameters.from_torch(
-        torch_model_bfloat16.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
-    )
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
+        parameters = TtFluxTransformer2DModelParameters.from_torch(
+            torch_model_bfloat16.state_dict(), mesh_device=mesh_device, dtype=ttnn.bfloat8_b
+        )
     tt_model = TtFluxTransformer2DModel(parameters, num_attention_heads=torch_model_bfloat16.config.num_attention_heads)
 
-    tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-    tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-    tt_pooled_projection_host = ttnn.from_torch(pooled_projection, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-    tt_timestep_host = ttnn.from_torch(timestep.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
-    tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
-    tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
+        tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+        tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+        tt_pooled_projection_host = ttnn.from_torch(pooled_projection, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+        tt_timestep_host = ttnn.from_torch(timestep.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
+        tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
+        tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
 
     tt_spatial = allocate_tensor_on_device_like(tt_spatial_host, device=mesh_device)
     tt_prompt = allocate_tensor_on_device_like(tt_prompt_host, device=mesh_device)
@@ -134,4 +136,7 @@ def test_transformer(  # noqa: PLR0915
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
         tt_output = tt_model(**model_args)
 
-    assert_quality(torch_output, tt_output, pcc=0.999_500, mse=14)
+    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
+        tt_output_torch = ttnn.to_torch(tt_output)[:batch_size]
+
+    assert_quality(torch_output, tt_output_torch, pcc=0.999_500, mse=14)

@@ -27,7 +27,7 @@ class TtLinearParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device | None,
+        device: ttnn.Device | ttnn.MeshDevice | None,
         on_host: bool = False,
         unsqueeze_bias: bool = False,
     ) -> TtLinearParameters:
@@ -112,7 +112,3 @@ class TtLinear:
                 ttnn.deallocate(bias)
 
         return output
-
-    @property
-    def device(self) -> ttnn.Device:
-        return self._weight.device()

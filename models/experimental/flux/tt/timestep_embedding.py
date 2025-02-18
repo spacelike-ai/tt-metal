@@ -37,6 +37,7 @@ class TtEmbeddingParameters:
 class TtCombinedTimestepTextProjEmbeddingsParameters:
     timestep_embedder: TtEmbeddingParameters
     text_embedder: TtEmbeddingParameters
+    device: ttnn.Device | ttnn.MeshDevice | None
 
     @classmethod
     def from_torch(
@@ -44,7 +45,7 @@ class TtCombinedTimestepTextProjEmbeddingsParameters:
         state: dict[str, ttnn.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,
+        device: ttnn.Device | ttnn.MeshDevice | None,
     ) -> TtCombinedTimestepTextProjEmbeddingsParameters:
         return cls(
             timestep_embedder=TtEmbeddingParameters.from_torch(
@@ -53,6 +54,7 @@ class TtCombinedTimestepTextProjEmbeddingsParameters:
             text_embedder=TtEmbeddingParameters.from_torch(
                 substate(state, "text_embedder"), dtype=dtype, device=device
             ),
+            device=device,
         )
 
 
@@ -60,10 +62,11 @@ class TtCombinedTimestepTextProjEmbeddings:
     def __init__(self, parameters: TtCombinedTimestepTextProjEmbeddingsParameters) -> None:
         super().__init__()
 
+        device = parameters.device
+
         self._timestep_embedder = _TimestepEmbedding(parameters.timestep_embedder)
         self._text_embedder = _TimestepEmbedding(parameters.text_embedder)
 
-        device = self._timestep_embedder.device
         self._time_proj_factor = self._create_time_proj_factor(num_channels=256, device=device)
 
     def __call__(self, *, timestep: ttnn.Tensor, pooled_projection: ttnn.Tensor) -> ttnn.Tensor:
@@ -97,7 +100,11 @@ class TtCombinedTimestepTextProjEmbeddings:
         exponent = exponent / half_dim
         factor = torch.exp(exponent).unsqueeze(0)
 
-        return ttnn.from_torch(factor, device=device)
+        result = ttnn.from_torch(
+            factor, device=device, layout=ttnn.TILE_LAYOUT
+        )  # does not work with row major layout and mesh device
+
+        return ttnn.to_layout(result, ttnn.ROW_MAJOR_LAYOUT)
 
 
 class _TimestepEmbedding:
@@ -111,7 +118,3 @@ class _TimestepEmbedding:
         x = self._linear_1(x)
         x = ttnn.silu(x)
         return self._linear_2(x)
-
-    @property
-    def device(self) -> ttnn.Device:
-        return self._linear_1.device

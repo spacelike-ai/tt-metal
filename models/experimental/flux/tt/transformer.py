@@ -42,29 +42,33 @@ class TtFluxTransformer2DModelParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,
+        mesh_device: ttnn.MeshDevice,
     ) -> TtFluxTransformer2DModelParameters:
         return cls(
-            x_embedder=TtLinearParameters.from_torch(substate(state, "x_embedder"), dtype=dtype, device=device),
+            x_embedder=TtLinearParameters.from_torch(substate(state, "x_embedder"), dtype=dtype, device=mesh_device),
             time_text_embed=TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(
-                substate(state, "time_text_embed"), dtype=dtype, device=device
+                substate(state, "time_text_embed"), dtype=dtype, device=mesh_device
             ),
             context_embedder=TtLinearParameters.from_torch(
-                substate(state, "context_embedder"), dtype=dtype, device=device
+                substate(state, "context_embedder"), dtype=dtype, device=mesh_device
             ),
             transformer_blocks=[
-                TtTransformerBlockParameters.from_torch(s, dtype=dtype, device=device)
+                TtTransformerBlockParameters.from_torch(s, dtype=dtype, mesh_device=mesh_device)
                 for s in indexed_substates(state, "transformer_blocks")
             ],
             single_transformer_blocks=[
-                TtFluxSingleTransformerBlockParameters.from_torch(s, dtype=dtype, device=device, linear_on_host=i > 20)
+                TtFluxSingleTransformerBlockParameters.from_torch(
+                    s, dtype=dtype, device=mesh_device, linear_on_host=i > 20
+                )
                 for i, s in enumerate(indexed_substates(state, "single_transformer_blocks"))
             ],
             time_embed_out=TtLinearParameters.from_torch(
-                substate(state, "norm_out.linear"), dtype=dtype, device=device, unsqueeze_bias=True
+                substate(state, "norm_out.linear"), dtype=dtype, device=mesh_device, unsqueeze_bias=True
             ),
-            norm_out=TtLayerNormParameters.from_torch(substate(state, "norm_out.norm"), dtype=dtype, device=device),
-            proj_out=TtLinearParameters.from_torch(substate(state, "proj_out"), dtype=dtype, device=device),
+            norm_out=TtLayerNormParameters.from_torch(
+                substate(state, "norm_out.norm"), dtype=dtype, device=mesh_device
+            ),
+            proj_out=TtLinearParameters.from_torch(substate(state, "proj_out"), dtype=dtype, device=mesh_device),
         )
 
 

@@ -26,9 +26,10 @@ if TYPE_CHECKING:
     ],
 )
 @pytest.mark.usefixtures("use_program_cache")
+@pytest.mark.parametrize("mesh_device", [(1, 2)], indirect=True)
 def test_timestep_embedding(
     *,
-    device: ttnn.Device,
+    mesh_device: ttnn.MeshDevice,
     batch_size: int,
 ) -> None:
     parent_torch_model = FluxTransformer2DModel.from_pretrained(
@@ -38,22 +39,28 @@ def test_timestep_embedding(
     torch_model.eval()
     del parent_torch_model
 
-    parameters = TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(
-        torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b
-    )
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
+        parameters = TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(
+            torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat16
+        )
     tt_model = TtCombinedTimestepTextProjEmbeddings(parameters)
 
     torch.manual_seed(0)
     timestep = torch.randint(1000, (batch_size,))
     pooled_projection = torch.randn((batch_size, 768))
 
-    tt_timestep = ttnn.from_torch(timestep.unsqueeze(1), device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
-    tt_pooled_projection = ttnn.from_torch(
-        pooled_projection, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
-    )
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
+        tt_timestep = ttnn.from_torch(
+            timestep.unsqueeze(1), device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32
+        )
+        tt_pooled_projection = ttnn.from_torch(
+            pooled_projection, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+        )
 
     torch_output = torch_model(timestep, pooled_projection)
 
     tt_output = tt_model(timestep=tt_timestep, pooled_projection=tt_pooled_projection)
+    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
+        tt_output_torch = ttnn.to_torch(tt_output)[:batch_size]
 
-    assert_quality(torch_output, tt_output, pcc=0.999_900)
+    assert_quality(torch_output, tt_output_torch, pcc=0.999_900)

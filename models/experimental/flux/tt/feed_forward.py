@@ -27,7 +27,7 @@ class TtFeedForwardParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,
+        device: ttnn.Device | ttnn.MeshDevice | None = None,
         linear_on_host: bool = False,
     ) -> TtFeedForwardParameters:
         return cls(
@@ -54,7 +54,9 @@ class TtFeedForward:
         x3 = ttnn.gelu(x2, fast_and_approximate_mode=False)
         ttnn.deallocate(x2)
 
+        x3 = ttnn.all_gather(x3, dim=-1)
+
         result = self.out_proj(x3)
         ttnn.deallocate(x3)
 
-        return result
+        return ttnn.all_gather(result, dim=-1)

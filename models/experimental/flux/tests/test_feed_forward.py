@@ -18,28 +18,34 @@ from ..tt.utils import assert_quality
     ],
 )
 @pytest.mark.usefixtures("use_program_cache")
+@pytest.mark.parametrize("mesh_device", [(1, 2)], indirect=True)
 def test_feed_forward(
     *,
-    device: ttnn.Device,
+    mesh_device: ttnn.MeshDevice,
     batch_size: int,
     input_dim: int,
     output_dim: int,
 ) -> None:
-    dtype = torch.bfloat16
-
-    torch_model = FeedForward(dim=input_dim, dim_out=output_dim).to(dtype=dtype)
+    torch_model = FeedForward(dim=input_dim, dim_out=output_dim)
     torch_model.eval()
 
-    parameters = TtFeedForwardParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b)
+    with ttnn.distribute(ttnn.ShardTensorToMesh(mesh_device, dim=-1)):
+        parameters = TtFeedForwardParameters.from_torch(
+            torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat16
+        )
     tt_model = TtFeedForward(parameters)
 
-    torch_input_tensor = torch.randn((batch_size, input_dim), dtype=dtype)
+    torch_input_tensor = torch.randn((batch_size, input_dim))
 
-    tt_input_tensor = ttnn.from_torch(torch_input_tensor, device=device, layout=ttnn.TILE_LAYOUT)
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
+        tt_input_tensor = ttnn.from_torch(
+            torch_input_tensor, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+        )
 
     with torch.no_grad():
         torch_output = torch_model(torch_input_tensor)
 
     tt_output = tt_model(tt_input_tensor)
 
-    assert_quality(torch_output, tt_output, pcc=0.999_500)
+    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=-1)):
+        assert_quality(torch_output, tt_output, pcc=0.999_500)

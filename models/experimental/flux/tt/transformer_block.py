@@ -112,37 +112,49 @@ class TtTransformerBlockParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,
+        mesh_device: ttnn.MeshDevice,
         linear_on_host: bool = False,
     ) -> TtTransformerBlockParameters:
+        with ttnn.distribute(ttnn.ShardTensorToMesh(mesh_device, dim=-1)):
+            spatial_ff = TtFeedForwardParameters.from_torch(
+                substate(state, "ff"), dtype=dtype, device=mesh_device, linear_on_host=linear_on_host
+            )
+            prompt_ff = (
+                TtFeedForwardParameters.from_torch(
+                    substate(state, "ff_context"), dtype=dtype, device=mesh_device, linear_on_host=linear_on_host
+                )
+                if has_substate(state, "ff_context")
+                else None
+            )
+
         return cls(
-            dual_attn=TtAttentionParameters.from_torch(substate(state, "attn"), dtype=dtype, device=device),
-            spatial_attn=TtAttentionParameters.from_torch(substate(state, "attn2"), dtype=dtype, device=device)
+            dual_attn=TtAttentionParameters.from_torch(substate(state, "attn"), dtype=dtype, device=mesh_device),
+            spatial_attn=TtAttentionParameters.from_torch(substate(state, "attn2"), dtype=dtype, device=mesh_device)
             if has_substate(state, "attn2")
             else None,
-            spatial_norm_1=TtLayerNormParameters.from_torch(substate(state, "norm1.norm"), dtype=dtype, device=device),
-            spatial_norm_2=TtLayerNormParameters.from_torch(substate(state, "norm2"), dtype=dtype, device=device),
+            spatial_norm_1=TtLayerNormParameters.from_torch(
+                substate(state, "norm1.norm"), dtype=dtype, device=mesh_device
+            ),
+            spatial_norm_2=TtLayerNormParameters.from_torch(substate(state, "norm2"), dtype=dtype, device=mesh_device),
             prompt_norm_1=TtLayerNormParameters.from_torch(
-                substate(state, "norm1_context.norm"), dtype=dtype, device=device
+                substate(state, "norm1_context.norm"), dtype=dtype, device=mesh_device
             ),
             spatial_time_embed=TtLinearParameters.from_torch(
-                substate(state, "norm1.linear"), dtype=dtype, device=device, unsqueeze_bias=True, on_host=linear_on_host
+                substate(state, "norm1.linear"),
+                dtype=dtype,
+                device=mesh_device,
+                unsqueeze_bias=True,
+                on_host=linear_on_host,
             ),
             prompt_time_embed=TtLinearParameters.from_torch(
                 substate(state, "norm1_context.linear"),
                 dtype=dtype,
-                device=device,
+                device=mesh_device,
                 unsqueeze_bias=True,
                 on_host=linear_on_host,
             ),
-            spatial_ff=TtFeedForwardParameters.from_torch(
-                substate(state, "ff"), dtype=dtype, device=device, linear_on_host=linear_on_host
-            ),
-            prompt_ff=TtFeedForwardParameters.from_torch(
-                substate(state, "ff_context"), dtype=dtype, device=device, linear_on_host=linear_on_host
-            )
-            if has_substate(state, "ff_context")
-            else None,
+            spatial_ff=spatial_ff,
+            prompt_ff=prompt_ff,
         )
 
 

@@ -25,7 +25,7 @@ class TtRmsNormParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,
+        device: ttnn.Device | ttnn.MeshDevice | None = None,
     ) -> TtRmsNormParameters:
         return cls(
             weight=from_torch_fast(state["weight"].unsqueeze(0), layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
@@ -59,7 +59,7 @@ class TtLayerNormParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,
+        device: ttnn.Device | ttnn.MeshDevice | None = None,
     ) -> TtLayerNormParameters:
         return cls(
             weight=from_torch_fast(state["weight"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
