@@ -52,6 +52,7 @@ class TtFluxPipeline:
         self._tokenizer_1 = CLIPTokenizer.from_pretrained(checkpoint, subfolder="tokenizer")
         self._tokenizer_2 = T5TokenizerFast.from_pretrained(checkpoint, subfolder="tokenizer_2")
         self._text_encoder_1 = CLIPTextModel.from_pretrained(checkpoint, subfolder="text_encoder")
+        self._text_encoder_2 = T5EncoderModel.from_pretrained(checkpoint, subfolder="text_encoder_2")
         # torch_text_encoder_2 = T5EncoderModel.from_pretrained(
         #     checkpoint, subfolder="text_encoder_2", torch_dtype=torch.bfloat16
         # )
@@ -61,6 +62,7 @@ class TtFluxPipeline:
         assert isinstance(self._tokenizer_1, CLIPTokenizer)
         assert isinstance(self._tokenizer_2, T5TokenizerFast)
         assert isinstance(self._text_encoder_1, CLIPTextModel)
+        assert isinstance(self._text_encoder_2, T5EncoderModel)
         # assert isinstance(torch_text_encoder_2, T5EncoderModel)
         assert isinstance(self._scheduler, FlowMatchEulerDiscreteScheduler)
         assert isinstance(self._vae, AutoencoderKL)
@@ -199,9 +201,6 @@ class TtFluxPipeline:
             max_t5_sequence_length=max_t5_sequence_length,
         )
         prompt_encoding_end_time = time.time()
-
-        # torch.save(prompt_embeds, "prompt_embeds.pt")
-        # torch.save(pooled_prompt_embeds, "pooled_prompt_embeds.pt")
 
         logger.info("preparing timesteps...")
 
@@ -343,28 +342,23 @@ class TtFluxPipeline:
         num_images_per_prompt: int,
         max_t5_sequence_length: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        prompt_embeds = torch.load("prompt_embeds.pt")
-        pooled_prompt_embeds = torch.load("pooled_prompt_embeds.pt")
+        tokenizer_max_length = self._tokenizer_1.model_max_length
 
-        # tokenizer_max_length = self._tokenizer_1.model_max_length
+        pooled_prompt_embeds = _get_clip_prompt_embeds(
+            prompt=prompt_1,
+            num_images_per_prompt=num_images_per_prompt,
+            tokenizer=self._tokenizer_1,
+            text_encoder=self._text_encoder_1,
+            tokenizer_max_length=tokenizer_max_length,
+        )
 
-        # pooled_prompt_embeds = _get_clip_prompt_embeds(
-        #     prompt=prompt_1,
-        #     num_images_per_prompt=num_images_per_prompt,
-        #     tokenizer=self._tokenizer_1,
-        #     text_encoder=self._text_encoder_1,
-        #     tokenizer_max_length=tokenizer_max_length,
-        # )
-
-        # prompt_embeds = _get_t5_prompt_embeds(
-        #     device=self._device,
-        #     prompt=prompt_2,
-        #     num_images_per_prompt=num_images_per_prompt,
-        #     max_sequence_length=max_t5_sequence_length,
-        #     tokenizer=self._tokenizer_2,
-        #     text_encoder=self._text_encoder_2,
-        #     # tokenizer_max_length=tokenizer_max_length,
-        # )
+        prompt_embeds = _get_t5_prompt_embeds(
+            prompt=prompt_2,
+            num_images_per_prompt=num_images_per_prompt,
+            max_sequence_length=max_t5_sequence_length,
+            tokenizer=self._tokenizer_2,
+            text_encoder=self._text_encoder_2,
+        )
 
         return prompt_embeds, pooled_prompt_embeds
 
@@ -481,7 +475,6 @@ def _get_t5_prompt_embeds(
     *,
     num_images_per_prompt: int,
     max_sequence_length: int,
-    device: ttnn.device,
     tokenizer: T5TokenizerFast,
     text_encoder: T5EncoderModel,
 ) -> torch.Tensor:
