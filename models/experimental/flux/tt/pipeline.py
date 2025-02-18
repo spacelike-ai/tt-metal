@@ -38,7 +38,7 @@ class TtFluxPipeline:
         logger.info("creating TT-NN transformer...")
 
         parameters = TtFluxTransformer2DModelParameters.from_torch(
-            torch_transformer.state_dict(), device=device, dtype=ttnn.bfloat16
+            torch_transformer.state_dict(), device=device, dtype=ttnn.bfloat8_b
         )
         self._tt_transformer = TtFluxTransformer2DModel(
             parameters, num_attention_heads=torch_transformer.config.num_attention_heads
