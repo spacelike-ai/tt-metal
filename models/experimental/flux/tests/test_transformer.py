@@ -27,9 +27,10 @@ from ..tt.utils import allocate_tensor_on_device_like, assert_quality
         # (True, True),
     ],
 )
+@pytest.mark.parametrize("mesh_device", [(1, 2)], indirect=True)
 def test_transformer(  # noqa: PLR0915
     *,
-    device: ttnn.Device,
+    mesh_device: ttnn.MeshDevice,
     use_program_cache: bool,
     use_tracing: bool,
     batch_size: int,
@@ -37,7 +38,8 @@ def test_transformer(  # noqa: PLR0915
     spatial_sequence_lenght: int,
 ) -> None:
     if use_program_cache:
-        ttnn.enable_program_cache(device)
+        for device in mesh_device.get_devices():
+            device.enable_program_cache()
 
     logger.info("loading model...")
     torch_model = FluxTransformer2DModel.from_pretrained("black-forest-labs/FLUX.1-schnell", subfolder="transformer")
@@ -71,7 +73,7 @@ def test_transformer(  # noqa: PLR0915
 
     logger.info("creating TT-NN model...")
     parameters = TtFluxTransformer2DModelParameters.from_torch(
-        torch_model_bfloat16.state_dict(), device=device, dtype=ttnn.bfloat8_b
+        torch_model_bfloat16.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
     )
     tt_model = TtFluxTransformer2DModel(parameters, num_attention_heads=torch_model_bfloat16.config.num_attention_heads)
 
@@ -82,12 +84,12 @@ def test_transformer(  # noqa: PLR0915
     tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
     tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
 
-    tt_spatial = allocate_tensor_on_device_like(tt_spatial_host, device=device)
-    tt_prompt = allocate_tensor_on_device_like(tt_prompt_host, device=device)
-    tt_pooled_projection = allocate_tensor_on_device_like(tt_pooled_projection_host, device=device)
-    tt_timestep = allocate_tensor_on_device_like(tt_timestep_host, device=device)
-    tt_imagerot1 = allocate_tensor_on_device_like(tt_imagerot1_host, device=device)
-    tt_imagerot2 = allocate_tensor_on_device_like(tt_imagerot2_host, device=device)
+    tt_spatial = allocate_tensor_on_device_like(tt_spatial_host, device=mesh_device)
+    tt_prompt = allocate_tensor_on_device_like(tt_prompt_host, device=mesh_device)
+    tt_pooled_projection = allocate_tensor_on_device_like(tt_pooled_projection_host, device=mesh_device)
+    tt_timestep = allocate_tensor_on_device_like(tt_timestep_host, device=mesh_device)
+    tt_imagerot1 = allocate_tensor_on_device_like(tt_imagerot1_host, device=mesh_device)
+    tt_imagerot2 = allocate_tensor_on_device_like(tt_imagerot2_host, device=mesh_device)
 
     model_args = dict(  # noqa: C408
         spatial=tt_spatial,
@@ -104,9 +106,9 @@ def test_transformer(  # noqa: PLR0915
 
         # trace
         logger.info("tracing...")
-        tid = ttnn.begin_trace_capture(device)
+        tid = ttnn.begin_trace_capture(mesh_device)
         tt_output = tt_model(**model_args)
-        ttnn.end_trace_capture(device, tid)
+        ttnn.end_trace_capture(mesh_device, tid)
 
         # execute
         logger.info("executing...")
@@ -116,7 +118,7 @@ def test_transformer(  # noqa: PLR0915
         ttnn.copy_host_to_device_tensor(tt_timestep_host, tt_timestep)
         ttnn.copy_host_to_device_tensor(tt_imagerot1_host, tt_imagerot1)
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
-        ttnn.execute_trace(device, tid)
+        ttnn.execute_trace(mesh_device, tid)
     else:
         # compile
         logger.info("compiling...")
