@@ -47,10 +47,11 @@ def test_transformer_block(
             device.enable_program_cache()
 
     parent_torch_model = FluxTransformer2DModel.from_pretrained(
-        "black-forest-labs/FLUX.1-schnell", subfolder="transformer"
+        "black-forest-labs/FLUX.1-schnell", subfolder="transformer", torch_dtype=torch.bfloat16
     )
-    torch_model: TransformerBlock = parent_torch_model.transformer_blocks[block_index]
+    torch_model: TransformerBlock = parent_torch_model.transformer_blocks[block_index].to(torch.float32)
     torch_model.eval()
+    del parent_torch_model
 
     parameters = TtTransformerBlockParameters.from_torch(
         torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b

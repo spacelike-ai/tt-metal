@@ -31,13 +31,12 @@ def test_timestep_embedding(
     device: ttnn.Device,
     batch_size: int,
 ) -> None:
-    dtype = torch.bfloat16
-
     parent_torch_model = FluxTransformer2DModel.from_pretrained(
-        "black-forest-labs/FLUX.1-schnell", subfolder="transformer", torch_dtype=dtype
+        "black-forest-labs/FLUX.1-schnell", subfolder="transformer", torch_dtype=torch.bfloat16
     )
-    torch_model: CombinedTimestepTextProjEmbeddings = parent_torch_model.time_text_embed
+    torch_model: CombinedTimestepTextProjEmbeddings = parent_torch_model.time_text_embed.to(torch.float32)
     torch_model.eval()
+    del parent_torch_model
 
     parameters = TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(
         torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b
@@ -45,11 +44,13 @@ def test_timestep_embedding(
     tt_model = TtCombinedTimestepTextProjEmbeddings(parameters)
 
     torch.manual_seed(0)
-    timestep = torch.randint(1000, (batch_size,), dtype=torch.float32)
-    pooled_projection = torch.randn((batch_size, 768), dtype=dtype)
+    timestep = torch.randint(1000, (batch_size,))
+    pooled_projection = torch.randn((batch_size, 768))
 
-    tt_timestep = ttnn.from_torch(timestep.unsqueeze(1), device=device, layout=ttnn.TILE_LAYOUT)
-    tt_pooled_projection = ttnn.from_torch(pooled_projection, device=device, layout=ttnn.TILE_LAYOUT)
+    tt_timestep = ttnn.from_torch(timestep.unsqueeze(1), device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
+    tt_pooled_projection = ttnn.from_torch(
+        pooled_projection, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+    )
 
     torch_output = torch_model(timestep, pooled_projection)
 

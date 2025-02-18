@@ -48,10 +48,11 @@ def test_attention(
     separate_prompt = prompt_sequence_length != 0
 
     parent_torch_model = FluxTransformer2DModel.from_pretrained(
-        "black-forest-labs/FLUX.1-schnell", subfolder="transformer"
+        "black-forest-labs/FLUX.1-schnell", subfolder="transformer", torch_dtype=torch.bfloat16
     )
-    torch_model: Attention = parent_torch_model.transformer_blocks[block_index].attn
+    torch_model: Attention = parent_torch_model.transformer_blocks[block_index].attn.to(torch.float32)
     torch_model.eval()
+    del parent_torch_model
 
     parameters = TtAttentionParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b)
     tt_model = TtAttention(parameters, num_heads=torch_model.num_heads)
