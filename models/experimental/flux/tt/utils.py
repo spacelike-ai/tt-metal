@@ -32,7 +32,13 @@ def from_torch_fast(
     if device is None or layout is None or layout == ttnn.ROW_MAJOR_LAYOUT or isinstance(device, ttnn.MeshDevice):
         return ttnn.from_torch(t, device=device, layout=layout, dtype=dtype)
 
-    tensor = ttnn.from_torch(t, device=device)
+    try:
+        tensor = ttnn.from_torch(t, device=device)
+    except RuntimeError as e:
+        # https://github.com/tenstorrent/tt-metal/issues/16861
+        if "TODO: add support for multi-paged buffer with page size > 64KB" in str(e):
+            return ttnn.from_torch(t, device=device, layout=layout, dtype=dtype)
+        raise
 
     new = ttnn.to_layout(tensor, layout, dtype=dtype, memory_config=memory_config)
     ttnn.deallocate(tensor)
