@@ -57,7 +57,7 @@ class TtFluxTransformer2DModelParameters:
                 for s in indexed_substates(state, "transformer_blocks")
             ],
             single_transformer_blocks=[
-                TtFluxSingleTransformerBlockParameters.from_torch(s, dtype=dtype, device=device, linear_on_host=i > 20)
+                TtFluxSingleTransformerBlockParameters.from_torch(s, dtype=dtype, device=device, linear_on_host=i > 10)
                 for i, s in enumerate(indexed_substates(state, "single_transformer_blocks"))
             ],
             time_embed_out=TtLinearParameters.from_torch(
