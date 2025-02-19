@@ -694,3 +694,14 @@ def test_all_gather_multiple_submeshes(mesh_device):
     submesh_devices = mesh_device.create_submeshes(ttnn.MeshShape(2, 2))
     for submesh in submesh_devices:
         model(submesh)
+
+
+def test_distribute_api(mesh_device):
+    torch_hidden_states = torch.rand((1, 1, 32, 32), dtype=torch.bfloat16)
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
+        hidden_states = ttnn.from_torch(
+            torch_hidden_states,
+            dtype=ttnn.bfloat8_b,
+            layout=ttnn.TILE_LAYOUT,
+            device=mesh_device,
+        )

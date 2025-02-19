@@ -22,7 +22,7 @@ def test_sd3(
 ) -> None:
     pipeline = TtFluxPipeline(checkpoint="black-forest-labs/FLUX.1-schnell", device=device)
 
-    pipeline.prepare(width=512, height=512, prompt_count=1, num_images_per_prompt=1)
+    pipeline.prepare(width=1024, height=1024, prompt_count=1, num_images_per_prompt=1)
 
     prompt = "A luxury sports car."
 
@@ -40,4 +40,4 @@ def test_sd3(
             seed=0,
         )
 
-        images[0].save("flux_512.png")
+        images[0].save("flux_1024.png")
