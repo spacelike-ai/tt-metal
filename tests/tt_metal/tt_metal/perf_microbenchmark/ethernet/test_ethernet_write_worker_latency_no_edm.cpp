@@ -27,6 +27,8 @@
 
 #include <tt-metalium/persistent_kernel_cache.hpp>
 
+#include "tests/tt_metal/tt_metal/test_kernels/dataflow/unit_tests/erisc/eth_ubenchmark_types.hpp"
+
 // TODO: ARCH_NAME specific, must remove
 #include "eth_l1_address_map.h"
 
@@ -72,14 +74,14 @@ private:
     bool device_open;
 };
 
-void validation(const std::shared_ptr<tt::tt_metal::Buffer>& worker_buffer) {
-    std::vector<uint8_t> golden_vec(worker_buffer->size(), 0);
-    std::vector<uint8_t> result_vec(worker_buffer->size(), 0);
+void validation(const std::shared_ptr<tt::tt_metal::Buffer>& worker_buffer_0) {
+    std::vector<uint8_t> golden_vec(worker_buffer_0->size(), 0);
+    std::vector<uint8_t> result_vec(worker_buffer_0->size(), 0);
 
-    for (int i = 0; i < worker_buffer->size(); ++i) {
+    for (int i = 0; i < worker_buffer_0->size(); ++i) {
         golden_vec[i] = i;
     }
-    tt::tt_metal::detail::ReadFromBuffer(worker_buffer, result_vec);
+    tt::tt_metal::detail::ReadFromBuffer(worker_buffer_0, result_vec);
 
     bool pass = golden_vec == result_vec;
     TT_FATAL(pass, "validation failed");
@@ -94,9 +96,13 @@ std::vector<Program> build(
     std::size_t num_samples,
     std::size_t sample_page_size,
     std::size_t num_buffer_slots,
+    uint32_t benchmark_type,
     KernelHandle& local_kernel,
     KernelHandle& remote_kernel,
-    std::shared_ptr<Buffer>& worker_buffer) {
+    std::shared_ptr<Buffer>& worker_buffer_0,
+    std::shared_ptr<Buffer>& worker_buffer_1,
+    bool test_latency,
+    bool disable_trid) {
     Program program0;
     Program program1;
 
@@ -104,12 +110,29 @@ std::vector<Program> build(
     uint32_t worker_noc_x = device1->worker_core_from_logical_core(worker_core).x;
     uint32_t worker_noc_y = device1->worker_core_from_logical_core(worker_core).y;
 
-    uint32_t worker_buffer_addr = worker_buffer->address();
+    uint32_t worker_buffer_0_addr = worker_buffer_0->address();
+    uint32_t worker_buffer_1_addr = worker_buffer_1->address();
+
+    uint32_t measurement_type = (uint32_t)(test_latency ? MeasurementType::Latency : MeasurementType::Bandwidth);
 
     // eth core ct args
-    const std::vector<uint32_t>& eth_sender_ct_args = {num_buffer_slots};
+    const std::vector<uint32_t>& eth_sender_ct_args = {
+        benchmark_type,
+        measurement_type,
+        num_buffer_slots,
+        worker_noc_x,
+        worker_noc_y,
+        worker_buffer_0_addr,
+        uint32_t(disable_trid)};
+
     const std::vector<uint32_t>& eth_receiver_ct_args = {
-        num_buffer_slots, worker_noc_x, worker_noc_y, worker_buffer_addr};
+        benchmark_type,
+        measurement_type,
+        num_buffer_slots,
+        worker_noc_x,
+        worker_noc_y,
+        worker_buffer_1_addr,
+        uint32_t(disable_trid)};
 
     // eth core rt args
     const std::vector<uint32_t>& eth_sender_receiver_rt_args = {
@@ -149,7 +172,13 @@ std::vector<Program> build(
 }
 
 void run(
-    IDevice* device0, IDevice* device1, Program& program0, Program& program1, std::shared_ptr<Buffer>& worker_buffer) {
+    IDevice* device0,
+    IDevice* device1,
+    Program& program0,
+    Program& program1,
+    BenchmarkType benchmark_type,
+    std::shared_ptr<Buffer>& worker_buffer_0,
+    std::shared_ptr<Buffer>& worker_buffer_1) {
     if (std::getenv("TT_METAL_SLOW_DISPATCH_MODE")) {
         std::thread th2 = std::thread([&] { tt_metal::detail::LaunchProgram(device0, program0); });
         std::thread th1 = std::thread([&] { tt_metal::detail::LaunchProgram(device1, program1); });
@@ -167,14 +196,30 @@ void run(
     tt::tt_metal::detail::DumpDeviceProfileResults(device0);
     tt::tt_metal::detail::DumpDeviceProfileResults(device1);
 
-    validation(worker_buffer);
+    if (benchmark_type == BenchmarkType::EthEthTensixUniDir or benchmark_type == BenchmarkType::EthEthTensixBiDir) {
+        validation(worker_buffer_1);
+        if (benchmark_type == BenchmarkType::EthEthTensixBiDir) {
+            validation(worker_buffer_0);
+        }
+    }
 }
 
 int main(int argc, char** argv) {
     std::size_t arg_idx = 1;
+    uint32_t benchmark_type = (uint32_t)std::stoi(argv[arg_idx++]);
+
+    auto benchmark_type_enum = magic_enum::enum_cast<BenchmarkType>(benchmark_type);
+    TT_FATAL(
+        benchmark_type_enum.has_value(),
+        "Unsupported benchmark {} specified, check BenchmarkType enum for supported values",
+        benchmark_type);
+
     std::size_t num_samples = std::stoi(argv[arg_idx++]);
     std::size_t sample_page_size = std::stoi(argv[arg_idx++]);
     std::size_t num_buffer_slots = std::stoi(argv[arg_idx++]);
+
+    bool test_latency = std::stoi(argv[arg_idx++]);
+    bool disable_trid = std::stoi(argv[arg_idx++]);
 
     auto arch = tt::get_arch_from_string(tt::test_utils::get_umd_arch_name());
     auto num_devices = tt::tt_metal::GetNumAvailableDevices();
@@ -220,7 +265,9 @@ int main(int argc, char** argv) {
     try {
         log_info(
             tt::LogTest,
-            "num_samples: {}, sample_page_size: {}, num_buffer_slots: {}",
+            "benchmark type: {}, measurement type: {}, num_samples: {}, sample_page_size: {}, num_buffer_slots: {}",
+            magic_enum::enum_name(benchmark_type_enum.value()),
+            magic_enum::enum_name(test_latency ? MeasurementType::Latency : MeasurementType::Bandwidth),
             num_samples,
             sample_page_size,
             num_buffer_slots);
@@ -233,7 +280,13 @@ int main(int argc, char** argv) {
                 ShardOrientation::ROW_MAJOR,
                 {1, sample_page_size},
                 {1, sample_page_size});
-            auto worker_buffer = CreateBuffer(tt::tt_metal::ShardedBufferConfig{
+            auto worker_buffer_0 = CreateBuffer(tt::tt_metal::ShardedBufferConfig{
+                .device = device_0,
+                .size = sample_page_size,
+                .page_size = sample_page_size,
+                .buffer_layout = TensorMemoryLayout::HEIGHT_SHARDED,
+                .shard_parameters = shard_spec});
+            auto worker_buffer_1 = CreateBuffer(tt::tt_metal::ShardedBufferConfig{
                 .device = device_1,
                 .size = sample_page_size,
                 .page_size = sample_page_size,
@@ -249,10 +302,20 @@ int main(int argc, char** argv) {
                 num_samples,
                 sample_page_size,
                 num_buffer_slots,
+                benchmark_type,
                 local_kernel,
                 remote_kernel,
-                worker_buffer);
-            run(device_0, device_1, programs[0], programs[1], worker_buffer);
+                worker_buffer_0,
+                worker_buffer_1,
+                test_latency,
+                disable_trid);
+            run(device_0,
+                device_1,
+                programs[0],
+                programs[1],
+                benchmark_type_enum.value(),
+                worker_buffer_0,
+                worker_buffer_1);
         } catch (std::exception& e) {
             log_error(tt::LogTest, "Caught exception: {}", e.what());
             test_fixture.TearDown();

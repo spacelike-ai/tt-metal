@@ -11,7 +11,7 @@ from loguru import logger
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
 
-from ttnn import ShardTensorToMesh, ReplicateTensorToMesh, ConcatMeshToTensor, ListMeshToTensor
+from ttnn import ShardTensorToMesh, ReplicateTensorToMesh, ConcatMeshToTensor
 
 
 #######
@@ -183,7 +183,7 @@ def test_multi_device_check_per_device_shard(mesh_device, layout, memory_config,
 @pytest.mark.parametrize("memory_config", [ttnn.DRAM_MEMORY_CONFIG, ttnn.L1_MEMORY_CONFIG])
 def test_multi_device_replicate(mesh_device, shape, layout, memory_config):
     """Test ReplicateTensorToMesh to broadcast a tensor across multiple devices"""
-    from ttnn import ReplicateTensorToMesh, ListMeshToTensor
+    from ttnn import ReplicateTensorToMesh
 
     full_tensor = torch.rand(shape, dtype=torch.bfloat16)
 
@@ -196,7 +196,9 @@ def test_multi_device_replicate(mesh_device, shape, layout, memory_config):
     )
     ttnn_tensor = ttnn.to_device(ttnn_tensor, mesh_device)
     ttnn_loop_back_tensor = ttnn.from_device(ttnn_tensor)
-    loopback_replicated_tensors = ttnn.to_torch(ttnn_loop_back_tensor, mesh_composer=ListMeshToTensor(mesh_device))
+    loopback_replicated_tensors = [
+        ttnn.to_torch(shard) for shard in ttnn.get_device_tensors(ttnn_loop_back_tensor.cpu())
+    ]
     for loopback_replicated_tensor in loopback_replicated_tensors:
         assert torch.all(full_tensor == loopback_replicated_tensor)
 
@@ -694,6 +696,28 @@ def test_all_gather_multiple_submeshes(mesh_device):
     submesh_devices = mesh_device.create_submeshes(ttnn.MeshShape(2, 2))
     for submesh in submesh_devices:
         model(submesh)
+
+
+@pytest.mark.parametrize("mesh_device", [pytest.param((1, 8), id="1x8_line")], indirect=True)
+def test_line_all_gather_after_reshape(mesh_device):
+    if mesh_device.get_num_devices() < 8:
+        pytest.skip()
+    mesh_device.reshape(ttnn.MeshShape(2, 4))
+    torch_input_tensor = torch.rand((1, 1, 64, 128), dtype=torch.bfloat16)
+
+    mesh_tensor = ttnn.from_torch(
+        torch_input_tensor,
+        layout=ttnn.TILE_LAYOUT,
+        device=mesh_device,
+        mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=list(mesh_device.shape), dims=(2, 3)),
+    )
+    output_tensor = ttnn.all_gather(
+        mesh_tensor,
+        dim=2,
+        cluster_axis=0,
+        mesh_device=mesh_device,
+        topology=ttnn.Topology.Linear,
+    )
 
 
 def test_distribute_api(mesh_device):

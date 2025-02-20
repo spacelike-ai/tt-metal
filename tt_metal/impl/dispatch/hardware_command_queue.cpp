@@ -12,6 +12,8 @@
 #include <tt-metalium/command_queue_interface.hpp>
 #include <tt-metalium/dispatch_settings.hpp>
 
+#include "tt_cluster.hpp"
+
 // Because we are a Friend of Program, accessing Program::get_program_transfer_info() and Program::get_kernels_buffer()
 // MUST REMOVE
 #include <program_impl.hpp>
@@ -89,21 +91,6 @@ std::optional<uint32_t> HWCommandQueue::tid() const { return this->tid_; }
 
 SystemMemoryManager& HWCommandQueue::sysmem_manager() { return this->manager; }
 
-uint32_t HWCommandQueue::get_expected_num_workers_completed_for_sub_device(uint32_t sub_device_index) const {
-    TT_FATAL(
-        sub_device_index < DispatchSettings::DISPATCH_MESSAGE_ENTRIES,
-        "Expected sub_device_index to be less than DispatchSettings::DISPATCH_MESSAGE_ENTRIES");
-    return this->expected_num_workers_completed[sub_device_index];
-}
-
-void HWCommandQueue::set_expected_num_workers_completed_for_sub_device(
-    uint32_t sub_device_index, uint32_t num_workers) {
-    TT_FATAL(
-        sub_device_index < DispatchSettings::DISPATCH_MESSAGE_ENTRIES,
-        "Expected sub_device_index to be less than DispatchSettings::DISPATCH_MESSAGE_ENTRIES");
-    this->expected_num_workers_completed[sub_device_index] = num_workers;
-}
-
 void HWCommandQueue::reset_worker_state(
     bool reset_launch_msg_state, uint32_t num_sub_devices, const vector_memcpy_aligned<uint32_t>& go_signal_noc_data) {
     TT_FATAL(!this->manager.get_bypass_mode(), "Cannot reset worker state during trace capture");
@@ -180,45 +167,37 @@ void HWCommandQueue::enqueue_command(T& command, bool blocking, tt::stl::Span<co
     }
 }
 
-void HWCommandQueue::enqueue_read_buffer(
-    std::shared_ptr<Buffer>& buffer,
-    void* dst,
-    const BufferRegion& region,
-    bool blocking,
-    tt::stl::Span<const SubDeviceId> sub_device_ids) {
-    this->enqueue_read_buffer(*buffer, dst, region, blocking, sub_device_ids);
-}
-
 // Read buffer command is enqueued in the issue region and device writes requested buffer data into the completion
 // region
 void HWCommandQueue::enqueue_read_buffer(
-    Buffer& buffer,
+    const std::variant<std::reference_wrapper<Buffer>, std::shared_ptr<Buffer>>& buffer,
     void* dst,
     const BufferRegion& region,
     bool blocking,
     tt::stl::Span<const SubDeviceId> sub_device_ids) {
     ZoneScopedN("HWCommandQueue_read_buffer");
     TT_FATAL(!this->manager.get_bypass_mode(), "Enqueue Read Buffer cannot be used with tracing");
+    Buffer& buffer_obj = get_buffer_object(buffer);
     sub_device_ids = buffer_dispatch::select_sub_device_ids(this->device_, sub_device_ids);
 
-    if (is_sharded(buffer.buffer_layout())) {
+    if (is_sharded(buffer_obj.buffer_layout())) {
         // Forward data from each core to the completion queue.
         // Then have the completion queue reader thread copy this data to user space.
         auto dispatch_params = buffer_dispatch::initialize_sharded_buf_read_dispatch_params(
-            buffer, this->id_, this->expected_num_workers_completed, region);
+            buffer_obj, this->id_, this->expected_num_workers_completed, region);
         auto cores = buffer_dispatch::get_cores_for_sharded_buffer(
-            dispatch_params.width_split, dispatch_params.buffer_page_mapping, buffer);
-        for (uint32_t core_id = 0; core_id < buffer.num_cores(); ++core_id) {
+            dispatch_params.width_split, dispatch_params.buffer_page_mapping, buffer_obj);
+        for (uint32_t core_id = 0; core_id < buffer_obj.num_cores(); ++core_id) {
             buffer_dispatch::copy_sharded_buffer_from_core_to_completion_queue(
                 core_id,
-                buffer,
+                buffer_obj,
                 dispatch_params,
                 sub_device_ids,
                 cores[core_id],
                 dispatch_core_manager::instance().get_dispatch_core_type(device_->id()));
             if (dispatch_params.pages_per_txn > 0) {
                 this->issued_completion_q_reads.push(
-                    buffer_dispatch::generate_sharded_buffer_read_descriptor(dst, dispatch_params, buffer));
+                    buffer_dispatch::generate_sharded_buffer_read_descriptor(dst, dispatch_params, buffer_obj));
                 this->increment_num_entries_in_completion_q();
             }
         }
@@ -226,15 +205,15 @@ void HWCommandQueue::enqueue_read_buffer(
         // Forward data from device to the completion queue.
         // Then have the completion queue reader thread copy this data to user space.
         auto dispatch_params = buffer_dispatch::initialize_interleaved_buf_read_dispatch_params(
-            buffer, this->id_, this->expected_num_workers_completed, region);
+            buffer_obj, this->id_, this->expected_num_workers_completed, region);
         buffer_dispatch::copy_interleaved_buffer_to_completion_queue(
             dispatch_params,
-            buffer,
+            buffer_obj,
             sub_device_ids,
             dispatch_core_manager::instance().get_dispatch_core_type(device_->id()));
         if (dispatch_params.pages_per_txn > 0) {
             this->issued_completion_q_reads.push(
-                buffer_dispatch::generate_interleaved_buffer_read_descriptor(dst, dispatch_params, buffer));
+                buffer_dispatch::generate_interleaved_buffer_read_descriptor(dst, dispatch_params, buffer_obj));
             this->increment_num_entries_in_completion_q();
         }
     }
@@ -249,6 +228,8 @@ void HWCommandQueue::enqueue_write_buffer(
     const BufferRegion& region,
     bool blocking,
     tt::stl::Span<const SubDeviceId> sub_device_ids) {
+    ZoneScopedN("HWCommandQueue_write_buffer");
+    TT_FATAL(!this->manager.get_bypass_mode(), "Enqueue Write Buffer cannot be used with tracing");
     // Top level API to accept different variants for buffer and src
     // For shared pointer variants, object lifetime is guaranteed at least till the end of this function
     auto* data = std::visit(
@@ -257,31 +238,20 @@ void HWCommandQueue::enqueue_write_buffer(
             [](const auto& data) -> const void* { return data->data(); }},
         src);
     Buffer& buffer_obj = get_buffer_object(buffer);
-    this->enqueue_write_buffer(buffer_obj, data, region, blocking, sub_device_ids);
-}
-
-CoreType HWCommandQueue::get_dispatch_core_type() {
-    return dispatch_core_manager::instance().get_dispatch_core_type(device_->id());
-}
-
-void HWCommandQueue::enqueue_write_buffer(
-    Buffer& buffer,
-    const void* src,
-    const BufferRegion& region,
-    bool blocking,
-    tt::stl::Span<const SubDeviceId> sub_device_ids) {
-    ZoneScopedN("HWCommandQueue_write_buffer");
-    TT_FATAL(!this->manager.get_bypass_mode(), "Enqueue Write Buffer cannot be used with tracing");
 
     sub_device_ids = buffer_dispatch::select_sub_device_ids(this->device_, sub_device_ids);
     auto dispatch_core_type = dispatch_core_manager::instance().get_dispatch_core_type(device_->id());
 
     buffer_dispatch::write_to_device_buffer(
-        src, buffer, region, this->id_, this->expected_num_workers_completed, dispatch_core_type, sub_device_ids);
+        data, buffer_obj, region, this->id_, this->expected_num_workers_completed, dispatch_core_type, sub_device_ids);
 
     if (blocking) {
         this->finish(sub_device_ids);
     }
+}
+
+CoreType HWCommandQueue::get_dispatch_core_type() {
+    return dispatch_core_manager::instance().get_dispatch_core_type(device_->id());
 }
 
 void HWCommandQueue::enqueue_program(Program& program, bool blocking) {
@@ -399,7 +369,7 @@ void HWCommandQueue::enqueue_program(Program& program, bool blocking) {
 }
 
 void HWCommandQueue::enqueue_record_event(
-    const std::shared_ptr<Event>& event, bool clear_count, tt::stl::Span<const SubDeviceId> sub_device_ids) {
+    const std::shared_ptr<Event>& event, tt::stl::Span<const SubDeviceId> sub_device_ids) {
     ZoneScopedN("HWCommandQueue_enqueue_record_event");
 
     TT_FATAL(!this->manager.get_bypass_mode(), "Enqueue Record Event cannot be used with tracing");
@@ -413,38 +383,22 @@ void HWCommandQueue::enqueue_record_event(
     event->ready = true;  // what does this mean???
 
     sub_device_ids = buffer_dispatch::select_sub_device_ids(this->device_, sub_device_ids);
-
-    auto command = EnqueueRecordEventCommand(
-        this->id_,
-        this->device_,
-        this->noc_index_,
-        this->manager,
+    event_dispatch::issue_record_event_commands(
+        device_,
         event->event_id,
-        this->expected_num_workers_completed,
+        id_,
+        device_->num_hw_cqs(),
+        this->manager,
         sub_device_ids,
-        clear_count,
-        true);
-    this->enqueue_command(command, false, sub_device_ids);
-
-    if (clear_count) {
-        for (const auto& id : sub_device_ids) {
-            this->expected_num_workers_completed[id.to_index()] = 0;
-        }
-    }
+        this->expected_num_workers_completed);
     this->issued_completion_q_reads.push(
         std::make_shared<CompletionReaderVariant>(std::in_place_type<ReadEventDescriptor>, event->event_id));
     this->increment_num_entries_in_completion_q();
 }
 
-void HWCommandQueue::enqueue_wait_for_event(const std::shared_ptr<Event>& sync_event, bool clear_count) {
+void HWCommandQueue::enqueue_wait_for_event(const std::shared_ptr<Event>& sync_event) {
     ZoneScopedN("HWCommandQueue_enqueue_wait_for_event");
-
-    auto command = EnqueueWaitForEventCommand(this->id_, this->device_, this->manager, *sync_event, clear_count);
-    this->enqueue_command(command, false, {});
-
-    if (clear_count) {
-        this->manager.reset_event_id(this->id_);
-    }
+    event_dispatch::issue_wait_for_event_commands(id_, sync_event->cq_id, this->manager, sync_event->event_id);
 }
 
 void HWCommandQueue::enqueue_trace(const uint32_t trace_id, bool blocking) {
@@ -528,29 +482,8 @@ void HWCommandQueue::read_completion_queue() {
                                 this->exit_condition);
                         } else if constexpr (std::is_same_v<T, ReadEventDescriptor>) {
                             ZoneScopedN("CompletionQueueReadEvent");
-                            uint32_t read_ptr = this->manager.get_completion_queue_read_ptr(this->id_);
-                            thread_local static std::vector<uint32_t> dispatch_cmd_and_event(
-                                (sizeof(CQDispatchCmd) + DispatchSettings::EVENT_PADDED_SIZE) / sizeof(uint32_t));
-                            tt::Cluster::instance().read_sysmem(
-                                dispatch_cmd_and_event.data(),
-                                sizeof(CQDispatchCmd) + DispatchSettings::EVENT_PADDED_SIZE,
-                                read_ptr,
-                                mmio_device_id,
-                                channel);
-                            uint32_t event_completed = dispatch_cmd_and_event[sizeof(CQDispatchCmd) / sizeof(uint32_t)];
-
-                            TT_ASSERT(
-                                event_completed == read_descriptor.event_id,
-                                "Event Order Issue: expected to read back completion signal for event {} but got {}!",
-                                read_descriptor.event_id,
-                                event_completed);
-                            this->manager.completion_queue_pop_front(1, this->id_);
-                            this->manager.set_last_completed_event(this->id_, read_descriptor.get_global_event_id());
-                            log_trace(
-                                LogAlways,
-                                "Completion queue popped event {} (global: {})",
-                                event_completed,
-                                read_descriptor.get_global_event_id());
+                            event_dispatch::read_events_from_completion_queue(
+                                read_descriptor, mmio_device_id, channel, this->id_, this->manager);
                         }
                     },
                     read_descriptor);
@@ -570,7 +503,7 @@ void HWCommandQueue::finish(tt::stl::Span<const SubDeviceId> sub_device_ids) {
     ZoneScopedN("HWCommandQueue_finish");
     tt::log_debug(tt::LogDispatch, "Finish for command queue {}", this->id_);
     std::shared_ptr<Event> event = std::make_shared<Event>();
-    this->enqueue_record_event(event, false, sub_device_ids);
+    this->enqueue_record_event(event, sub_device_ids);
     if (tt::llrt::RunTimeOptions::get_instance().get_test_mode_enabled()) {
         while (this->num_entries_in_completion_q > this->num_completed_completion_q_reads) {
             if (DPrintServerHangDetected()) {
@@ -599,8 +532,6 @@ volatile bool HWCommandQueue::is_noc_hung() { return illegal_noc_txn_hang; }
 const CoreCoord& HWCommandQueue::virtual_enqueue_program_dispatch_core() const {
     return this->virtual_enqueue_program_dispatch_core_;
 }
-
-const CoreCoord& HWCommandQueue::completion_queue_writer_core() const { return this->completion_queue_writer_core_; }
 
 void HWCommandQueue::record_begin(const uint32_t tid, const std::shared_ptr<TraceDescriptor>& ctx) {
     auto num_sub_devices = this->device_->num_sub_devices();

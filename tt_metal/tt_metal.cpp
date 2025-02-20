@@ -35,6 +35,7 @@
 #include "tracy/Tracy.hpp"
 
 #include <graph_tracking.hpp>
+#include "lightmetal/host_api_capture_helpers.hpp"
 
 #include "llrt.hpp"
 
@@ -292,8 +293,6 @@ inline void SetRuntimeArgsImpl(
 
 }  // namespace
 
-// #define DEBUG_PRINT_SHARD
-
 namespace detail {
 
 bool WriteToDeviceDRAMChannel(IDevice* device, int dram_channel, uint32_t address, std::vector<uint32_t>& host_buffer) {
@@ -337,10 +336,11 @@ bool ReadFromDeviceL1(
     const CoreCoord& logical_core,
     uint32_t address,
     uint32_t size,
-    std::vector<uint32_t>& host_buffer) {
+    std::vector<uint32_t>& host_buffer,
+    CoreType core_type) {
     tt::Cluster::instance().l1_barrier(device->id());
-    auto worker_core = device->worker_core_from_logical_core(logical_core);
-    host_buffer = llrt::read_hex_vec_from_core(device->id(), worker_core, address, size);
+    auto virtual_core = device->virtual_core_from_logical_core(logical_core, core_type);
+    host_buffer = llrt::read_hex_vec_from_core(device->id(), virtual_core, address, size);
     return true;
 }
 
@@ -349,6 +349,10 @@ bool ReadRegFromDevice(IDevice* device, const CoreCoord& logical_core, uint32_t 
     auto worker_core = device->worker_core_from_logical_core(logical_core);
     tt::Cluster::instance().read_reg(&regval, tt_cxy_pair(device->id(), worker_core), address);
     return true;
+}
+
+void InitializeFabricSetting(detail::FabricSetting fabric_setting) {
+    tt::DevicePool::initialize_fabric_setting(detail::FabricSetting::FABRIC);
 }
 
 std::map<chip_id_t, IDevice*> CreateDevices(
@@ -585,9 +589,6 @@ void ReadFromDeviceSharded(Buffer& buffer, uint8_t* host_buffer, bool shard_orde
     TensorMemoryLayout buffer_layout = buffer.buffer_layout();
 
     auto device = buffer.device();
-#ifdef DEBUG_PRINT_SHARD
-    std::cout << "Reading From Device Height Sharded " << std::endl;
-#endif
 
     auto total_pages = buffer.num_dev_pages();
     uint32_t page_size = buffer.page_size();
@@ -933,7 +934,12 @@ bool CloseDevice(IDevice* device) {
     return tt::DevicePool::instance().close_device(device_id);
 }
 
-Program CreateProgram() { return Program(); }
+Program CreateProgram() {
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
+    auto program = Program();
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureCreateProgram, program);
+    return program;
+}
 
 KernelHandle CreateDataMovementKernel(
     Program& program,
@@ -1019,7 +1025,8 @@ KernelHandle CreateKernel(
     const std::string& file_name,
     const std::variant<CoreCoord, CoreRange, CoreRangeSet>& core_spec,
     const std::variant<DataMovementConfig, ComputeConfig, EthernetConfig>& config) {
-    return std::visit(
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
+    KernelHandle kernel = std::visit(
         [&](auto&& cfg) -> KernelHandle {
             CoreRangeSet core_ranges = GetCoreRangeSet(core_spec);
             KernelSource kernel_src(file_name, KernelSource::FILE_PATH);
@@ -1033,6 +1040,9 @@ KernelHandle CreateKernel(
             }
         },
         config);
+
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureCreateKernel, kernel, program, file_name, core_spec, config);
+    return kernel;
 }
 
 KernelHandle CreateKernelFromString(
@@ -1060,8 +1070,11 @@ CBHandle CreateCircularBuffer(
     Program& program,
     const std::variant<CoreCoord, CoreRange, CoreRangeSet>& core_spec,
     const CircularBufferConfig& config) {
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
     CoreRangeSet core_ranges = GetCoreRangeSet(core_spec);
-    return program.add_circular_buffer(core_ranges, config);
+    auto cb_handle = program.add_circular_buffer(core_ranges, config);
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureCreateCircularBuffer, cb_handle, program, core_spec, config);
+    return cb_handle;
 }
 
 const CircularBufferConfig& GetCircularBufferConfig(Program& program, CBHandle cb_handle) {
@@ -1141,7 +1154,8 @@ GlobalSemaphore CreateGlobalSemaphore(
 }
 
 std::shared_ptr<Buffer> CreateBuffer(const InterleavedBufferConfig& config) {
-    return Buffer::create(
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
+    auto buffer = Buffer::create(
         config.device,
         config.size,
         config.page_size,
@@ -1150,6 +1164,9 @@ std::shared_ptr<Buffer> CreateBuffer(const InterleavedBufferConfig& config) {
         std::nullopt,
         std::nullopt,
         std::nullopt);
+
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureCreateBuffer, buffer, config);
+    return buffer;
 }
 std::shared_ptr<Buffer> CreateBuffer(const InterleavedBufferConfig& config, DeviceAddr address) {
     return Buffer::create(
@@ -1208,7 +1225,11 @@ std::shared_ptr<Buffer> CreateBuffer(const ShardedBufferConfig& config, SubDevic
         sub_device_id);
 }
 
-void DeallocateBuffer(Buffer& buffer) { buffer.deallocate(); }
+void DeallocateBuffer(Buffer& buffer) {
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureDeallocateBuffer, buffer);
+    buffer.deallocate();
+}
 
 void AssignGlobalBufferToProgram(const std::shared_ptr<Buffer>& buffer, Program& program) {
     detail::DispatchStateCheck(not buffer->device()->using_slow_dispatch());
@@ -1220,6 +1241,8 @@ void SetRuntimeArgs(
     KernelHandle kernel_id,
     const std::variant<CoreCoord, CoreRange, CoreRangeSet>& core_spec,
     stl::Span<const uint32_t> runtime_args) {
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureSetRuntimeArgsUint32, program, kernel_id, core_spec, runtime_args);
     ZoneScoped;
     std::visit([&](auto&& core_spec) { SetRuntimeArgsImpl(program, kernel_id, core_spec, runtime_args); }, core_spec);
 }
@@ -1230,6 +1253,8 @@ void SetRuntimeArgs(
     const std::vector<CoreCoord>& core_spec,
     const std::vector<std::vector<uint32_t>>& runtime_args) {
     ZoneScoped;
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureSetRuntimeArgsUint32VecPerCore, program, kernel, core_spec, runtime_args);
     TT_FATAL(
         core_spec.size() == runtime_args.size(),
         "Mistmatch between number of cores {} and number of runtime args {} getting updated",
@@ -1246,7 +1271,9 @@ void SetRuntimeArgs(
     const std::shared_ptr<Kernel>& kernel,
     const std::variant<CoreCoord, CoreRange, CoreRangeSet>& core_spec,
     const std::shared_ptr<RuntimeArgs>& runtime_args) {
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
     detail::DispatchStateCheck(not device->using_slow_dispatch());
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureSetRuntimeArgs, device, kernel, core_spec, runtime_args);
     SetRuntimeArgsImpl(kernel, core_spec, std::move(runtime_args), false);
 }
 
@@ -1289,22 +1316,51 @@ uint32_t BeginTraceCapture(IDevice* device, const uint8_t cq_id) {
     return tid;
 }
 
-void EndTraceCapture(IDevice* device, const uint8_t cq_id, const uint32_t tid) { device->end_trace(cq_id, tid); }
+void EndTraceCapture(IDevice* device, const uint8_t cq_id, const uint32_t tid) {
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
+    device->end_trace(cq_id, tid);
+    // When light metal tracing is enabled, TraceDescriptor will be serialized via end_trace() and this
+    // will serialize the LightMetalLoadTraceId call to be used during replay to load trace back to device.
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureLoadTrace, device, cq_id, tid);
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureReplayTrace, device, cq_id, tid, true);  // blocking=true
+}
 
 void ReplayTrace(IDevice* device, const uint8_t cq_id, const uint32_t tid, const bool blocking) {
-    device->replay_trace(cq_id, tid, blocking);
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureReplayTrace, device, cq_id, tid, blocking);
+    device->replay_trace(cq_id, tid, blocking /* block_on_device */, blocking /* block_on_worker_thread */);
 }
 
-void ReleaseTrace(IDevice* device, const uint32_t tid) { device->release_trace(tid); }
+void ReleaseTrace(IDevice* device, const uint32_t tid) {
+    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
+    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureReleaseTrace, device, tid);
+    device->release_trace(tid);
+}
 
-// Light Metal Begin/End Capture APIs are stubs for now, filled in soon.
+// This is nop if compile time define not set.
 void LightMetalBeginCapture() {
-    log_warning(tt::LogMetalTrace, "Begin LightMetalBinary Capture - not yet implemented.");
+#if defined(TT_ENABLE_LIGHT_METAL_TRACE) && (TT_ENABLE_LIGHT_METAL_TRACE == 1)
+    log_debug(tt::LogMetalTrace, "Begin LightMetalBinary Capture");
+    auto& lm_capture_ctx = LightMetalCaptureContext::get();
+    lm_capture_ctx.reset();            // Clear previous traces if any, ensure tracing disabled
+    lm_capture_ctx.set_tracing(true);  // Enable tracing
+#else
+    log_warning(tt::LogMetalTrace, "TT_ENABLE_LIGHT_METAL_TRACE!=1, ignoring LightMetalBeginCapture()");
+#endif
 }
 
+// This is nop if compile time define not set, return empty vector.
 LightMetalBinary LightMetalEndCapture() {
-    log_warning(tt::LogMetalTrace, "End LightMetalBinary Capture - not yet implemented.");
+#if defined(TT_ENABLE_LIGHT_METAL_TRACE) && (TT_ENABLE_LIGHT_METAL_TRACE == 1)
+    log_debug(tt::LogMetalTrace, "End LightMetalBinary Capture");
+    auto& lm_capture_ctx = LightMetalCaptureContext::get();
+    TT_ASSERT(lm_capture_ctx.is_tracing(), "Light Metal Capture was not enabled.");
+    lm_capture_ctx.set_tracing(false);  // Disable tracing
+    return lm_capture_ctx.create_light_metal_binary();
+#else
+    log_warning(tt::LogMetalTrace, "TT_ENABLE_LIGHT_METAL_TRACE!=1, ignoring LightMetalEndCapture()");
     return {};
+#endif
 }
 
 void LoadTrace(IDevice* device, const uint8_t cq_id, const uint32_t trace_id, const TraceDescriptor& trace_desc) {
