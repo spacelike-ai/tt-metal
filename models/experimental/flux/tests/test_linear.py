@@ -25,19 +25,19 @@ def test_linear(
     input_dim: int,
     output_dim: int,
 ) -> None:
-    dtype = torch.bfloat16
-
-    torch_model = torch.nn.Linear(input_dim, output_dim).to(dtype=dtype)
+    torch_model = torch.nn.Linear(input_dim, output_dim)
     torch_model.eval()
 
     with ttnn.distribute(ttnn.ShardTensorToMesh(mesh_device, dim=-1)):
         parameters = TtLinearParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat16)
     tt_model = TtLinear(parameters)
 
-    torch_input_tensor = torch.randn((batch_size, input_dim), dtype=dtype)
+    torch_input_tensor = torch.randn((batch_size, input_dim))
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        tt_input_tensor = ttnn.from_torch(torch_input_tensor, device=mesh_device, layout=ttnn.TILE_LAYOUT)
+        tt_input_tensor = ttnn.from_torch(
+            torch_input_tensor, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+        )
 
     with torch.no_grad():
         torch_output = torch_model(torch_input_tensor)
