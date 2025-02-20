@@ -2,6 +2,9 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import pytest
@@ -25,28 +28,24 @@ if TYPE_CHECKING:
 )
 @pytest.mark.parametrize("device_params", [{"trace_region_size": 517120}], indirect=True)
 @pytest.mark.parametrize(
-    ("use_program_cache", "use_tracing"),
+    ("program_cache_enabled", "use_tracing"),
     [
         (False, False),
         # (True, False), # _apply_rotary_emb gives the wrong result when the program cache is enabled
         # (True, True),
     ],
 )
-@pytest.mark.parametrize("mesh_device", [(1, 2)], indirect=True)
+@pytest.mark.parametrize("device_type", [ttnn.Device, ttnn.MeshDevice], indirect=True)
 def test_attention(
     *,
-    mesh_device: ttnn.MeshDevice,
-    use_program_cache: bool,
+    device: ttnn.Device | ttnn.MeshDevice,
     use_tracing: bool,
     block_index: int,
     batch_size: int,
     spatial_sequence_length: int,
     prompt_sequence_length: int,
 ) -> None:
-    if use_program_cache:
-        for device in mesh_device.get_devices():
-            device.enable_program_cache()
-
+    is_mesh_device = isinstance(device, ttnn.MeshDevice)
     separate_prompt = prompt_sequence_length != 0
 
     torch.manual_seed(0)
@@ -58,8 +57,8 @@ def test_attention(
     torch_model.eval()
     del parent_torch_model
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = TtAttentionParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat16)
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
+        parameters = TtAttentionParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat16)
     tt_model = TtAttention(parameters, num_heads=torch_model.num_heads)
 
     spatial = torch.randn((batch_size, spatial_sequence_length, 3072))
@@ -67,7 +66,7 @@ def test_attention(
     imagerot1 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
     imagerot2 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
         tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
         tt_prompt_host = (
             ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16) if separate_prompt else None
@@ -80,10 +79,10 @@ def test_attention(
             spatial=spatial, prompt=prompt, image_rotary_emb=(imagerot1, imagerot2)
         )
 
-    tt_spatial = allocate_tensor_on_device_like(tt_spatial_host, device=mesh_device)
-    tt_prompt = allocate_tensor_on_device_like(tt_prompt_host, device=mesh_device) if separate_prompt else None
-    tt_imagerot1 = allocate_tensor_on_device_like(tt_imagerot1_host, device=mesh_device)
-    tt_imagerot2 = allocate_tensor_on_device_like(tt_imagerot2_host, device=mesh_device)
+    tt_spatial = allocate_tensor_on_device_like(tt_spatial_host, device=device)
+    tt_prompt = allocate_tensor_on_device_like(tt_prompt_host, device=device) if separate_prompt else None
+    tt_imagerot1 = allocate_tensor_on_device_like(tt_imagerot1_host, device=device)
+    tt_imagerot2 = allocate_tensor_on_device_like(tt_imagerot2_host, device=device)
 
     model_args = dict(  # noqa: C408
         spatial=tt_spatial,
@@ -96,9 +95,9 @@ def test_attention(
         tt_model(**model_args)
 
         # trace
-        tid = ttnn.begin_trace_capture(mesh_device)
+        tid = ttnn.begin_trace_capture(device)
         tt_spatial_output, tt_prompt_output = tt_model(**model_args)
-        ttnn.end_trace_capture(mesh_device, tid)
+        ttnn.end_trace_capture(device, tid)
 
         # execute
         ttnn.copy_host_to_device_tensor(tt_spatial_host, tt_spatial)
@@ -106,7 +105,7 @@ def test_attention(
             ttnn.copy_host_to_device_tensor(tt_prompt_host, tt_prompt)
         ttnn.copy_host_to_device_tensor(tt_imagerot1_host, tt_imagerot1)
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
-        ttnn.execute_trace(mesh_device, tid)
+        ttnn.execute_trace(device, tid)
     else:
         # compile
         tt_model(**model_args)
@@ -119,7 +118,7 @@ def test_attention(
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
         tt_spatial_output, tt_prompt_output = tt_model(**model_args)
 
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
+    with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=0)) if is_mesh_device else nullcontext():
         tt_spatial_output_torch = ttnn.to_torch(tt_spatial_output)[:batch_size]
         tt_prompt_output_torch = ttnn.to_torch(tt_prompt_output)[:batch_size] if separate_prompt else None
 
