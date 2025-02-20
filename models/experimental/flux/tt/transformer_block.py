@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -112,44 +113,44 @@ class TtTransformerBlockParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        mesh_device: ttnn.MeshDevice,
+        device: ttnn.Device | ttnn.MeshDevice,
         linear_on_host: bool = False,
     ) -> TtTransformerBlockParameters:
-        with ttnn.distribute(ttnn.ShardTensorToMesh(mesh_device, dim=-1)):
+        is_mesh_device = isinstance(device, ttnn.MeshDevice)
+
+        with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)) if is_mesh_device else nullcontext():
             spatial_ff = TtFeedForwardParameters.from_torch(
-                substate(state, "ff"), dtype=dtype, device=mesh_device, linear_on_host=linear_on_host
+                substate(state, "ff"), dtype=dtype, device=device, linear_on_host=linear_on_host
             )
             prompt_ff = (
                 TtFeedForwardParameters.from_torch(
-                    substate(state, "ff_context"), dtype=dtype, device=mesh_device, linear_on_host=linear_on_host
+                    substate(state, "ff_context"), dtype=dtype, device=device, linear_on_host=linear_on_host
                 )
                 if has_substate(state, "ff_context")
                 else None
             )
 
         return cls(
-            dual_attn=TtAttentionParameters.from_torch(substate(state, "attn"), dtype=dtype, device=mesh_device),
-            spatial_attn=TtAttentionParameters.from_torch(substate(state, "attn2"), dtype=dtype, device=mesh_device)
+            dual_attn=TtAttentionParameters.from_torch(substate(state, "attn"), dtype=dtype, device=device),
+            spatial_attn=TtAttentionParameters.from_torch(substate(state, "attn2"), dtype=dtype, device=device)
             if has_substate(state, "attn2")
             else None,
-            spatial_norm_1=TtLayerNormParameters.from_torch(
-                substate(state, "norm1.norm"), dtype=dtype, device=mesh_device
-            ),
-            spatial_norm_2=TtLayerNormParameters.from_torch(substate(state, "norm2"), dtype=dtype, device=mesh_device),
+            spatial_norm_1=TtLayerNormParameters.from_torch(substate(state, "norm1.norm"), dtype=dtype, device=device),
+            spatial_norm_2=TtLayerNormParameters.from_torch(substate(state, "norm2"), dtype=dtype, device=device),
             prompt_norm_1=TtLayerNormParameters.from_torch(
-                substate(state, "norm1_context.norm"), dtype=dtype, device=mesh_device
+                substate(state, "norm1_context.norm"), dtype=dtype, device=device
             ),
             spatial_time_embed=TtLinearParameters.from_torch(
                 substate(state, "norm1.linear"),
                 dtype=dtype,
-                device=mesh_device,
+                device=device,
                 unsqueeze_bias=True,
                 on_host=linear_on_host,
             ),
             prompt_time_embed=TtLinearParameters.from_torch(
                 substate(state, "norm1_context.linear"),
                 dtype=dtype,
-                device=mesh_device,
+                device=device,
                 unsqueeze_bias=True,
                 on_host=linear_on_host,
             ),
@@ -234,20 +235,20 @@ class TtTransformerBlock:
         return spatial_attn_scaled, prompt_attn_scaled
 
     def _spatial_ff_block(
-        self, inp: ttnn.Tensor, *, gate: ttnn.Tensor, scale: ttnn.Tensor, shift: ttnn.Tensor
+        self, inp: ttnn.Tensor, *, gate: ttnn.Tensor, scale: ttnn.Tensor, shift: ttnn.Tensor, gather: bool = False
     ) -> ttnn.Tensor:
         scaled = inp * (1 + scale) + shift
-        result = gate * self._spatial_ff(scaled)
+        result = gate * self._spatial_ff(scaled, gather=gather)
         ttnn.deallocate(scaled)
         return result
 
     def _prompt_ff_block(
-        self, inp: ttnn.Tensor, *, gate: ttnn.Tensor, scale: ttnn.Tensor, shift: ttnn.Tensor
+        self, inp: ttnn.Tensor, *, gate: ttnn.Tensor, scale: ttnn.Tensor, shift: ttnn.Tensor, gather: bool = False
     ) -> ttnn.Tensor:
         assert self._prompt_ff is not None
 
         scaled = inp * (1 + scale) + shift
-        result = gate * self._prompt_ff(scaled)
+        result = gate * self._prompt_ff(scaled, gather=gather)
         ttnn.deallocate(scaled)
         return result
 
@@ -258,6 +259,7 @@ class TtTransformerBlock:
         prompt: ttnn.Tensor,
         time_embed: ttnn.Tensor,
         image_rotary_emb: tuple[ttnn.Tensor, ttnn.Tensor] | None = None,
+        gather: bool = False,
     ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
         t = ttnn.silu(time_embed, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
@@ -362,7 +364,7 @@ class TtTransformerBlock:
         # spatial_normed = ttnn.clone(spatial_normed, dtype=ttnn.bfloat8_b)
 
         spatial += self._spatial_ff_block(
-            spatial_normed, gate=spatial_gate_ff, scale=spatial_scale_ff, shift=spatial_shift_ff
+            spatial_normed, gate=spatial_gate_ff, scale=spatial_scale_ff, shift=spatial_shift_ff, gather=gather
         )
         ttnn.deallocate(spatial_normed)
         ttnn.deallocate(spatial_gate_ff)
@@ -381,10 +383,7 @@ class TtTransformerBlock:
 
         prompt_normed = self._prompt_norm_2(prompt)
         prompt += self._prompt_ff_block(
-            prompt_normed,
-            gate=prompt_gate_ff,
-            scale=prompt_scale_ff,
-            shift=prompt_shift_ff,
+            prompt_normed, gate=prompt_gate_ff, scale=prompt_scale_ff, shift=prompt_shift_ff, gather=gather
         )
         ttnn.deallocate(prompt_normed)
         ttnn.deallocate(prompt_gate_ff)

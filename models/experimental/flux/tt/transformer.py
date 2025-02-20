@@ -42,33 +42,29 @@ class TtFluxTransformer2DModelParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        mesh_device: ttnn.MeshDevice,
+        device: ttnn.Device | ttnn.MeshDevice,
     ) -> TtFluxTransformer2DModelParameters:
         return cls(
-            x_embedder=TtLinearParameters.from_torch(substate(state, "x_embedder"), dtype=dtype, device=mesh_device),
+            x_embedder=TtLinearParameters.from_torch(substate(state, "x_embedder"), dtype=dtype, device=device),
             time_text_embed=TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(
-                substate(state, "time_text_embed"), dtype=dtype, device=mesh_device
+                substate(state, "time_text_embed"), dtype=dtype, device=device
             ),
             context_embedder=TtLinearParameters.from_torch(
-                substate(state, "context_embedder"), dtype=dtype, device=mesh_device
+                substate(state, "context_embedder"), dtype=dtype, device=device
             ),
             transformer_blocks=[
-                TtTransformerBlockParameters.from_torch(s, dtype=dtype, mesh_device=mesh_device)
+                TtTransformerBlockParameters.from_torch(s, dtype=dtype, device=device)
                 for s in indexed_substates(state, "transformer_blocks")
             ],
             single_transformer_blocks=[
-                TtFluxSingleTransformerBlockParameters.from_torch(
-                    s, dtype=dtype, device=mesh_device, linear_on_host=i > 10
-                )
+                TtFluxSingleTransformerBlockParameters.from_torch(s, dtype=dtype, device=device, linear_on_host=i > 10)
                 for i, s in enumerate(indexed_substates(state, "single_transformer_blocks"))
             ],
             time_embed_out=TtLinearParameters.from_torch(
-                substate(state, "norm_out.linear"), dtype=dtype, device=mesh_device, unsqueeze_bias=True
+                substate(state, "norm_out.linear"), dtype=dtype, device=device, unsqueeze_bias=True
             ),
-            norm_out=TtLayerNormParameters.from_torch(
-                substate(state, "norm_out.norm"), dtype=dtype, device=mesh_device
-            ),
-            proj_out=TtLinearParameters.from_torch(substate(state, "proj_out"), dtype=dtype, device=mesh_device),
+            norm_out=TtLayerNormParameters.from_torch(substate(state, "norm_out.norm"), dtype=dtype, device=device),
+            proj_out=TtLinearParameters.from_torch(substate(state, "proj_out"), dtype=dtype, device=device),
         )
 
 
@@ -98,6 +94,7 @@ class TtFluxTransformer2DModel:
         pooled_projection: ttnn.Tensor,
         timestep: ttnn.Tensor,
         image_rotary_emb: tuple[ttnn.Tensor, ttnn.Tensor],
+        gather: bool = False,
     ) -> ttnn.Tensor:
         height, width = list(spatial.shape)[-2:]
 
@@ -114,6 +111,7 @@ class TtFluxTransformer2DModel:
                 prompt=prompt,
                 time_embed=time_embed,
                 image_rotary_emb=image_rotary_emb,
+                gather=gather,
             )
 
             if i % 6 == 0:

@@ -2,6 +2,9 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import pytest
@@ -29,26 +32,23 @@ if TYPE_CHECKING:
 )
 @pytest.mark.parametrize("device_params", [{"trace_region_size": 716800}], indirect=True)
 @pytest.mark.parametrize(
-    ("use_program_cache", "use_tracing"),
+    ("program_cache_enabled", "use_tracing"),
     [
         (False, False),
         # (True, False),
         # (True, True),
     ],
 )
-@pytest.mark.parametrize("mesh_device", [(1, 2)], indirect=True)
+@pytest.mark.parametrize("device_type", [ttnn.Device, ttnn.MeshDevice], indirect=True)
 def test_single_transformer_block(
     *,
-    mesh_device: ttnn.MeshDevice,
-    use_program_cache: bool,
+    device: ttnn.Device | ttnn.MeshDevice,
     use_tracing: bool,
     block_index: int,
     batch_size: int,
     sequence_length: int,
 ) -> None:
-    if use_program_cache:
-        for device in mesh_device.get_devices():
-            device.enable_program_cache()
+    is_mesh_device = isinstance(device, ttnn.MeshDevice)
 
     torch.manual_seed(0)
 
@@ -59,9 +59,9 @@ def test_single_transformer_block(
     torch_model.eval()
     del parent_torch_model
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
         parameters = TtFluxSingleTransformerBlockParameters.from_torch(
-            torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat16
+            torch_model.state_dict(), device=device, dtype=ttnn.bfloat16
         )
     tt_model = TtFluxSingleTransformerBlock(parameters, num_heads=torch_model.num_heads)
 
@@ -72,7 +72,7 @@ def test_single_transformer_block(
     imagerot1 = torch.randn([sequence_length, 128], dtype=torch.float32)
     imagerot2 = torch.randn([sequence_length, 128], dtype=torch.float32)
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
         tt_combined_host = ttnn.from_torch(combined, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
         tt_time_host = ttnn.from_torch(time.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
         tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
@@ -81,10 +81,10 @@ def test_single_transformer_block(
     with torch.no_grad():
         combined_output = torch_model(combined=combined, time_embed=time, image_rotary_emb=(imagerot1, imagerot2))
 
-    tt_combined = allocate_tensor_on_device_like(tt_combined_host, device=mesh_device)
-    tt_time = allocate_tensor_on_device_like(tt_time_host, device=mesh_device)
-    tt_imagerot1 = allocate_tensor_on_device_like(tt_imagerot1_host, device=mesh_device)
-    tt_imagerot2 = allocate_tensor_on_device_like(tt_imagerot2_host, device=mesh_device)
+    tt_combined = allocate_tensor_on_device_like(tt_combined_host, device=device)
+    tt_time = allocate_tensor_on_device_like(tt_time_host, device=device)
+    tt_imagerot1 = allocate_tensor_on_device_like(tt_imagerot1_host, device=device)
+    tt_imagerot2 = allocate_tensor_on_device_like(tt_imagerot2_host, device=device)
 
     model_args = dict(  # noqa: C408
         combined=tt_combined,
@@ -97,16 +97,16 @@ def test_single_transformer_block(
         tt_model(**model_args)
 
         # trace
-        tid = ttnn.begin_trace_capture(mesh_device)
+        tid = ttnn.begin_trace_capture(device)
         tt_combined_output = tt_model(**model_args)
-        ttnn.end_trace_capture(mesh_device, tid)
+        ttnn.end_trace_capture(device, tid)
 
         # execute
         ttnn.copy_host_to_device_tensor(tt_combined_host, tt_combined)
         ttnn.copy_host_to_device_tensor(tt_time_host, tt_time)
         ttnn.copy_host_to_device_tensor(tt_imagerot1_host, tt_imagerot1)
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
-        ttnn.execute_trace(mesh_device, tid)
+        ttnn.execute_trace(device, tid)
     else:
         # compile
         tt_model(**model_args)
@@ -118,7 +118,7 @@ def test_single_transformer_block(
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
         tt_combined_output = tt_model(**model_args)
 
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
+    with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=0)) if is_mesh_device else nullcontext():
         tt_combined_output_torch = ttnn.to_torch(tt_combined_output)[:batch_size]
 
     assert_quality(combined_output, tt_combined_output_torch, pcc=0.999, mse=830.0)
@@ -132,27 +132,24 @@ def test_single_transformer_block(
 )
 @pytest.mark.parametrize("device_params", [{"trace_region_size": 716800}], indirect=True)
 @pytest.mark.parametrize(
-    ("use_program_cache", "use_tracing"),
+    ("program_cache_enabled", "use_tracing"),
     [
         (False, False),
         # (True, False),
         # (True, True),
     ],
 )
-@pytest.mark.parametrize("mesh_device", [(1, 2)], indirect=True)
+@pytest.mark.parametrize("device_type", [ttnn.Device, ttnn.MeshDevice], indirect=True)
 def test_transformer_block(
     *,
-    mesh_device: ttnn.MeshDevice,
-    use_program_cache: bool,
+    device: ttnn.Device | ttnn.MeshDevice,
     use_tracing: bool,
     block_index: int,
     batch_size: int,
     spatial_sequence_length: int,
     prompt_sequence_length: int,
 ) -> None:
-    if use_program_cache:
-        for device in mesh_device.get_devices():
-            device.enable_program_cache()
+    is_mesh_device = isinstance(device, ttnn.MeshDevice)
 
     torch.manual_seed(0)
 
@@ -163,9 +160,9 @@ def test_transformer_block(
     torch_model.eval()
     del parent_torch_model
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
         parameters = TtTransformerBlockParameters.from_torch(
-            torch_model.state_dict(), mesh_device=mesh_device, dtype=ttnn.bfloat16
+            torch_model.state_dict(), device=device, dtype=ttnn.bfloat16
         )
     tt_model = TtTransformerBlock(parameters, num_heads=torch_model.num_heads)
 
@@ -177,7 +174,7 @@ def test_transformer_block(
     imagerot1 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128], dtype=torch.float32)
     imagerot2 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128], dtype=torch.float32)
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
         tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
         tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
         tt_time_host = ttnn.from_torch(time.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
@@ -189,17 +186,18 @@ def test_transformer_block(
             spatial=spatial, prompt=prompt, time_embed=time, image_rotary_emb=(imagerot1, imagerot2)
         )
 
-    tt_spatial = allocate_tensor_on_device_like(tt_spatial_host, device=mesh_device)
-    tt_prompt = allocate_tensor_on_device_like(tt_prompt_host, device=mesh_device)
-    tt_time = allocate_tensor_on_device_like(tt_time_host, device=mesh_device)
-    tt_imagerot1 = allocate_tensor_on_device_like(tt_imagerot1_host, device=mesh_device)
-    tt_imagerot2 = allocate_tensor_on_device_like(tt_imagerot2_host, device=mesh_device)
+    tt_spatial = allocate_tensor_on_device_like(tt_spatial_host, device=device)
+    tt_prompt = allocate_tensor_on_device_like(tt_prompt_host, device=device)
+    tt_time = allocate_tensor_on_device_like(tt_time_host, device=device)
+    tt_imagerot1 = allocate_tensor_on_device_like(tt_imagerot1_host, device=device)
+    tt_imagerot2 = allocate_tensor_on_device_like(tt_imagerot2_host, device=device)
 
     model_args = dict(  # noqa: C408
         spatial=tt_spatial,
         prompt=tt_prompt,
         time_embed=tt_time,
         image_rotary_emb=(tt_imagerot1, tt_imagerot2),
+        gather=is_mesh_device,
     )
 
     if use_tracing:
@@ -230,7 +228,7 @@ def test_transformer_block(
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
         tt_spatial_output, tt_prompt_output = tt_model(**model_args)
 
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
+    with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=0)) if is_mesh_device else nullcontext():
         tt_spatial_output_torch = ttnn.to_torch(tt_spatial_output)[:batch_size]
         tt_prompt_output_torch = ttnn.to_torch(tt_prompt_output)[:batch_size] if tt_prompt_output is not None else None
 

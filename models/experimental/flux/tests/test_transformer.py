@@ -2,6 +2,10 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
+from contextlib import nullcontext
+
 import pytest
 import torch
 import ttnn
@@ -20,26 +24,23 @@ from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 15157248}], indirect=True)
 @pytest.mark.parametrize(
-    ("use_program_cache", "use_tracing"),
+    ("program_cache_enabled", "use_tracing"),
     [
         (False, False),
         # (True, False),
         # (True, True),
     ],
 )
-@pytest.mark.parametrize("mesh_device", [(1, 2)], indirect=True)
+@pytest.mark.parametrize("device_type", [ttnn.Device, ttnn.MeshDevice], indirect=True)
 def test_transformer(  # noqa: PLR0915
     *,
-    mesh_device: ttnn.MeshDevice,
-    use_program_cache: bool,
+    device: ttnn.MeshDevice,
     use_tracing: bool,
     batch_size: int,
     prompt_sequence_length: int,
     spatial_sequence_lenght: int,
 ) -> None:
-    if use_program_cache:
-        for device in mesh_device.get_devices():
-            device.enable_program_cache()
+    is_mesh_device = isinstance(device, ttnn.MeshDevice)
 
     torch.manual_seed(0)
 
@@ -73,13 +74,15 @@ def test_transformer(  # noqa: PLR0915
     torch_model_bfloat16.eval()
 
     logger.info("creating TT-NN model...")
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
         parameters = TtFluxTransformer2DModelParameters.from_torch(
-            torch_model_bfloat16.state_dict(), mesh_device=mesh_device, dtype=ttnn.bfloat8_b
+            torch_model_bfloat16.state_dict(), device=device, dtype=ttnn.bfloat16
         )
-    tt_model = TtFluxTransformer2DModel(parameters, num_attention_heads=torch_model_bfloat16.config.num_attention_heads)
+        tt_model = TtFluxTransformer2DModel(
+            parameters, num_attention_heads=torch_model_bfloat16.config.num_attention_heads
+        )
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
         tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
         tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
         tt_pooled_projection_host = ttnn.from_torch(pooled_projection, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
@@ -87,12 +90,12 @@ def test_transformer(  # noqa: PLR0915
         tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
         tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
 
-    tt_spatial = allocate_tensor_on_device_like(tt_spatial_host, device=mesh_device)
-    tt_prompt = allocate_tensor_on_device_like(tt_prompt_host, device=mesh_device)
-    tt_pooled_projection = allocate_tensor_on_device_like(tt_pooled_projection_host, device=mesh_device)
-    tt_timestep = allocate_tensor_on_device_like(tt_timestep_host, device=mesh_device)
-    tt_imagerot1 = allocate_tensor_on_device_like(tt_imagerot1_host, device=mesh_device)
-    tt_imagerot2 = allocate_tensor_on_device_like(tt_imagerot2_host, device=mesh_device)
+    tt_spatial = allocate_tensor_on_device_like(tt_spatial_host, device=device)
+    tt_prompt = allocate_tensor_on_device_like(tt_prompt_host, device=device)
+    tt_pooled_projection = allocate_tensor_on_device_like(tt_pooled_projection_host, device=device)
+    tt_timestep = allocate_tensor_on_device_like(tt_timestep_host, device=device)
+    tt_imagerot1 = allocate_tensor_on_device_like(tt_imagerot1_host, device=device)
+    tt_imagerot2 = allocate_tensor_on_device_like(tt_imagerot2_host, device=device)
 
     model_args = dict(  # noqa: C408
         spatial=tt_spatial,
@@ -100,6 +103,7 @@ def test_transformer(  # noqa: PLR0915
         pooled_projection=tt_pooled_projection,
         timestep=tt_timestep,
         image_rotary_emb=(tt_imagerot1, tt_imagerot2),
+        gather=is_mesh_device,
     )
 
     if use_tracing:
@@ -109,9 +113,9 @@ def test_transformer(  # noqa: PLR0915
 
         # trace
         logger.info("tracing...")
-        tid = ttnn.begin_trace_capture(mesh_device)
+        tid = ttnn.begin_trace_capture(device)
         tt_output = tt_model(**model_args)
-        ttnn.end_trace_capture(mesh_device, tid)
+        ttnn.end_trace_capture(device, tid)
 
         # execute
         logger.info("executing...")
@@ -121,7 +125,7 @@ def test_transformer(  # noqa: PLR0915
         ttnn.copy_host_to_device_tensor(tt_timestep_host, tt_timestep)
         ttnn.copy_host_to_device_tensor(tt_imagerot1_host, tt_imagerot1)
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
-        ttnn.execute_trace(mesh_device, tid)
+        ttnn.execute_trace(device, tid)
     else:
         # compile
         logger.info("compiling...")
@@ -137,7 +141,7 @@ def test_transformer(  # noqa: PLR0915
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
         tt_output = tt_model(**model_args)
 
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
+    with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=0)) if is_mesh_device else nullcontext():
         tt_output_torch = ttnn.to_torch(tt_output)[:batch_size]
 
     assert_quality(torch_output, tt_output_torch, pcc=0.999_500, mse=14)
