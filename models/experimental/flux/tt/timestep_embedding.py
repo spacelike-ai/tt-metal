@@ -74,7 +74,11 @@ class TtCombinedTimestepTextProjEmbeddings:
 
         batch_size = timestep.shape[0]
 
-        time_proj_factor = ttnn.repeat(self._time_proj_factor, ttnn.Shape([batch_size, 1]))
+        # ttnn.repeat currently does not work with mesh devices
+        assert batch_size == 1
+        time_proj_factor = self._time_proj_factor
+        # time_proj_factor = ttnn.repeat(self._time_proj_factor, ttnn.Shape([batch_size, 1]))
+
         time_proj_factor = ttnn.to_layout(time_proj_factor, ttnn.TILE_LAYOUT)
 
         emb = timestep * time_proj_factor

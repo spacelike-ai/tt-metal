@@ -23,7 +23,8 @@ from ..tt.utils import assert_quality
 @pytest.mark.parametrize(
     "batch_size",
     [
-        100,
+        1,
+        # 100,
     ],
 )
 @pytest.mark.parametrize("program_cache_enabled", [True], indirect=True)
