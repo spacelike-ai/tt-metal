@@ -51,7 +51,7 @@ def test_timestep_embedding(
         parameters = TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(
             torch_model.state_dict(), device=device, dtype=ttnn.bfloat16
         )
-    tt_model = TtCombinedTimestepTextProjEmbeddings(parameters)
+        tt_model = TtCombinedTimestepTextProjEmbeddings(parameters)
 
     timestep = torch.randint(1000, (batch_size,))
     pooled_projection = torch.randn((batch_size, 768))

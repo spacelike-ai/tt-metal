@@ -100,11 +100,7 @@ class TtCombinedTimestepTextProjEmbeddings:
         exponent = exponent / half_dim
         factor = torch.exp(exponent).unsqueeze(0)
 
-        result = ttnn.from_torch(
-            factor, device=device, layout=ttnn.TILE_LAYOUT
-        )  # does not work with row major layout and mesh device
-
-        return ttnn.to_layout(result, ttnn.ROW_MAJOR_LAYOUT)
+        return ttnn.from_torch(factor, device=device)
 
 
 class _TimestepEmbedding:
