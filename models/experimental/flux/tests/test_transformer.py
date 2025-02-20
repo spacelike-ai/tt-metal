@@ -41,11 +41,12 @@ def test_transformer(  # noqa: PLR0915
         for device in mesh_device.get_devices():
             device.enable_program_cache()
 
+    torch.manual_seed(0)
+
     logger.info("loading model...")
     torch_model = FluxTransformer2DModel.from_pretrained("black-forest-labs/FLUX.1-schnell", subfolder="transformer")
     torch_model.eval()
 
-    torch.manual_seed(0)
     spatial = torch.randn([batch_size, spatial_sequence_lenght, 64])
     prompt = torch.randn([batch_size, prompt_sequence_length, 4096])
     pooled_projection = torch.randn([batch_size, 768])

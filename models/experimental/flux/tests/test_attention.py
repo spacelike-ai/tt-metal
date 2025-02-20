@@ -49,6 +49,8 @@ def test_attention(
 
     separate_prompt = prompt_sequence_length != 0
 
+    torch.manual_seed(0)
+
     parent_torch_model = FluxTransformer2DModel.from_pretrained(
         "black-forest-labs/FLUX.1-schnell", subfolder="transformer", torch_dtype=torch.bfloat16
     )
@@ -60,7 +62,6 @@ def test_attention(
         parameters = TtAttentionParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat16)
     tt_model = TtAttention(parameters, num_heads=torch_model.num_heads)
 
-    torch.manual_seed(0)
     spatial = torch.randn((batch_size, spatial_sequence_length, 3072))
     prompt = torch.randn((batch_size, prompt_sequence_length, 3072)) if separate_prompt else None
     imagerot1 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])

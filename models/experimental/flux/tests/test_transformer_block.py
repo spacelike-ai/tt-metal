@@ -50,6 +50,8 @@ def test_single_transformer_block(
         for device in mesh_device.get_devices():
             device.enable_program_cache()
 
+    torch.manual_seed(0)
+
     parent_torch_model = FluxTransformer2DModel.from_pretrained(
         "black-forest-labs/FLUX.1-schnell", subfolder="transformer", torch_dtype=torch.bfloat16
     )
@@ -65,7 +67,6 @@ def test_single_transformer_block(
 
     embedding_dim = 3072
 
-    torch.manual_seed(0)
     combined = torch.randn((batch_size, sequence_length, embedding_dim))
     time = torch.randn((batch_size, embedding_dim))
     imagerot1 = torch.randn([sequence_length, 128], dtype=torch.float32)
@@ -153,6 +154,8 @@ def test_transformer_block(
         for device in mesh_device.get_devices():
             device.enable_program_cache()
 
+    torch.manual_seed(0)
+
     parent_torch_model = FluxTransformer2DModel.from_pretrained(
         "black-forest-labs/FLUX.1-schnell", subfolder="transformer", torch_dtype=torch.bfloat16
     )
@@ -168,7 +171,6 @@ def test_transformer_block(
 
     embedding_dim = 3072
 
-    torch.manual_seed(0)
     spatial = torch.randn((batch_size, spatial_sequence_length, embedding_dim))
     prompt = torch.randn((batch_size, prompt_sequence_length, embedding_dim))
     time = torch.randn((batch_size, embedding_dim))
