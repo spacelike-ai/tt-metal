@@ -46,6 +46,7 @@ def test_feed_forward(
         torch_output = torch_model(torch_input_tensor)
 
     tt_output = tt_model(tt_input_tensor)
-
     with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=-1)):
-        assert_quality(torch_output, tt_output, pcc=0.999_500)
+        tt_output_torch = ttnn.to_torch(tt_output)[..., : tt_output.shape[-1]]
+
+    assert_quality(torch_output, tt_output_torch, pcc=0.999_500)
