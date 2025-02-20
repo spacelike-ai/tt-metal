@@ -55,7 +55,7 @@ def test_single_transformer_block(
     parent_torch_model = FluxTransformer2DModel.from_pretrained(
         "black-forest-labs/FLUX.1-schnell", subfolder="transformer", torch_dtype=torch.bfloat16
     )
-    torch_model: TransformerBlock = parent_torch_model.transformer_blocks[block_index].to(torch.float32)
+    torch_model: SingleTransformerBlock = parent_torch_model.single_transformer_blocks[block_index].to(torch.float32)
     torch_model.eval()
     del parent_torch_model
 
