@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 class TtConv2dParameters:
     weight: ttnn.Tensor
     bias: ttnn.Tensor | None
+    device: ttnn.Device | ttnn.MeshDevice
 
     @classmethod
     def from_torch(
@@ -24,10 +25,12 @@ class TtConv2dParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
+        device: ttnn.Device | ttnn.MeshDevice,
     ) -> TtConv2dParameters:
         return cls(
             weight=ttnn.from_torch(state["weight"], dtype=dtype),
             bias=ttnn.from_torch(state["bias"].reshape((1, 1, 1, -1)), dtype=dtype) if "bias" in state else None,
+            device=device,
         )
 
     @property
@@ -61,9 +64,10 @@ class TtConv2d:
         self._weight = parameters.weight
         self._bias = parameters.bias
 
+        self._device = parameters.device
+
     def call_without_reshape(self, x: ttnn.Tensor) -> tuple[ttnn.Tensor, list[int]]:
         batch_size = x.shape[0]
-        device = x.device()
         memory_config_in = ttnn.get_memory_config(x)
 
         result, [output_height, output_width], [prepared_weight, prepared_bias] = ttnn.conv2d(
@@ -72,7 +76,7 @@ class TtConv2d:
             bias_tensor=self._bias,
             in_channels=self._in_channels,
             out_channels=self._out_channels,
-            device=device,
+            device=self._device,
             kernel_size=self._kernel_size,
             stride=self._stride,
             padding=self._padding,
@@ -94,6 +98,7 @@ class TtConv2d:
     def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
         result, shape = self.call_without_reshape(x)
         # TODO: deallocate result
+        # TODO: this reshape is not correct if the tensor is replicated over multiple devices
         return result.reshape(shape)
 
     @property
