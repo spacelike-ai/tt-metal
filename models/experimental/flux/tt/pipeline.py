@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import numpy as np
@@ -27,6 +28,7 @@ from .transformer import TtFluxTransformer2DModel, TtFluxTransformer2DModelParam
 class TtFluxPipeline:
     def __init__(self, *, checkpoint: str, device: ttnn.Device | ttnn.MeshDevice) -> None:
         self._device = device
+        self._is_mesh_device = isinstance(device, ttnn.MeshDevice)
 
         logger.info("loading transformer...")
 
@@ -37,12 +39,13 @@ class TtFluxPipeline:
 
         logger.info("creating TT-NN transformer...")
 
-        parameters = TtFluxTransformer2DModelParameters.from_torch(
-            torch_transformer.state_dict(), device=device, dtype=ttnn.bfloat8_b
-        )
-        self._tt_transformer = TtFluxTransformer2DModel(
-            parameters, num_attention_heads=torch_transformer.config.num_attention_heads
-        )
+        with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)) if self._is_mesh_device else nullcontext():
+            parameters = TtFluxTransformer2DModelParameters.from_torch(
+                torch_transformer.state_dict(), device=device, dtype=ttnn.bfloat8_b
+            )
+            self._tt_transformer = TtFluxTransformer2DModel(
+                parameters, num_attention_heads=torch_transformer.config.num_attention_heads
+            )
 
         self._num_channels_latents = torch_transformer.in_channels // 4
         self._pos_embed = torch_transformer.pos_embed
@@ -78,9 +81,10 @@ class TtFluxPipeline:
 
         logger.info("creating TT-NN text encoder...")
 
-        # parameters = TtT5EncoderParameters.from_torch(
-        #     torch_text_encoder_2.state_dict(), device=device, dtype=ttnn.bfloat16
-        # )
+        # with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)) if self._is_mesh_device else nullcontext():
+        #     parameters = TtT5EncoderParameters.from_torch(
+        #         torch_text_encoder_2.state_dict(), device=device, dtype=ttnn.bfloat16
+        #     )
         # self._text_encoder_2 = TtT5Encoder(
         #     parameters,
         #     num_heads=torch_text_encoder_2.config.num_heads,
@@ -122,12 +126,13 @@ class TtFluxPipeline:
             self._num_channels_latents * 4,
         )
 
-        tt_prompt_embeds = ttnn.from_torch(
-            prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
-        )
-        tt_pooled_prompt_embeds = ttnn.from_torch(
-            pooled_prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
-        )
+        with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)) if self._is_mesh_device else nullcontext():
+            tt_prompt_embeds = ttnn.from_torch(
+                prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+            )
+            tt_pooled_prompt_embeds = ttnn.from_torch(
+                pooled_prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+            )
         tt_timestep = ttnn.allocate_tensor_on_device([1, 1], ttnn.float32, ttnn.ROW_MAJOR_LAYOUT, self._device)
         tt_sigma_difference = ttnn.allocate_tensor_on_device([1, 1], ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
         tt_latents = ttnn.allocate_tensor_on_device(latents_shape, ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
@@ -245,11 +250,14 @@ class TtFluxPipeline:
         ids = torch.cat((text_ids, image_ids), dim=0)
         image_rotary_emb = self._pos_embed(ids)
 
-        tt_prompt_embeds = ttnn.from_torch(prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-        tt_pooled_prompt_embeds = ttnn.from_torch(pooled_prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-        tt_initial_latents = ttnn.from_torch(latents, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-        tt_imagerot1 = ttnn.from_torch(image_rotary_emb[0], layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
-        tt_imagerot2 = ttnn.from_torch(image_rotary_emb[1], layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
+        with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)) if self._is_mesh_device else nullcontext():
+            tt_prompt_embeds = ttnn.from_torch(prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+            tt_pooled_prompt_embeds = ttnn.from_torch(
+                pooled_prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+            )
+            tt_initial_latents = ttnn.from_torch(latents, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+            tt_imagerot1 = ttnn.from_torch(image_rotary_emb[0], layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
+            tt_imagerot2 = ttnn.from_torch(image_rotary_emb[1], layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
 
         logger.info("denoising...")
         denoising_start_time = time.time()
@@ -261,12 +269,24 @@ class TtFluxPipeline:
         ttnn.copy_host_to_device_tensor(tt_imagerot2, self._trace.imagerot2_input)
 
         for i, t in enumerate(tqdm.tqdm(timesteps)):
-            tt_timestep = ttnn.full([1, 1], fill_value=t, dtype=ttnn.float32)
-
             sigma_difference = self._scheduler.sigmas[i + 1] - self._scheduler.sigmas[i]
-            tt_sigma_difference = ttnn.full(
-                [1, 1], fill_value=sigma_difference, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
-            )
+
+            with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)) if self._is_mesh_device else nullcontext():
+                # ttnn.full does not support replication for use with mesh device
+                # tt_timestep = ttnn.full([1, 1], fill_value=t, dtype=ttnn.float32)
+                # tt_sigma_difference = ttnn.full(
+                #     [1, 1], fill_value=sigma_difference, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+                # )
+
+                tt_timestep = ttnn.from_torch(
+                    torch.full([1, 1], fill_value=t),
+                    dtype=ttnn.float32,
+                )
+                tt_sigma_difference = ttnn.from_torch(
+                    torch.full([1, 1], fill_value=sigma_difference),
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=ttnn.bfloat16,
+                )
 
             ttnn.copy_host_to_device_tensor(tt_timestep, self._trace.timestep_input)
             ttnn.copy_host_to_device_tensor(tt_sigma_difference, self._trace.sigma_difference_input)
@@ -287,7 +307,9 @@ class TtFluxPipeline:
 
         image_decoding_start_time = time.time()
 
-        latents = ttnn.to_torch(self._trace.spatial_input_output).to(torch.float32)
+        with ttnn.distribute(ttnn.ConcatMeshToTensor(self._device, dim=0)) if self._is_mesh_device else nullcontext():
+            size = self._trace.spatial_input_output.shape[0]
+            latents = ttnn.to_torch(self._trace.spatial_input_output)[:size].to(torch.float32)
         latents = _unpack_latents(latents, height, width, self._vae_scale_factor)
         latents = latents / self._vae_scaling_factor + self._vae_shift_factor
 
@@ -330,6 +352,7 @@ class TtFluxPipeline:
             pooled_projection=pooled_prompt_embeds,
             timestep=timestep,
             image_rotary_emb=image_rotary_emb,
+            gather=self._is_mesh_device,
         )
 
         ttnn.add_(latents, sigma_difference * noise_pred)
@@ -375,7 +398,7 @@ class PipelineTrace:
     tid: int
 
     def execute(self) -> None:
-        ttnn.execute_trace(self.spatial_input_output.device(), self.tid)
+        ttnn.execute_trace(self.spatial_input_output.device(), self.tid)  # TODO: allow for mesh device
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/flux/pipeline_flux.py
@@ -416,7 +439,7 @@ def _get_clip_prompt_embeds(
 #     prompt: list[str],
 #     *,
 #     torch_device: torch.device | None = None,
-#     device: ttnn.Device,
+#     device: ttnn.Device | ttnn.MeshDevice,
 #     joint_attention_dim: int,
 #     max_sequence_length: int,
 #     num_images_per_prompt: int,

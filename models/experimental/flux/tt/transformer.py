@@ -119,7 +119,7 @@ class TtFluxTransformer2DModel:
             )
 
             if i % 6 == 0:
-                ttnn.DumpDeviceProfiler(spatial.device())
+                ttnn.DumpDeviceProfiler(spatial.device())  # TODO: allow for mesh device
 
         combined = ttnn.concat([prompt, spatial], dim=1)
 
@@ -132,7 +132,7 @@ class TtFluxTransformer2DModel:
             )
 
             if i % 6 == 0:
-                ttnn.DumpDeviceProfiler(combined.device())
+                ttnn.DumpDeviceProfiler(combined.device())  # TODO: allow for mesh device
 
         spatial = combined[:, prompt.shape[1] :]
 

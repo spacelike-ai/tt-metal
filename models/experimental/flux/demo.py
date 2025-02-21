@@ -16,11 +16,11 @@ if TYPE_CHECKING:
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 15210496}], indirect=True)
 # @pytest.mark.usefixtures("use_program_cache")
-def test_sd3(
+def test_flux(
     *,
-    device: ttnn.Device,
+    mesh_device: ttnn.MeshDevice,
 ) -> None:
-    pipeline = TtFluxPipeline(checkpoint="black-forest-labs/FLUX.1-schnell", device=device)
+    pipeline = TtFluxPipeline(checkpoint="black-forest-labs/FLUX.1-schnell", device=mesh_device)
 
     pipeline.prepare(width=1024, height=1024, prompt_count=1, num_images_per_prompt=1)
 
