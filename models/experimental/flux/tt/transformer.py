@@ -44,6 +44,8 @@ class TtFluxTransformer2DModelParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
     ) -> TtFluxTransformer2DModelParameters:
+        is_mesh_device = isinstance(device, ttnn.MeshDevice)
+
         return cls(
             x_embedder=TtLinearParameters.from_torch(substate(state, "x_embedder"), dtype=dtype, device=device),
             time_text_embed=TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(
@@ -57,7 +59,9 @@ class TtFluxTransformer2DModelParameters:
                 for s in indexed_substates(state, "transformer_blocks")
             ],
             single_transformer_blocks=[
-                TtFluxSingleTransformerBlockParameters.from_torch(s, dtype=dtype, device=device, linear_on_host=i > 10)
+                TtFluxSingleTransformerBlockParameters.from_torch(
+                    s, dtype=dtype, device=device, linear_on_host=i > 10 and not is_mesh_device
+                )
                 for i, s in enumerate(indexed_substates(state, "single_transformer_blocks"))
             ],
             time_embed_out=TtLinearParameters.from_torch(
