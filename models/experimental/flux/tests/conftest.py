@@ -37,6 +37,11 @@ def device(
 
         ttnn.CloseDevice(device)
     elif device_type is ttnn.MeshDevice:
+        available_device_count = len(ttnn.get_device_ids())
+
+        if available_device_count < 2:
+            pytest.skip("Machine has only one device")
+
         mesh_device = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), **device_params)
         if program_cache_enabled:
             for device in mesh_device.get_devices():
