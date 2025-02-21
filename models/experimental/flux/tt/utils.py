@@ -29,7 +29,7 @@ def from_torch_fast(
     # does not support changing the datatype if the input is not tiled. An option could be to tilize the input before
     # changing the datatype and then untilize again, but it was not tested if this would be faster than converting the
     # datatype on the host.
-    if device is None or layout is None or layout == ttnn.ROW_MAJOR_LAYOUT or isinstance(device, ttnn.MeshDevice):
+    if device is None or layout is None or layout == ttnn.ROW_MAJOR_LAYOUT:
         return ttnn.from_torch(t, device=device, layout=layout, dtype=dtype)
 
     try:
@@ -40,9 +40,9 @@ def from_torch_fast(
             return ttnn.from_torch(t, device=device, layout=layout, dtype=dtype)
         raise
 
-    if list(tensor.shape) != list(t.shape):
+    if tensor.shape[-2] == 32 and t.shape[-2] == 1:
         # Work around the fact that the shape is erroneously set to the padded shape under certain conditions.
-        assert device is ttnn.MeshDevice
+        assert isinstance(device, ttnn.MeshDevice)
         assert dtype in (ttnn.bfloat4_b, ttnn.bfloat8_b)
         new = tensor.reshape(ttnn.Shape(t.shape))
         ttnn.deallocate(tensor)
