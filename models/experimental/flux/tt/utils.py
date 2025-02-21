@@ -19,7 +19,7 @@ def allocate_tensor_on_device_like(
 def from_torch_fast(
     t: torch.Tensor,
     *,
-    device: ttnn.Device | None = None,
+    device: ttnn.Device | ttnn.MeshDevice | None = None,
     layout: ttnn.Layout | None = None,
     dtype: ttnn.DataType | None = None,
     memory_config: ttnn.MemoryConfig | None = None,
@@ -39,6 +39,14 @@ def from_torch_fast(
         if "TODO: add support for multi-paged buffer with page size > 64KB" in str(e):
             return ttnn.from_torch(t, device=device, layout=layout, dtype=dtype)
         raise
+
+    if list(tensor.shape) != list(t.shape):
+        # Work around the fact that the shape is erroneously set to the padded shape under certain conditions.
+        assert device is ttnn.MeshDevice
+        assert dtype in (ttnn.bfloat4_b, ttnn.bfloat8_b)
+        new = tensor.reshape(ttnn.Shape(t.shape))
+        ttnn.deallocate(tensor)
+        tensor = new
 
     new = ttnn.to_layout(tensor, layout, dtype=dtype, memory_config=memory_config)
     ttnn.deallocate(tensor)
