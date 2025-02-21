@@ -11,7 +11,6 @@ import pytest
 import torch
 import ttnn
 
-from ..reference import FluxTransformer2DModel
 from ..tt.transformer_block import (
     TtFluxSingleTransformerBlock,
     TtFluxSingleTransformerBlockParameters,
@@ -21,6 +20,7 @@ from ..tt.transformer_block import (
 from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
 if TYPE_CHECKING:
+    from ..reference import FluxTransformer2DModel
     from ..reference.transformer_block import SingleTransformerBlock, TransformerBlock
 
 
@@ -47,17 +47,13 @@ def test_single_transformer_block(
     block_index: int,
     batch_size: int,
     sequence_length: int,
+    parent_torch_model: FluxTransformer2DModel,
 ) -> None:
     is_mesh_device = isinstance(device, ttnn.MeshDevice)
 
     torch.manual_seed(0)
 
-    parent_torch_model = FluxTransformer2DModel.from_pretrained(
-        "black-forest-labs/FLUX.1-schnell", subfolder="transformer", torch_dtype=torch.bfloat16
-    )
     torch_model: SingleTransformerBlock = parent_torch_model.single_transformer_blocks[block_index].to(torch.float32)
-    torch_model.eval()
-    del parent_torch_model
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
         parameters = TtFluxSingleTransformerBlockParameters.from_torch(
@@ -148,17 +144,13 @@ def test_transformer_block(
     batch_size: int,
     spatial_sequence_length: int,
     prompt_sequence_length: int,
+    parent_torch_model: FluxTransformer2DModel,
 ) -> None:
     is_mesh_device = isinstance(device, ttnn.MeshDevice)
 
     torch.manual_seed(0)
 
-    parent_torch_model = FluxTransformer2DModel.from_pretrained(
-        "black-forest-labs/FLUX.1-schnell", subfolder="transformer", torch_dtype=torch.bfloat16
-    )
     torch_model: TransformerBlock = parent_torch_model.transformer_blocks[block_index].to(torch.float32)
-    torch_model.eval()
-    del parent_torch_model
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
         parameters = TtTransformerBlockParameters.from_torch(

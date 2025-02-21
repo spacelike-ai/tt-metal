@@ -11,13 +11,15 @@ import pytest
 import torch
 import ttnn
 
-from ..reference import FluxTransformer2DModel
-from ..reference.timestep_embedding import CombinedTimestepTextProjEmbeddings
 from ..tt.timestep_embedding import (
     TtCombinedTimestepTextProjEmbeddings,
     TtCombinedTimestepTextProjEmbeddingsParameters,
 )
 from ..tt.utils import assert_quality
+
+if TYPE_CHECKING:
+    from ..reference import FluxTransformer2DModel
+    from ..reference.timestep_embedding import CombinedTimestepTextProjEmbeddings
 
 
 @pytest.mark.parametrize(
@@ -30,20 +32,13 @@ from ..tt.utils import assert_quality
 @pytest.mark.parametrize("program_cache_enabled", [True], indirect=True)
 @pytest.mark.parametrize("device_type", [ttnn.Device, ttnn.MeshDevice], indirect=True)
 def test_timestep_embedding(
-    *,
-    device: ttnn.Device | ttnn.MeshDevice,
-    batch_size: int,
+    *, device: ttnn.Device | ttnn.MeshDevice, batch_size: int, parent_torch_model: FluxTransformer2DModel
 ) -> None:
     is_mesh_device = isinstance(device, ttnn.MeshDevice)
 
     torch.manual_seed(0)
 
-    parent_torch_model = FluxTransformer2DModel.from_pretrained(
-        "black-forest-labs/FLUX.1-schnell", subfolder="transformer", torch_dtype=torch.bfloat16
-    )
     torch_model: CombinedTimestepTextProjEmbeddings = parent_torch_model.time_text_embed.to(torch.float32)
-    torch_model.eval()
-    del parent_torch_model
 
     # torch_model = CombinedTimestepTextProjEmbeddings(embedding_dim=3072, pooled_projection_dim=768)
     # torch_model.eval()

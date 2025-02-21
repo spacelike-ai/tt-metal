@@ -3,7 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+import torch
 import ttnn
+
+from ..reference import FluxTransformer2DModel
 
 
 @pytest.fixture
@@ -45,6 +48,15 @@ def device(
     else:
         msg = f"Unsupported device type: {device_type}"
         raise ValueError(msg)
+
+
+@pytest.fixture(scope="module")
+def parent_torch_model() -> FluxTransformer2DModel:
+    model = FluxTransformer2DModel.from_pretrained(
+        "black-forest-labs/FLUX.1-schnell", subfolder="transformer", torch_dtype=torch.bfloat16
+    )
+    model.eval()
+    return model
 
 
 def pytest_make_parametrize_id(
