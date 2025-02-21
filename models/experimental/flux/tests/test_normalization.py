@@ -76,7 +76,7 @@ def test_rms_norm(
     torch.nn.init.normal_(torch_model.weight)
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
-        parameters = TtRmsNormParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat16)
+        parameters = TtRmsNormParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b)
 
     tt_model = TtRmsNorm(parameters, eps=torch_model.eps)
 
@@ -93,4 +93,4 @@ def test_rms_norm(
     with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=0)) if is_mesh_device else nullcontext():
         tt_output_torch = ttnn.to_torch(tt_output)[: input_shape[0]]
 
-    assert_quality(torch_output, tt_output_torch, pcc=0.999_950)
+    assert_quality(torch_output, tt_output_torch, pcc=0.999933)

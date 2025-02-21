@@ -80,4 +80,4 @@ def test_conv2d(
     with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=0)) if is_mesh_device else nullcontext():
         tt_output_torch = ttnn.to_torch(tt_output)[: tt_output.shape[0]].permute([0, 3, 1, 2])
 
-    assert_quality(torch_output, tt_output_torch, pcc=0.999_900)
+    assert_quality(torch_output, tt_output_torch, pcc=0.999951)

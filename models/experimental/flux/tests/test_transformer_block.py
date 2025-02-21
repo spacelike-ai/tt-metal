@@ -61,7 +61,7 @@ def test_single_transformer_block(
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
         parameters = TtFluxSingleTransformerBlockParameters.from_torch(
-            torch_model.state_dict(), device=device, dtype=ttnn.bfloat16
+            torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b
         )
     tt_model = TtFluxSingleTransformerBlock(parameters, num_heads=torch_model.num_heads)
 
@@ -121,7 +121,7 @@ def test_single_transformer_block(
     with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=0)) if is_mesh_device else nullcontext():
         tt_combined_output_torch = ttnn.to_torch(tt_combined_output)[:batch_size]
 
-    assert_quality(combined_output, tt_combined_output_torch, pcc=0.999, mse=830.0)
+    assert_quality(combined_output, tt_combined_output_torch, pcc=0.99950, mse=825)
 
 
 @pytest.mark.parametrize(
@@ -162,7 +162,7 @@ def test_transformer_block(
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
         parameters = TtTransformerBlockParameters.from_torch(
-            torch_model.state_dict(), device=device, dtype=ttnn.bfloat16
+            torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b
         )
     tt_model = TtTransformerBlock(parameters, num_heads=torch_model.num_heads)
 
@@ -235,6 +235,6 @@ def test_transformer_block(
     assert (prompt_output is None) == (tt_prompt_output is None)
 
     if tt_prompt_output is not None:
-        assert_quality(prompt_output, tt_prompt_output_torch, pcc=0.999_500, mse=1500.0)
+        assert_quality(prompt_output, tt_prompt_output_torch, pcc=0.99975, mse=580)
 
-    assert_quality(spatial_output, tt_spatial_output_torch, pcc=0.999, mse=15.0)
+    assert_quality(spatial_output, tt_spatial_output_torch, pcc=0.99909, mse=13)

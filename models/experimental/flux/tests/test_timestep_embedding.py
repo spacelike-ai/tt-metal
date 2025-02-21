@@ -50,7 +50,7 @@ def test_timestep_embedding(
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
         parameters = TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(
-            torch_model.state_dict(), device=device, dtype=ttnn.bfloat16
+            torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b
         )
         tt_model = TtCombinedTimestepTextProjEmbeddings(parameters)
 
@@ -70,4 +70,4 @@ def test_timestep_embedding(
     with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=0)) if is_mesh_device else nullcontext():
         tt_output_torch = ttnn.to_torch(tt_output)[:batch_size]
 
-    assert_quality(torch_output, tt_output_torch, pcc=0.999_900)
+    assert_quality(torch_output, tt_output_torch, pcc=0.999957)

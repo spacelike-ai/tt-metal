@@ -37,7 +37,7 @@ def test_linear(
     torch_model.eval()
 
     with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)) if is_mesh_device else nullcontext():
-        parameters = TtLinearParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat16)
+        parameters = TtLinearParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b)
     tt_model = TtLinear(parameters)
 
     torch_input_tensor = torch.randn((batch_size, input_dim))
@@ -53,4 +53,4 @@ def test_linear(
     tt_output = tt_model(tt_input_tensor)
 
     with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=-1)) if is_mesh_device else nullcontext():
-        assert_quality(torch_output, tt_output, pcc=0.999_900)
+        assert_quality(torch_output, tt_output, pcc=0.999946)

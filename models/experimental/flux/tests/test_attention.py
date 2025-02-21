@@ -58,7 +58,7 @@ def test_attention(
     del parent_torch_model
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
-        parameters = TtAttentionParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat16)
+        parameters = TtAttentionParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b)
     tt_model = TtAttention(parameters, num_heads=torch_model.num_heads)
 
     spatial = torch.randn((batch_size, spatial_sequence_length, 3072))
@@ -122,7 +122,7 @@ def test_attention(
         tt_spatial_output_torch = ttnn.to_torch(tt_spatial_output)[:batch_size]
         tt_prompt_output_torch = ttnn.to_torch(tt_prompt_output)[:batch_size] if separate_prompt else None
 
-    assert_quality(spatial_output, tt_spatial_output_torch, pcc=0.994, mse=0.0005)
+    assert_quality(spatial_output, tt_spatial_output_torch, pcc=0.995, mse=0.0003)
 
     if separate_prompt:
-        assert_quality(prompt_output, tt_prompt_output_torch, pcc=0.995, mse=0.05)
+        assert_quality(prompt_output, tt_prompt_output_torch, pcc=0.996, mse=0.02)

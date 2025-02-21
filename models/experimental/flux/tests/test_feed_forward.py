@@ -38,7 +38,7 @@ def test_feed_forward(
     torch_model.eval()
 
     with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)) if is_mesh_device else nullcontext():
-        parameters = TtFeedForwardParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat16)
+        parameters = TtFeedForwardParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b)
     tt_model = TtFeedForward(parameters)
 
     torch_input_tensor = torch.randn((batch_size, input_dim))
@@ -56,4 +56,4 @@ def test_feed_forward(
     with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=-1)) if is_mesh_device else nullcontext():
         tt_output_torch = ttnn.to_torch(tt_output)[..., : tt_output.shape[-1]]
 
-    assert_quality(torch_output, tt_output_torch, pcc=0.999_500)
+    assert_quality(torch_output, tt_output_torch, pcc=0.999905)
