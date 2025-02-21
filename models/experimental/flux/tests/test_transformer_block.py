@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize(
     ("block_index", "batch_size", "sequence_length"),
     [
-        (0, 1, 1024 + 512),
+        (0, 1, 4096 + 512),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"trace_region_size": 716800}], indirect=True)
@@ -123,7 +123,7 @@ def test_single_transformer_block(
 @pytest.mark.parametrize(
     ("block_index", "batch_size", "spatial_sequence_length", "prompt_sequence_length"),
     [
-        (0, 1, 1024, 512),
+        (0, 1, 4096, 512),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"trace_region_size": 716800}], indirect=True)
@@ -227,6 +227,6 @@ def test_transformer_block(
     assert (prompt_output is None) == (tt_prompt_output is None)
 
     if tt_prompt_output is not None:
-        assert_quality(prompt_output, tt_prompt_output_torch, pcc=0.99975, mse=580)
+        assert_quality(prompt_output, tt_prompt_output_torch, pcc=0.99956, mse=980)
 
-    assert_quality(spatial_output, tt_spatial_output_torch, pcc=0.99909, mse=13)
+    assert_quality(spatial_output, tt_spatial_output_torch, pcc=0.99901, mse=17)
