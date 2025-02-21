@@ -2,7 +2,10 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import time
+from contextlib import nullcontext
 
 import pytest
 import torch
@@ -16,10 +19,12 @@ from ..tt.utils import assert_quality
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
-@pytest.mark.parametrize(("use_program_cache"), [True])
-def test_t5_encoder(*, device: ttnn.Device, use_program_cache: bool) -> None:
-    if use_program_cache:
-        ttnn.enable_program_cache(device)
+@pytest.mark.parametrize("program_cache_enabled", [True], indirect=True)
+@pytest.mark.parametrize("device_type", [ttnn.Device, ttnn.MeshDevice], indirect=True)
+def test_t5_encoder(*, device: ttnn.Device | ttnn.MeshDevicel) -> None:
+    is_mesh_device = isinstance(device, ttnn.MeshDevice)
+
+    batch_size = 1
 
     hf_model = T5EncoderModel.from_pretrained("black-forest-labs/FLUX.1-schnell", subfolder="text_encoder_2")
 
@@ -41,7 +46,8 @@ def test_t5_encoder(*, device: ttnn.Device, use_program_cache: bool) -> None:
     torch_model.eval()
 
     start_time = time.time()
-    parameters = TtT5EncoderParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat16)
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
+        parameters = TtT5EncoderParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat16)
     tt_model = TtT5Encoder(
         parameters,
         num_heads=hf_model.config.num_heads,
@@ -52,9 +58,10 @@ def test_t5_encoder(*, device: ttnn.Device, use_program_cache: bool) -> None:
     logger.info(f"model creation time: {time.time() - start_time}")
 
     torch.manual_seed(0)
-    tokens = torch.randint(hf_model.config.vocab_size, [1, 256])
+    tokens = torch.randint(hf_model.config.vocab_size, [batch_size, 256])
 
-    tt_tokens_host = ttnn.from_torch(tokens, layout=ttnn.TILE_LAYOUT)
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
+        tt_tokens_host = ttnn.from_torch(tokens, layout=ttnn.TILE_LAYOUT)
 
     start_time = time.time()
     with torch.no_grad():
@@ -72,7 +79,8 @@ def test_t5_encoder(*, device: ttnn.Device, use_program_cache: bool) -> None:
     logger.info(f"TT-NN runtime: {time.time() - start_time}")
     logger.info("done...")
 
-    tt_output_torch = ttnn.to_torch(tt_output)
+    with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=0)) if is_mesh_device else nullcontext():
+        tt_output_torch = ttnn.to_torch(tt_output)[:batch_size]
 
     assert output.shape == tt_output_torch.shape
     assert_quality(output, tt_output, pcc=0.945)
