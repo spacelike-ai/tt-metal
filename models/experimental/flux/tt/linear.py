@@ -20,6 +20,7 @@ class TtLinearParameters:
     weight: ttnn.Tensor
     bias: ttnn.Tensor | None
     on_host: bool
+    device: ttnn.Device | ttnn.MeshDevice | None
 
     @classmethod
     def from_torch(
@@ -53,6 +54,7 @@ class TtLinearParameters:
             if bias is not None
             else None,
             on_host=on_host,
+            device=device,
         )
 
     @property
@@ -70,6 +72,7 @@ class TtLinear:
         self._weight = parameters.weight
         self._bias = parameters.bias
         self._paramters_on_host = parameters.on_host
+        self._device = parameters.device
 
     def __call__(
         self,
@@ -86,9 +89,8 @@ class TtLinear:
         assert x.shape[-1] == self._in_channels, msg
 
         if self._paramters_on_host:
-            device = x.device()
-            weight = self._weight.to(device)
-            bias = self._bias.to(device) if self._bias is not None else None
+            weight = self._weight.to(self._device)
+            bias = self._bias.to(self._device) if self._bias is not None else None
         else:
             weight = self._weight
             bias = self._bias

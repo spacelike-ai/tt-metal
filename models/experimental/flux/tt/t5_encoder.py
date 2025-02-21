@@ -33,7 +33,8 @@ class TtT5EncoderParameters:
     token_embedding: ttnn.Tensor
     blocks: [TtT5BlockParameters]
     norm: TtT5LayerNorm
-    attention_bias: ttnn.Tensor
+    attention_bias: torch.Tensor
+    device: ttnn.Device | ttnn.MeshDevice
 
     @classmethod
     def from_torch(
@@ -41,7 +42,7 @@ class TtT5EncoderParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,
+        device: ttnn.Device | ttnn.MeshDevice,
     ) -> TtT5EncoderParameters:
         return cls(
             token_embedding=ttnn.from_torch(state["encoder.embed_tokens.weight"], dtype=dtype, device=device),
@@ -52,11 +53,8 @@ class TtT5EncoderParameters:
             norm=TtT5LayerNormParameters.from_torch(
                 substate(state, "encoder.final_layer_norm"), dtype=dtype, device=device
             ),
-            attention_bias=ttnn.from_torch(
-                state["encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"],
-                dtype=dtype,
-                device=device,
-            ),
+            attention_bias=state["encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"],
+            device=device,
         )
 
 
@@ -80,6 +78,8 @@ class TtT5Encoder:
         self._relative_attention_num_buckets = relative_attention_num_buckets
         self._relative_attention_max_distance = relative_attention_max_distance
 
+        self._device = parameters.device
+
     def __call__(self, input_ids: ttnn.Tensor) -> ttnn.Tensor:
         _batch_size, seq_length = input_ids.shape
 
@@ -90,7 +90,7 @@ class TtT5Encoder:
 
         position_bias = _compute_bias(
             seq_length=seq_length,
-            device=input_ids.device(),
+            device=self._device,
             relative_attention_num_buckets=self._relative_attention_num_buckets,
             relative_attention_max_distance=self._relative_attention_max_distance,
             relative_attention_bias=self._attention_bias,
@@ -114,7 +114,7 @@ class TtT5BlockParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,
+        device: ttnn.Device | ttnn.MeshDevice,
     ) -> TtT5BlockParameters:
         return cls(
             attention=TtT5LayerSelfAttentionParameters.from_torch(
@@ -147,7 +147,7 @@ class TtT5LayerSelfAttentionParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,
+        device: ttnn.Device | ttnn.MeshDevice,
     ) -> TtT5LayerSelfAttentionParameters:
         return cls(
             attention=TtT5AttentionParameters.from_torch(substate(state, "SelfAttention"), dtype=dtype, device=device),
@@ -179,7 +179,7 @@ class TtT5AttentionParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,
+        device: ttnn.Device | ttnn.MeshDevice,
     ) -> TtT5AttentionParameters:
         return cls(
             q_proj=TtLinearParameters.from_torch(substate(state, "q"), dtype=dtype, device=device, on_host=True),
@@ -229,7 +229,7 @@ class TtT5LayerFFParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,
+        device: ttnn.Device | ttnn.MeshDevice,
     ) -> TtT5LayerFFParameters:
         return cls(
             dense_gated_dense=TtT5DenseGatedActDenseParameters.from_torch(
@@ -262,7 +262,7 @@ class TtT5DenseGatedActDenseParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,
+        device: ttnn.Device | ttnn.MeshDevice,
     ) -> TtT5DenseGatedActDenseParameters:
         return cls(
             wi0=TtLinearParameters.from_torch(substate(state, "wi_0"), dtype=dtype, device=device, on_host=True),
@@ -294,7 +294,7 @@ class TtT5LayerNormParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,
+        device: ttnn.Device | ttnn.MeshDevice,
     ) -> TtT5LayerNormParameters:
         return cls(
             weight=from_torch_fast(state["weight"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device),
@@ -338,10 +338,10 @@ def _relative_position_bucket(relative_position: torch.Tensor, num_buckets: int,
 def _compute_bias(
     *,
     seq_length: int,
-    device: ttnn.Device,
+    device: ttnn.Device | ttnn.MeshDevice,
     relative_attention_num_buckets: int,
     relative_attention_max_distance: int,
-    relative_attention_bias: ttnn.Tensor,
+    relative_attention_bias: torch.Tensor,
 ) -> ttnn.Tensor:
     context_position = torch.arange(seq_length)[:, None]
     memory_position = torch.arange(seq_length)[None, :]
@@ -353,8 +353,7 @@ def _compute_bias(
         max_distance=relative_attention_max_distance,
     )
 
-    torch_relative_attention_bias = ttnn.to_torch(relative_attention_bias)
-    output = torch.nn.functional.embedding(relative_position_bucket, torch_relative_attention_bias)
+    output = torch.nn.functional.embedding(relative_position_bucket, relative_attention_bias)
     output = output.permute([2, 0, 1]).unsqueeze(0)
     output = output[:, :, -seq_length:, :]
 

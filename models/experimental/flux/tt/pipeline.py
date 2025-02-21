@@ -25,7 +25,7 @@ from .transformer import TtFluxTransformer2DModel, TtFluxTransformer2DModelParam
 
 
 class TtFluxPipeline:
-    def __init__(self, *, checkpoint: str, device: ttnn.Device) -> None:
+    def __init__(self, *, checkpoint: str, device: ttnn.Device | ttnn.MeshDevice) -> None:
         self._device = device
 
         logger.info("loading transformer...")

@@ -71,11 +71,13 @@ def test_t5_encoder(*, device: ttnn.Device | ttnn.MeshDevicel) -> None:
     tt_tokens = tt_tokens_host.to(device)
 
     logger.info("compiling...")
-    tt_model(tt_tokens)
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
+        tt_model(tt_tokens)
 
     logger.info("executing...")
     start_time = time.time()
-    tt_output = tt_model(tt_tokens)
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
+        tt_output = tt_model(tt_tokens)
     logger.info(f"TT-NN runtime: {time.time() - start_time}")
     logger.info("done...")
 
@@ -83,4 +85,4 @@ def test_t5_encoder(*, device: ttnn.Device | ttnn.MeshDevicel) -> None:
         tt_output_torch = ttnn.to_torch(tt_output)[:batch_size]
 
     assert output.shape == tt_output_torch.shape
-    assert_quality(output, tt_output, pcc=0.945)
+    assert_quality(output, tt_output_torch, pcc=0.945)
