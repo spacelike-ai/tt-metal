@@ -28,8 +28,15 @@ def program_cache_enabled(request: pytest.FixtureRequest) -> bool:
 def device(
     *, device_params: dict(str, Any), device_type: type[ttnn.Device | ttnn.MeshDevice], program_cache_enabled: bool
 ) -> None:
+    single_device = ttnn.get_num_devices() == 1
+
+    dispatch_core_config = ttnn.DispatchCoreConfig(
+        ttnn.device.DispatchCoreType.WORKER if single_device else ttnn.device.DispatchCoreType.ETH,
+        ttnn.DispatchCoreAxis.ROW,
+    )
+
     if device_type is ttnn.Device:
-        device = ttnn.CreateDevice(0, **device_params)
+        device = ttnn.CreateDevice(0, dispatch_core_config=dispatch_core_config, **device_params)
         if program_cache_enabled:
             ttnn.enable_program_cache(device)
 
@@ -40,7 +47,9 @@ def device(
         if ttnn.get_num_devices() < 2:
             pytest.skip("Machine has only one device")
 
-        mesh_device = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), **device_params)
+        mesh_device = ttnn.open_mesh_device(
+            ttnn.MeshShape(1, 2), dispatch_core_config=dispatch_core_config, **device_params
+        )
         if program_cache_enabled:
             for device in mesh_device.get_devices():
                 ttnn.enable_program_cache(device)
