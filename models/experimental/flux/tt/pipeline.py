@@ -118,11 +118,11 @@ class TtFluxPipeline:
 
         latents_height = height // self._vae_scale_factor
         latents_width = width // self._vae_scale_factor
-        spatial_sequence_lenght = latents_width * latents_height
+        spatial_sequence_length = latents_width * latents_height
 
         latents_shape = (
             prompt_count * num_images_per_prompt,
-            spatial_sequence_lenght,
+            spatial_sequence_length,
             self._num_channels_latents * 4,
         )
 
@@ -137,10 +137,10 @@ class TtFluxPipeline:
         tt_sigma_difference = ttnn.allocate_tensor_on_device([1, 1], ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
         tt_latents = ttnn.allocate_tensor_on_device(latents_shape, ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
         tt_imagerot1 = ttnn.allocate_tensor_on_device(
-            [spatial_sequence_lenght + max_t5_sequence_length, 128], ttnn.float32, ttnn.TILE_LAYOUT, self._device
+            [spatial_sequence_length + max_t5_sequence_length, 128], ttnn.float32, ttnn.TILE_LAYOUT, self._device
         )
         tt_imagerot2 = ttnn.allocate_tensor_on_device(
-            [spatial_sequence_lenght + max_t5_sequence_length, 128], ttnn.float32, ttnn.TILE_LAYOUT, self._device
+            [spatial_sequence_length + max_t5_sequence_length, 128], ttnn.float32, ttnn.TILE_LAYOUT, self._device
         )
 
         # # cache

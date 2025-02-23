@@ -17,7 +17,7 @@ from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
 
 @pytest.mark.parametrize(
-    ("batch_size", "spatial_sequence_lenght", "prompt_sequence_length"),
+    ("batch_size", "spatial_sequence_length", "prompt_sequence_length"),
     [
         (1, 1024, 512),
     ],
@@ -38,7 +38,7 @@ def test_transformer(  # noqa: PLR0915
     use_tracing: bool,
     batch_size: int,
     prompt_sequence_length: int,
-    spatial_sequence_lenght: int,
+    spatial_sequence_length: int,
 ) -> None:
     is_mesh_device = isinstance(device, ttnn.MeshDevice)
 
@@ -48,12 +48,12 @@ def test_transformer(  # noqa: PLR0915
     torch_model = FluxTransformer2DModel.from_pretrained("black-forest-labs/FLUX.1-schnell", subfolder="transformer")
     torch_model.eval()
 
-    spatial = torch.randn([batch_size, spatial_sequence_lenght, 64])
+    spatial = torch.randn([batch_size, spatial_sequence_length, 64])
     prompt = torch.randn([batch_size, prompt_sequence_length, 4096])
     pooled_projection = torch.randn([batch_size, 768])
     timestep = torch.randint(1000, [batch_size])
-    imagerot1 = torch.randn([spatial_sequence_lenght + prompt_sequence_length, 128])
-    imagerot2 = torch.randn([spatial_sequence_lenght + prompt_sequence_length, 128])
+    imagerot1 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
+    imagerot2 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
 
     logger.info("running PyTorch model...")
     with torch.no_grad():
