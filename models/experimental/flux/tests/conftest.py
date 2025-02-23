@@ -37,9 +37,7 @@ def device(
 
         ttnn.CloseDevice(device)
     elif device_type is ttnn.MeshDevice:
-        available_device_count = len(ttnn.get_device_ids())
-
-        if available_device_count < 2:
+        if ttnn.get_num_devices() < 2:
             pytest.skip("Machine has only one device")
 
         mesh_device = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), **device_params)
@@ -72,5 +70,5 @@ def pytest_make_parametrize_id(
     if argname == "program_cache_enabled":
         return "with_cache" if val else "without_cache"
     if argname == "device_type":
-        return "single_device" if val == ttnn.Device else "mesh_device" if val == ttnn.MeshDevice else None
+        return "normal_device" if val == ttnn.Device else "mesh_device" if val == ttnn.MeshDevice else None
     return None
