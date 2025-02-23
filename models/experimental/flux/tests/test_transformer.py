@@ -17,9 +17,10 @@ from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
 
 @pytest.mark.parametrize(
-    ("batch_size", "spatial_sequence_length", "prompt_sequence_length"),
+    ("batch_size", "spatial_sequence_length", "prompt_sequence_length", "pcc", "mse"),
     [
-        (1, 1024, 512),
+        # (1, 1024, 512, 0.9996, 13),
+        (1, 4096, 512, 0.9940, 0.0013),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 15157248}], indirect=True)
@@ -39,6 +40,8 @@ def test_transformer(  # noqa: PLR0915
     batch_size: int,
     prompt_sequence_length: int,
     spatial_sequence_length: int,
+    pcc: float,
+    mse: float,
 ) -> None:
     is_mesh_device = isinstance(device, ttnn.MeshDevice)
 
@@ -144,4 +147,4 @@ def test_transformer(  # noqa: PLR0915
     with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=0)) if is_mesh_device else nullcontext():
         tt_output_torch = ttnn.to_torch(tt_output)[:batch_size]
 
-    assert_quality(torch_output, tt_output_torch, pcc=0.999_500, mse=14)
+    assert_quality(torch_output, tt_output_torch, pcc=pcc, mse=mse)
