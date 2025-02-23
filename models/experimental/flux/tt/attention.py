@@ -271,28 +271,9 @@ def _merge_qkv_proj(
     }
 
 
-def _rotate(x: ttnn.Tensor) -> ttnn.Tensor:
-    [*batch_dims, _] = x.shape
-
-    x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
-    x = x.reshape([*batch_dims, -1, 2])
-
-    x = ttnn.permute(x, [4, 0, 1, 2, 3])
-
-    x_real = ttnn.to_layout(x[0:1], ttnn.TILE_LAYOUT)
-    x_imag = ttnn.to_layout(x[1:2], ttnn.TILE_LAYOUT)
-
-    x_real, x_imag = (ttnn.neg(x_imag), x_real)
-
-    x = ttnn.concat([x_real, x_imag], dim=0)
-    x = ttnn.permute(x, [1, 2, 3, 4, 0])
-
-    return x.reshape([*batch_dims, -1])
-
-
 def _apply_rotary_emb(x: ttnn.Tensor, freqs_cis: tuple[ttnn.Tensor, ttnn.Tensor]) -> ttnn.Tensor:
     cos, sin = freqs_cis
     cos = cos.reshape([1, 1, *cos.shape])
     sin = sin.reshape([1, 1, *sin.shape])
 
-    return x * cos + _rotate(x) * sin
+    return x * cos + ttnn.complex_rotate(x) * sin
