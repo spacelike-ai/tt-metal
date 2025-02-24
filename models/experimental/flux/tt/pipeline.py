@@ -143,14 +143,14 @@ class TtFluxPipeline:
             [spatial_sequence_length + max_t5_sequence_length, 128], ttnn.float32, ttnn.TILE_LAYOUT, self._device
         )
 
-        # # cache
-        # self._step(
-        #     timestep=tt_timestep,
-        #     latents=tt_latents,
-        #     prompt_embeds=tt_prompt_embeds,
-        #     pooled_prompt_embeds=tt_pooled_prompt_embeds,
-        #     sigma_difference=tt_sigma_difference,
-        # )
+        self._step(
+            latents=tt_latents,
+            timestep=tt_timestep,
+            pooled_prompt_embeds=tt_pooled_prompt_embeds,
+            prompt_embeds=tt_prompt_embeds,
+            sigma_difference=tt_sigma_difference,
+            image_rotary_emb=(tt_imagerot1, tt_imagerot2),
+        )
 
         # # trace
         # tid = ttnn.begin_trace_capture(self._device)
