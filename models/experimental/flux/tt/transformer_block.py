@@ -76,8 +76,6 @@ class TtFluxSingleTransformerBlock:
         t = ttnn.silu(time_embed, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         time = self._time_embed(t)
 
-        residual = combined
-
         shift_msa, scale_msa, gate_msa = chunk_time(time, 3)
         norm_combined = self._norm(combined) * (1 + scale_msa) + shift_msa
 
@@ -86,10 +84,12 @@ class TtFluxSingleTransformerBlock:
         attn, _ = self._attn(spatial=norm_combined, image_rotary_emb=image_rotary_emb)
         # TODO: PCC of attn seems a bit low
 
-        combined = ttnn.concat([attn, mlp_combined], dim=2)
-        combined = gate_msa * self._proj_out(combined)
+        ttnn.deallocate(norm_combined)
 
-        combined += residual
+        additional = ttnn.concat([attn, mlp_combined], dim=2)
+        additional = gate_msa * self._proj_out(additional)
+
+        combined += additional
 
         return combined
         # return ttnn.clamp(combined, -65504, 65504)  # TODO: clamp gives worse PCC

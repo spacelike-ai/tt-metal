@@ -19,8 +19,8 @@ from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 @pytest.mark.parametrize(
     ("batch_size", "spatial_sequence_length", "prompt_sequence_length", "pcc", "mse"),
     [
-        # (1, 1024, 512, 0.9996, 13),
-        (1, 4096, 512, 0.9940, 0.0013),
+        # (1, 1024, 512, 0.99958, 14),
+        (1, 4096, 512, 0.9940, 0.0014),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 15157248}], indirect=True)
