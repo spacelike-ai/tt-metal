@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import time
-from contextlib import nullcontext
 
 import pytest
 import torch
@@ -19,11 +18,9 @@ from ..tt.utils import assert_quality
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
-@pytest.mark.parametrize("program_cache_enabled", [True], indirect=True)
-@pytest.mark.parametrize("device_type", [ttnn.Device, ttnn.MeshDevice], indirect=True)
-def test_t5_encoder(*, device: ttnn.Device | ttnn.MeshDevicel) -> None:
-    is_mesh_device = isinstance(device, ttnn.MeshDevice)
-
+@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
+@pytest.mark.usefixtures("use_program_cache")
+def test_t5_encoder(*, mesh_device: ttnn.MeshDevicel) -> None:
     batch_size = 1
 
     hf_model = T5EncoderModel.from_pretrained("black-forest-labs/FLUX.1-schnell", subfolder="text_encoder_2")
@@ -46,8 +43,8 @@ def test_t5_encoder(*, device: ttnn.Device | ttnn.MeshDevicel) -> None:
     torch_model.eval()
 
     start_time = time.time()
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
-        parameters = TtT5EncoderParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat16)
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
+        parameters = TtT5EncoderParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat16)
     tt_model = TtT5Encoder(
         parameters,
         num_heads=hf_model.config.num_heads,
@@ -60,7 +57,7 @@ def test_t5_encoder(*, device: ttnn.Device | ttnn.MeshDevicel) -> None:
     torch.manual_seed(0)
     tokens = torch.randint(hf_model.config.vocab_size, [batch_size, 256])
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
         tt_tokens_host = ttnn.from_torch(tokens, layout=ttnn.TILE_LAYOUT)
 
     start_time = time.time()
@@ -68,20 +65,20 @@ def test_t5_encoder(*, device: ttnn.Device | ttnn.MeshDevicel) -> None:
         output = torch_model(tokens)
     logger.info(f"CPU runtime: {time.time() - start_time}")
 
-    tt_tokens = tt_tokens_host.to(device)
+    tt_tokens = tt_tokens_host.to(mesh_device)
 
     logger.info("compiling...")
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
         tt_model(tt_tokens)
 
     logger.info("executing...")
     start_time = time.time()
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
         tt_output = tt_model(tt_tokens)
     logger.info(f"TT-NN runtime: {time.time() - start_time}")
     logger.info("done...")
 
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=0)) if is_mesh_device else nullcontext():
+    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
         tt_output_torch = ttnn.to_torch(tt_output)[:batch_size]
 
     assert output.shape == tt_output_torch.shape

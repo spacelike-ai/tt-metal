@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
-
 import pytest
 import torch
 import ttnn
@@ -33,11 +31,11 @@ from ..tt.utils import assert_quality
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
-@pytest.mark.parametrize("program_cache_enabled", [True], indirect=True)
-@pytest.mark.parametrize("device_type", [ttnn.Device, ttnn.MeshDevice], indirect=True)
+@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
+@pytest.mark.usefixtures("use_program_cache")
 def test_conv2d(
     *,
-    device: ttnn.Device | ttnn.MeshDevice,
+    mesh_device: ttnn.MeshDevice,
     batch_size: int,
     in_channels: int,
     out_channels: int,
@@ -46,8 +44,6 @@ def test_conv2d(
     height: int,
     width: int,
 ) -> None:
-    is_mesh_device = isinstance(device, ttnn.MeshDevice)
-
     torch.manual_seed(0)
 
     torch_model = torch.nn.Conv2d(
@@ -58,16 +54,16 @@ def test_conv2d(
     )
     torch_model.eval()
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
-        parameters = TtConv2dParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat16)
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
+        parameters = TtConv2dParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat16)
     tt_model = TtConv2d(parameters, stride=stride)
 
     torch_input_tensor = torch.randn((batch_size, in_channels, height, width))
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
         tt_input_tensor = ttnn.from_torch(
             torch_input_tensor.permute([0, 2, 3, 1]),  # BCYX -> BYXC
-            device=device,
+            device=mesh_device,
             layout=ttnn.TILE_LAYOUT,
             dtype=ttnn.bfloat16,
         )
@@ -77,7 +73,7 @@ def test_conv2d(
 
     tt_output, tt_output_shape = tt_model.call_without_reshape(tt_input_tensor)
 
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=0)) if is_mesh_device else nullcontext():
+    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
         shape = [-1, *tt_output_shape[1:]]
         tt_output_torch = ttnn.to_torch(tt_output).reshape(shape)[:batch_size].permute([0, 3, 1, 2])
 

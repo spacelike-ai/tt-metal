@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
-
 import pytest
 import torch
 import ttnn
@@ -21,39 +19,40 @@ from ..tt.utils import assert_quality
         (32, 128, 256),
     ],
 )
-@pytest.mark.parametrize("program_cache_enabled", [True], indirect=True)
-@pytest.mark.parametrize("device_type", [ttnn.Device, ttnn.MeshDevice], indirect=True)
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
+@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
+@pytest.mark.usefixtures("use_program_cache")
 def test_feed_forward(
     *,
-    device: ttnn.Device | ttnn.MeshDevice,
+    mesh_device: ttnn.MeshDevice,
     batch_size: int,
     input_dim: int,
     output_dim: int,
 ) -> None:
-    is_mesh_device = isinstance(device, ttnn.MeshDevice)
-
     torch.manual_seed(0)
 
     torch_model = FeedForward(dim=input_dim, dim_out=output_dim)
     torch_model.eval()
 
-    with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)) if is_mesh_device else nullcontext():
-        parameters = TtFeedForwardParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b)
+    with ttnn.distribute(ttnn.ShardTensorToMesh(mesh_device, dim=-1)):
+        parameters = TtFeedForwardParameters.from_torch(
+            torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
+        )
     tt_model = TtFeedForward(parameters)
 
     torch_input_tensor = torch.randn((batch_size, input_dim))
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
         tt_input_tensor = ttnn.from_torch(
-            torch_input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+            torch_input_tensor, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
         )
 
     with torch.no_grad():
         torch_output = torch_model(torch_input_tensor)
 
-    tt_output = tt_model(tt_input_tensor, gather=is_mesh_device)
+    tt_output = tt_model(tt_input_tensor, gather=mesh_device.get_num_devices() > 1)
 
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=-1)) if is_mesh_device else nullcontext():
+    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=-1)):
         tt_output_torch = ttnn.to_torch(tt_output)[..., : tt_output.shape[-1]]
 
     assert_quality(torch_output, tt_output_torch, pcc=0.999905)

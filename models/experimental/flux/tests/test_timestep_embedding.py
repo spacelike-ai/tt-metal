@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import pytest
@@ -29,13 +28,11 @@ if TYPE_CHECKING:
         # 100,
     ],
 )
-@pytest.mark.parametrize("program_cache_enabled", [True], indirect=True)
-@pytest.mark.parametrize("device_type", [ttnn.Device, ttnn.MeshDevice], indirect=True)
+@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
+@pytest.mark.usefixtures("use_program_cache")
 def test_timestep_embedding(
-    *, device: ttnn.Device | ttnn.MeshDevice, batch_size: int, parent_torch_model: FluxTransformer2DModel
+    *, mesh_device: ttnn.MeshDevice, batch_size: int, parent_torch_model: FluxTransformer2DModel
 ) -> None:
-    is_mesh_device = isinstance(device, ttnn.MeshDevice)
-
     torch.manual_seed(0)
 
     torch_model: CombinedTimestepTextProjEmbeddings = parent_torch_model.time_text_embed.to(torch.float32)
@@ -43,26 +40,28 @@ def test_timestep_embedding(
     # torch_model = CombinedTimestepTextProjEmbeddings(embedding_dim=3072, pooled_projection_dim=768)
     # torch_model.eval()
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
         parameters = TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(
-            torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b
+            torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
         )
         tt_model = TtCombinedTimestepTextProjEmbeddings(parameters)
 
     timestep = torch.randint(1000, (batch_size,))
     pooled_projection = torch.randn((batch_size, 768))
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
-        tt_timestep = ttnn.from_torch(timestep.unsqueeze(1), device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
+        tt_timestep = ttnn.from_torch(
+            timestep.unsqueeze(1), device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32
+        )
         tt_pooled_projection = ttnn.from_torch(
-            pooled_projection, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+            pooled_projection, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
         )
 
     with torch.no_grad():
         torch_output = torch_model(timestep, pooled_projection)
 
     tt_output = tt_model(timestep=tt_timestep, pooled_projection=tt_pooled_projection)
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=0)) if is_mesh_device else nullcontext():
+    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
         tt_output_torch = ttnn.to_torch(tt_output)[:batch_size]
 
     assert_quality(torch_output, tt_output_torch, pcc=0.999957)

@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
-
 import pytest
 import torch
 import ttnn
@@ -20,31 +18,29 @@ from ..tt.utils import assert_quality
         (32, 1536, 2048),
     ],
 )
-@pytest.mark.parametrize("program_cache_enabled", [True], indirect=True)
-@pytest.mark.parametrize("device_type", [ttnn.Device, ttnn.MeshDevice], indirect=True)
+@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
+@pytest.mark.usefixtures("use_program_cache")
 def test_linear(
     *,
-    device: ttnn.Device | ttnn.MeshDevice,
+    mesh_device: ttnn.MeshDevice,
     batch_size: int,
     input_dim: int,
     output_dim: int,
 ) -> None:
-    is_mesh_device = isinstance(device, ttnn.MeshDevice)
-
     torch.manual_seed(0)
 
     torch_model = torch.nn.Linear(input_dim, output_dim)
     torch_model.eval()
 
-    with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)) if is_mesh_device else nullcontext():
-        parameters = TtLinearParameters.from_torch(torch_model.state_dict(), device=device, dtype=ttnn.bfloat8_b)
+    with ttnn.distribute(ttnn.ShardTensorToMesh(mesh_device, dim=-1)):
+        parameters = TtLinearParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b)
     tt_model = TtLinear(parameters)
 
     torch_input_tensor = torch.randn((batch_size, input_dim))
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)) if is_mesh_device else nullcontext():
+    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
         tt_input_tensor = ttnn.from_torch(
-            torch_input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+            torch_input_tensor, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
         )
 
     with torch.no_grad():
@@ -52,5 +48,5 @@ def test_linear(
 
     tt_output = tt_model(tt_input_tensor)
 
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=-1)) if is_mesh_device else nullcontext():
+    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=-1)):
         assert_quality(torch_output, tt_output, pcc=0.999946)

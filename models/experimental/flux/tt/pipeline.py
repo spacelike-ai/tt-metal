@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import time
-from contextlib import nullcontext
 from dataclasses import dataclass
 
 import numpy as np
@@ -26,10 +25,9 @@ from .transformer import TtFluxTransformer2DModel, TtFluxTransformer2DModelParam
 
 
 class TtFluxPipeline:
-    def __init__(self, *, checkpoint: str, device: ttnn.Device | ttnn.MeshDevice) -> None:
+    def __init__(self, *, checkpoint: str, device: ttnn.MeshDevice) -> None:
         self._device = device
-        self._is_mesh_device = isinstance(device, ttnn.MeshDevice)
-        self._device_count = device.get_num_devices() if isinstance(device, ttnn.MeshDevice) else 1
+        self._device_count = device.get_num_devices()
 
         logger.info("loading transformer...")
 
@@ -40,7 +38,7 @@ class TtFluxPipeline:
 
         logger.info("creating TT-NN transformer...")
 
-        with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)) if self._is_mesh_device else nullcontext():
+        with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)):
             parameters = TtFluxTransformer2DModelParameters.from_torch(
                 torch_transformer.state_dict(), device=device, dtype=ttnn.bfloat8_b
             )
@@ -82,7 +80,7 @@ class TtFluxPipeline:
 
         logger.info("creating TT-NN text encoder...")
 
-        # with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)) if self._is_mesh_device else nullcontext():
+        # with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)):
         #     parameters = TtT5EncoderParameters.from_torch(
         #         torch_text_encoder_2.state_dict(), device=device, dtype=ttnn.bfloat16
         #     )
@@ -127,7 +125,7 @@ class TtFluxPipeline:
             self._num_channels_latents * 4,
         )
 
-        with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)) if self._is_mesh_device else nullcontext():
+        with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)):
             tt_prompt_embeds = ttnn.from_torch(
                 prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
             )
@@ -251,7 +249,7 @@ class TtFluxPipeline:
         ids = torch.cat((text_ids, image_ids), dim=0)
         image_rotary_emb = self._pos_embed(ids)
 
-        with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)) if self._is_mesh_device else nullcontext():
+        with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)):
             tt_prompt_embeds = ttnn.from_torch(prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
             tt_pooled_prompt_embeds = ttnn.from_torch(
                 pooled_prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
@@ -272,7 +270,7 @@ class TtFluxPipeline:
         for i, t in enumerate(tqdm.tqdm(timesteps)):
             sigma_difference = self._scheduler.sigmas[i + 1] - self._scheduler.sigmas[i]
 
-            with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)) if self._is_mesh_device else nullcontext():
+            with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)):
                 # ttnn.full does not support replication for use with mesh device
                 # tt_timestep = ttnn.full([1, 1], fill_value=t, dtype=ttnn.float32)
                 # tt_sigma_difference = ttnn.full(
@@ -308,7 +306,7 @@ class TtFluxPipeline:
 
         image_decoding_start_time = time.time()
 
-        with ttnn.distribute(ttnn.ConcatMeshToTensor(self._device, dim=0)) if self._is_mesh_device else nullcontext():
+        with ttnn.distribute(ttnn.ConcatMeshToTensor(self._device, dim=0)):
             size = self._trace.spatial_input_output.shape[0]
             latents = ttnn.to_torch(self._trace.spatial_input_output)[:size].to(torch.float32)
         latents = _unpack_latents(latents, height, width, self._vae_scale_factor)
