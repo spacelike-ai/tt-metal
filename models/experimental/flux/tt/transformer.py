@@ -11,15 +11,10 @@ import ttnn
 
 from .linear import TtLinear, TtLinearParameters
 from .normalization import TtLayerNorm, TtLayerNormParameters
+from .single_transformer_block import TtFluxSingleTransformerBlock, TtFluxSingleTransformerBlockParameters
 from .substate import indexed_substates, substate
 from .timestep_embedding import TtCombinedTimestepTextProjEmbeddings, TtCombinedTimestepTextProjEmbeddingsParameters
-from .transformer_block import (
-    TtFluxSingleTransformerBlock,
-    TtFluxSingleTransformerBlockParameters,
-    TtTransformerBlock,
-    TtTransformerBlockParameters,
-    chunk_time,
-)
+from .transformer_block import TtTransformerBlock, TtTransformerBlockParameters, chunk_time
 
 if TYPE_CHECKING:
     import torch

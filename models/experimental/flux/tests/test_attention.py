@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     ("program_cache_enabled", "use_tracing"),
     [
         (False, False),
-        # (True, False), # _apply_rotary_emb gives the wrong result when the program cache is enabled
+        # (True, False),
         # (True, True),
     ],
 )
