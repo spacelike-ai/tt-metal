@@ -96,6 +96,7 @@ class TtFluxTransformer2DModel:
         gather: bool = False,
     ) -> ttnn.Tensor:
         height, width = list(spatial.shape)[-2:]
+        prompt_sequence_length = prompt.shape[1]
 
         spatial = self._x_embedder(spatial)
         time_embed = self._time_text_embed(timestep=timestep, pooled_projection=pooled_projection)
@@ -117,6 +118,8 @@ class TtFluxTransformer2DModel:
                 ttnn.DumpDeviceProfiler(spatial.device())  # TODO: allow for mesh device
 
         combined = ttnn.concat([prompt, spatial], dim=1)
+        ttnn.deallocate(prompt)
+        ttnn.deallocate(spatial)
 
         for i, block in enumerate(self._single_transformer_blocks, start=1):
             print(f"single iteration {i}...")
@@ -129,7 +132,8 @@ class TtFluxTransformer2DModel:
             if i % 6 == 0:
                 ttnn.DumpDeviceProfiler(combined.device())  # TODO: allow for mesh device
 
-        spatial = combined[:, prompt.shape[1] :]
+        spatial = combined[:, prompt_sequence_length:]
+        ttnn.deallocate(combined)
 
         spatial_time = self._time_embed_out(ttnn.silu(time_embed))
         [scale, shift] = chunk_time(spatial_time, 2)
