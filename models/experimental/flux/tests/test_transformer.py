@@ -23,16 +23,16 @@ from ..tt.utils import allocate_tensor_on_device_like, assert_quality
         (1, 4096, 512, 0.9940, 0.0014),
     ],
 )
-@pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 15157248}], indirect=True)
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 18006016}], indirect=True)
 @pytest.mark.parametrize(
-    ("program_cache_enabled", "use_tracing"),
+    ("program_cache_enabled", "use_tracing", "device_type"),
     [
-        (False, False),
-        # (True, False),
-        # (True, True),
+        # Tracing is not supported on n150 devices, since not all weights fit on the device.
+        (True, False, ttnn.Device),
+        # Tracing currently causes a mesh device to hang.
+        (True, False, ttnn.MeshDevice),
     ],
 )
-@pytest.mark.parametrize("device_type", [ttnn.Device, ttnn.MeshDevice], indirect=True)
 def test_transformer(  # noqa: PLR0915
     *,
     device: ttnn.MeshDevice,

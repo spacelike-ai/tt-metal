@@ -30,9 +30,7 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize(
     ("program_cache_enabled", "use_tracing"),
     [
-        (False, False),
-        # (True, False),
-        # (True, True),
+        (True, True),
     ],
 )
 @pytest.mark.parametrize("device_type", [ttnn.Device, ttnn.MeshDevice], indirect=True)

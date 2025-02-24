@@ -27,14 +27,13 @@ if TYPE_CHECKING:
 )
 @pytest.mark.parametrize("device_params", [{"trace_region_size": 716800}], indirect=True)
 @pytest.mark.parametrize(
-    ("program_cache_enabled", "use_tracing"),
+    ("program_cache_enabled", "use_tracing", "device_type"),
     [
-        (False, False),
-        # (True, False),
-        # (True, True),
+        (True, True, ttnn.Device),
+        # Tracing currently causes a mesh device to hang.
+        (True, False, ttnn.MeshDevice),
     ],
 )
-@pytest.mark.parametrize("device_type", [ttnn.Device, ttnn.MeshDevice], indirect=True)
 def test_transformer_block(
     *,
     device: ttnn.Device | ttnn.MeshDevice,
