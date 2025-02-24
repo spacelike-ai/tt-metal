@@ -29,6 +29,7 @@ class TtFluxPipeline:
     def __init__(self, *, checkpoint: str, device: ttnn.Device | ttnn.MeshDevice) -> None:
         self._device = device
         self._is_mesh_device = isinstance(device, ttnn.MeshDevice)
+        self._device_count = device.get_num_devices() if isinstance(device, ttnn.MeshDevice) else 1
 
         logger.info("loading transformer...")
 
@@ -352,7 +353,6 @@ class TtFluxPipeline:
             pooled_projection=pooled_prompt_embeds,
             timestep=timestep,
             image_rotary_emb=image_rotary_emb,
-            gather=self._is_mesh_device,
         )
 
         ttnn.add_(latents, sigma_difference * noise_pred)

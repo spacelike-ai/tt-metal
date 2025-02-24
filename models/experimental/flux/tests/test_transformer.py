@@ -106,7 +106,6 @@ def test_transformer(  # noqa: PLR0915
         pooled_projection=tt_pooled_projection,
         timestep=tt_timestep,
         image_rotary_emb=(tt_imagerot1, tt_imagerot2),
-        gather=is_mesh_device,
     )
 
     if use_tracing:

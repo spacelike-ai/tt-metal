@@ -30,6 +30,7 @@ class TtFluxTransformer2DModelParameters:
     time_embed_out: TtLinearParameters
     norm_out: TtLayerNormParameters
     proj_out: TtLinearParameters
+    device_count: int
 
     @classmethod
     def from_torch(
@@ -39,7 +40,7 @@ class TtFluxTransformer2DModelParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
     ) -> TtFluxTransformer2DModelParameters:
-        is_mesh_device = isinstance(device, ttnn.MeshDevice)
+        device_count = device.get_num_devices() if isinstance(device, ttnn.MeshDevice) else 1
 
         return cls(
             x_embedder=TtLinearParameters.from_torch(substate(state, "x_embedder"), dtype=dtype, device=device),
@@ -55,7 +56,7 @@ class TtFluxTransformer2DModelParameters:
             ],
             single_transformer_blocks=[
                 TtFluxSingleTransformerBlockParameters.from_torch(
-                    s, dtype=dtype, device=device, linear_on_host=i > 10 and not is_mesh_device
+                    s, dtype=dtype, device=device, linear_on_host=i > 10 and device_count == 1
                 )
                 for i, s in enumerate(indexed_substates(state, "single_transformer_blocks"))
             ],
@@ -64,6 +65,7 @@ class TtFluxTransformer2DModelParameters:
             ),
             norm_out=TtLayerNormParameters.from_torch(substate(state, "norm_out.norm"), dtype=dtype, device=device),
             proj_out=TtLinearParameters.from_torch(substate(state, "proj_out"), dtype=dtype, device=device),
+            device_count=device_count,
         )
 
 
@@ -85,6 +87,8 @@ class TtFluxTransformer2DModel:
         self._norm_out = TtLayerNorm(parameters.norm_out, eps=1e-6)
         self._proj_out = TtLinear(parameters.proj_out)
 
+        self._device_count = parameters.device_count
+
     def __call__(
         self,
         *,
@@ -93,7 +97,6 @@ class TtFluxTransformer2DModel:
         pooled_projection: ttnn.Tensor,
         timestep: ttnn.Tensor,
         image_rotary_emb: tuple[ttnn.Tensor, ttnn.Tensor],
-        gather: bool = False,
     ) -> ttnn.Tensor:
         height, width = list(spatial.shape)[-2:]
         prompt_sequence_length = prompt.shape[1]
@@ -111,7 +114,7 @@ class TtFluxTransformer2DModel:
                 prompt=prompt,
                 time_embed=time_embed,
                 image_rotary_emb=image_rotary_emb,
-                gather=gather,
+                gather=self._device_count > 1,
             )
 
             if i % 6 == 0:
