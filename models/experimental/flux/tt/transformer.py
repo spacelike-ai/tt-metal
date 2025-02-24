@@ -56,7 +56,7 @@ class TtFluxTransformer2DModelParameters:
             ],
             single_transformer_blocks=[
                 TtFluxSingleTransformerBlockParameters.from_torch(
-                    s, dtype=dtype, device=device, linear_on_host=i > 10 and device_count == 1
+                    s, dtype=dtype, device=device, linear_on_host=i > 20 and device_count == 1
                 )
                 for i, s in enumerate(indexed_substates(state, "single_transformer_blocks"))
             ],
