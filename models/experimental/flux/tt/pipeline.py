@@ -125,7 +125,7 @@ class TtFluxPipeline:
 
         with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)):
             tt_prompt_embeds = ttnn.from_torch(
-                prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+                prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b
             )
             tt_pooled_prompt_embeds = ttnn.from_torch(
                 pooled_prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
@@ -248,7 +248,7 @@ class TtFluxPipeline:
         image_rotary_emb = self._pos_embed(ids)
 
         with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)):
-            tt_prompt_embeds = ttnn.from_torch(prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+            tt_prompt_embeds = ttnn.from_torch(prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
             tt_pooled_prompt_embeds = ttnn.from_torch(
                 pooled_prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
             )

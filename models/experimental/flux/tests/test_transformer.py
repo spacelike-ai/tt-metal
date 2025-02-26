@@ -17,8 +17,8 @@ from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 @pytest.mark.parametrize(
     ("batch_size", "spatial_sequence_length", "prompt_sequence_length", "pcc", "mse"),
     [
-        # (1, 1024, 512, 0.99958, 14),
-        (1, 4096, 512, 0.9940, 0.0014),
+        # (1, 1024, 512, 0.99951, 15),
+        (1, 4096, 512, 0.986, 0.0031),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 18006016}], indirect=True)
@@ -85,7 +85,7 @@ def test_transformer(  # noqa: PLR0915
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
         tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-        tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+        tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
         tt_pooled_projection_host = ttnn.from_torch(pooled_projection, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
         tt_timestep_host = ttnn.from_torch(timestep.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
         tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)

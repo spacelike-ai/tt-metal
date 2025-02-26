@@ -57,9 +57,9 @@ def test_attention(
     imagerot2 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+        tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
         tt_prompt_host = (
-            ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16) if separate_prompt else None
+            ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b) if separate_prompt else None
         )
         tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
         tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)

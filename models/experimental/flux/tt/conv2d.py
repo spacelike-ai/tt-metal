@@ -18,6 +18,7 @@ class TtConv2dParameters:
     weight: ttnn.Tensor
     bias: ttnn.Tensor | None
     device: ttnn.Device | ttnn.MeshDevice
+    dtype: ttnn.DataType
 
     @classmethod
     def from_torch(
@@ -27,10 +28,17 @@ class TtConv2dParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
     ) -> TtConv2dParameters:
+        # The function that prepares conv2d weights and biases requires row-major layout, which is
+        # not suppoted by block floats.
+        intermediate_dtype = dtype if dtype not in [ttnn.bfloat4_b, ttnn.bfloat8_b] else ttnn.bfloat16
+
         return cls(
-            weight=ttnn.from_torch(state["weight"], dtype=dtype),
-            bias=ttnn.from_torch(state["bias"].reshape((1, 1, 1, -1)), dtype=dtype) if "bias" in state else None,
+            weight=ttnn.from_torch(state["weight"], dtype=intermediate_dtype),
+            bias=ttnn.from_torch(state["bias"].reshape((1, 1, 1, -1)), dtype=intermediate_dtype)
+            if "bias" in state
+            else None,
             device=device,
+            dtype=dtype or ttnn.bfloat16,
         )
 
     @property
@@ -65,10 +73,18 @@ class TtConv2d:
         self._bias = parameters.bias
 
         self._device = parameters.device
+        self._weights_dtype = parameters.dtype
 
-    def call_without_reshape(self, x: ttnn.Tensor) -> tuple[ttnn.Tensor, list[int]]:
+    def call_without_reshape(
+        self, x: ttnn.Tensor, *, dtype: ttnn.DataType | None = None
+    ) -> tuple[ttnn.Tensor, list[int]]:
         batch_size = x.shape[0]
         memory_config_in = ttnn.get_memory_config(x)
+
+        conv2d_config = ttnn.Conv2dConfig(
+            dtype=dtype or x.dtype,
+            weights_dtype=self._weights_dtype,
+        )
 
         result, [output_height, output_width], [prepared_weight, prepared_bias] = ttnn.conv2d(
             input_tensor=x,
@@ -85,6 +101,7 @@ class TtConv2d:
             input_width=x.shape[2],
             return_output_dim=True,
             return_weights_and_bias=True,
+            conv_config=conv2d_config,
         )
 
         result = ttnn.to_memory_config(result, memory_config=memory_config_in)

@@ -119,6 +119,8 @@ class TtFluxTransformer2DModel:
             if i % 6 == 0:
                 ttnn.DumpDeviceProfiler(spatial.device())  # TODO: allow for mesh device
 
+        prompt = ttnn.clone(prompt, dtype=spatial.dtype)
+
         combined = ttnn.concat([prompt, spatial], dim=1)
         ttnn.deallocate(prompt)
         ttnn.deallocate(spatial)

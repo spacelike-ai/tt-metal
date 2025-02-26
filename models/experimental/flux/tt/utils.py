@@ -97,6 +97,6 @@ def assert_quality(
 
     logger.info(f"PCC={pcc_calculated:.6f}, MSE={mse_calculated:.6f}")
     if pcc is not None:
-        assert pcc_calculated >= pcc, f"PCC={pcc_calculated:.6f}"
+        assert pcc_calculated >= pcc, f"PCC={pcc_calculated:.6f} >= {pcc:.6f}"
     if mse is not None:
-        assert mse_calculated <= mse, f"MSE={mse_calculated:.6f}"
+        assert mse_calculated <= mse, f"MSE={mse_calculated:.6f} <= {mse:.6f}"

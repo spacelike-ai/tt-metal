@@ -58,7 +58,7 @@ def test_transformer_block(
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
         tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-        tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+        tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
         tt_time_host = ttnn.from_torch(time.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
         tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
         tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
@@ -117,6 +117,6 @@ def test_transformer_block(
     assert (prompt_output is None) == (tt_prompt_output is None)
 
     if tt_prompt_output is not None:
-        assert_quality(prompt_output, tt_prompt_output_torch, pcc=0.99956, mse=980)
+        assert_quality(prompt_output, tt_prompt_output_torch, pcc=0.99942, mse=1200)
 
-    assert_quality(spatial_output, tt_spatial_output_torch, pcc=0.99901, mse=17)
+    assert_quality(spatial_output, tt_spatial_output_torch, pcc=0.9989, mse=20)

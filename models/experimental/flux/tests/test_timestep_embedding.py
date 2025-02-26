@@ -54,7 +54,7 @@ def test_timestep_embedding(
             timestep.unsqueeze(1), device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32
         )
         tt_pooled_projection = ttnn.from_torch(
-            pooled_projection, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+            pooled_projection, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b
         )
 
     with torch.no_grad():
@@ -64,4 +64,4 @@ def test_timestep_embedding(
     with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
         tt_output_torch = ttnn.to_torch(tt_output)[:batch_size]
 
-    assert_quality(torch_output, tt_output_torch, pcc=0.999957)
+    assert_quality(torch_output, tt_output_torch, pcc=0.99983)

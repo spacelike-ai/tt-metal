@@ -40,7 +40,7 @@ def test_linear(
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
         tt_input_tensor = ttnn.from_torch(
-            torch_input_tensor, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+            torch_input_tensor, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b
         )
 
     with torch.no_grad():
@@ -49,4 +49,4 @@ def test_linear(
     tt_output = tt_model(tt_input_tensor)
 
     with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=-1)):
-        assert_quality(torch_output, tt_output, pcc=0.999946)
+        assert_quality(torch_output, tt_output, pcc=0.99976)

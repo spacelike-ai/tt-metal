@@ -65,7 +65,7 @@ def test_conv2d(
             torch_input_tensor.permute([0, 2, 3, 1]),  # BCYX -> BYXC
             device=mesh_device,
             layout=ttnn.TILE_LAYOUT,
-            dtype=ttnn.bfloat16,
+            dtype=ttnn.bfloat8_b,
         )
 
     with torch.no_grad():
@@ -77,4 +77,4 @@ def test_conv2d(
         shape = [-1, *tt_output_shape[1:]]
         tt_output_torch = ttnn.to_torch(tt_output).reshape(shape)[:batch_size].permute([0, 3, 1, 2])
 
-    assert_quality(torch_output, tt_output_torch, pcc=0.999951)
+    assert_quality(torch_output, tt_output_torch, pcc=0.999818)
