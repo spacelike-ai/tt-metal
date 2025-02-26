@@ -108,7 +108,6 @@ class TtFluxTransformer2DModel:
         time_embed = time_embed.reshape([time_embed.shape[0], 1, time_embed.shape[1]])
 
         for i, block in enumerate(self._transformer_blocks, start=1):
-            print(f"iteration {i}...")
             spatial, prompt = block(
                 spatial=spatial,
                 prompt=prompt,
@@ -125,7 +124,6 @@ class TtFluxTransformer2DModel:
         ttnn.deallocate(spatial)
 
         for i, block in enumerate(self._single_transformer_blocks, start=1):
-            print(f"single iteration {i}...")
             combined = block(
                 combined=combined,
                 time_embed=time_embed,
