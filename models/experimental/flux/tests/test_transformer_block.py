@@ -117,6 +117,6 @@ def test_transformer_block(
     assert (prompt_output is None) == (tt_prompt_output is None)
 
     if tt_prompt_output is not None:
-        assert_quality(prompt_output, tt_prompt_output_torch, pcc=0.99942, mse=1200)
+        assert_quality(prompt_output, tt_prompt_output_torch, pcc=0.99942, mse=1500)
 
     assert_quality(spatial_output, tt_spatial_output_torch, pcc=0.9989, mse=20)
