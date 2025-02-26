@@ -92,5 +92,5 @@ enum SfpuType {
     reshuffle_rows,
     cumsum,
     fill,
-    complex_rotate,
+    interleaved_complex_rotate,
 };

@@ -276,4 +276,4 @@ def _apply_rotary_emb(x: ttnn.Tensor, freqs_cis: tuple[ttnn.Tensor, ttnn.Tensor]
     cos = cos.reshape([1, 1, *cos.shape])
     sin = sin.reshape([1, 1, *sin.shape])
 
-    return x * cos + ttnn.complex_rotate(x) * sin
+    return x * cos + ttnn.interleaved_complex_rotate(x) * sin

@@ -878,12 +878,12 @@ ALWI void unary_lt_tile_init() { MATH((llk_math_eltwise_unary_sfpu_unary_lt_init
  * | idst            | The index of the tile in DST register buffer to perform the computation on | uint32_t | Must be less than the size of the DST register buffer | True     |
  */
 // clang-format on
-ALWI void complex_rotate_tile(uint32_t idst) { MATH((llk_math_eltwise_unary_sfpu_complex_rotate<APPROX>(idst))); }
+ALWI void interleaved_complex_rotate_tile(uint32_t idst) { MATH((llk_math_eltwise_unary_sfpu_interleaved_complex_rotate<APPROX>(idst))); }
 
 /**
  * Please refer to documentation for any_init.
  */
-ALWI void complex_rotate_tile_init() { MATH((llk_math_eltwise_unary_sfpu_complex_rotate_init<APPROX>())); }
+ALWI void interleaved_complex_rotate_tile_init() { MATH((llk_math_eltwise_unary_sfpu_interleaved_complex_rotate_init<APPROX>())); }
 
 ALWI uint32_t get_compute_special_value_flags() {
     uint32_t ret_val = 0;

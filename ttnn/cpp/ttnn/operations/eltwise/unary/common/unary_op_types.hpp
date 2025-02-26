@@ -90,7 +90,7 @@ enum class UnaryOpType {
     DROPOUT,
     FILL,
     PRELU_SFPU,
-    COMPLEX_ROTATE,
+    INTERLEAVED_COMPLEX_ROTATE,
 };
 
 struct UnaryWithParam {

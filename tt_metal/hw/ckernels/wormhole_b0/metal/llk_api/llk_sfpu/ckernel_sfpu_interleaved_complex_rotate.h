@@ -14,7 +14,7 @@ namespace ckernel {
 namespace sfpu {
 
 template <bool APPROXIMATION_MODE, int ITERATIONS = 8>
-inline void calculate_complex_rotate() {
+inline void calculate_interleaved_complex_rotate() {
     for (int d = 0; d < ITERATIONS / 2; d++) {
         vFloat val = dst_reg[0];
         dst_reg[0] = -dst_reg[1];
