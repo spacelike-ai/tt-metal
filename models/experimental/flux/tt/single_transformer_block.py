@@ -65,7 +65,7 @@ class TtFluxSingleTransformerBlock:
         self._proj_mlp = TtLinear(parameters.proj_mlp)
         self._proj_out = TtLinear(parameters.proj_out)
 
-    def __call__(
+    def forward(
         self,
         *,
         combined: ttnn.Tensor,
@@ -73,20 +73,20 @@ class TtFluxSingleTransformerBlock:
         image_rotary_emb: tuple[ttnn.Tensor, ttnn.Tensor] | None = None,
     ) -> ttnn.Tensor:
         t = ttnn.silu(time_embed, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        time = self._time_embed(t)
+        time = self._time_embed.forward(t)
 
         shift_msa, scale_msa, gate_msa = chunk_time(time, 3)
-        norm_combined = self._norm(combined) * (1 + scale_msa) + shift_msa
+        norm_combined = self._norm.forward(combined) * (1 + scale_msa) + shift_msa
 
-        mlp_combined = self._proj_mlp(norm_combined)
+        mlp_combined = self._proj_mlp.forward(norm_combined)
         ttnn.gelu(mlp_combined, output_tensor=mlp_combined, fast_and_approximate_mode=False)
-        attn, _ = self._attn(spatial=norm_combined, image_rotary_emb=image_rotary_emb)
+        attn, _ = self._attn.forward(spatial=norm_combined, image_rotary_emb=image_rotary_emb)
         # TODO: PCC of attn seems a bit low
 
         ttnn.deallocate(norm_combined)
 
         additional = ttnn.concat([attn, mlp_combined], dim=2)
-        additional = gate_msa * self._proj_out(additional)
+        additional = gate_msa * self._proj_out.forward(additional)
 
         combined += additional
 

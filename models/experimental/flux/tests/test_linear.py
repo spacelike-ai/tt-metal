@@ -46,7 +46,7 @@ def test_linear(
     with torch.no_grad():
         torch_output = torch_model(torch_input_tensor)
 
-    tt_output = tt_model(tt_input_tensor)
+    tt_output = tt_model.forward(tt_input_tensor)
 
     with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=-1)):
         assert_quality(torch_output, tt_output, pcc=0.99976)

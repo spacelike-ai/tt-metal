@@ -74,7 +74,7 @@ class TtLinear:
         self._paramters_on_host = parameters.on_host
         self._device = parameters.device
 
-    def __call__(
+    def forward(
         self,
         x: ttnn.Tensor,
         *,

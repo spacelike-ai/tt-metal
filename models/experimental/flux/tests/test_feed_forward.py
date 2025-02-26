@@ -50,7 +50,7 @@ def test_feed_forward(
     with torch.no_grad():
         torch_output = torch_model(torch_input_tensor)
 
-    tt_output = tt_model(tt_input_tensor, gather=mesh_device.get_num_devices() > 1)
+    tt_output = tt_model.forward(tt_input_tensor, gather=mesh_device.get_num_devices() > 1)
 
     with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=-1)):
         tt_output_torch = ttnn.to_torch(tt_output)[..., : tt_output.shape[-1]]

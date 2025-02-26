@@ -89,7 +89,7 @@ class TtFluxTransformer2DModel:
 
         self._device_count = parameters.device_count
 
-    def __call__(
+    def forward(
         self,
         *,
         spatial: ttnn.Tensor,
@@ -101,14 +101,14 @@ class TtFluxTransformer2DModel:
         height, width = list(spatial.shape)[-2:]
         prompt_sequence_length = prompt.shape[1]
 
-        spatial = self._x_embedder(spatial)
-        time_embed = self._time_text_embed(timestep=timestep, pooled_projection=pooled_projection)
-        prompt = self._context_embedder(prompt)
+        spatial = self._x_embedder.forward(spatial)
+        time_embed = self._time_text_embed.forward(timestep=timestep, pooled_projection=pooled_projection)
+        prompt = self._context_embedder.forward(prompt)
 
         time_embed = time_embed.reshape([time_embed.shape[0], 1, time_embed.shape[1]])
 
         for i, block in enumerate(self._transformer_blocks, start=1):
-            spatial, prompt = block(
+            spatial, prompt = block.forward(
                 spatial=spatial,
                 prompt=prompt,
                 time_embed=time_embed,
@@ -126,7 +126,7 @@ class TtFluxTransformer2DModel:
         ttnn.deallocate(spatial)
 
         for i, block in enumerate(self._single_transformer_blocks, start=1):
-            combined = block(
+            combined = block.forward(
                 combined=combined,
                 time_embed=time_embed,
                 image_rotary_emb=image_rotary_emb,
@@ -138,8 +138,8 @@ class TtFluxTransformer2DModel:
         spatial = combined[:, prompt_sequence_length:]
         ttnn.deallocate(combined)
 
-        spatial_time = self._time_embed_out(ttnn.silu(time_embed))
+        spatial_time = self._time_embed_out.forward(ttnn.silu(time_embed))
         [scale, shift] = chunk_time(spatial_time, 2)
-        spatial = self._norm_out(spatial) * (1 + scale) + shift
+        spatial = self._norm_out.forward(spatial) * (1 + scale) + shift
 
-        return self._proj_out(spatial)
+        return self._proj_out.forward(spatial)

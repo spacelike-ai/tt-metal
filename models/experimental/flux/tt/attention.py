@@ -104,7 +104,7 @@ class TtAttentionPart:
         #     mm_a_y = 6
         #     mm_a_x_memory_config = ttnn.L1_MEMORY_CONFIG
 
-        qkv = self._qkv_proj(
+        qkv = self._qkv_proj.forward(
             x,
             # memory_config=mm_a_x_memory_config,
             # core_grid=ttnn.CoreGrid(y=mm_a_y, x=mm_a_x),
@@ -118,8 +118,8 @@ class TtAttentionPart:
         q, k, v = ttnn.transformer.split_query_key_value_and_split_heads(qkv, num_heads=num_heads, transpose_key=False)
         ttnn.deallocate(qkv)
 
-        q = self._norm_q(q, deallocate=True)
-        k = self._norm_k(k, deallocate=True)
+        q = self._norm_q.forward(q, deallocate=True)
+        k = self._norm_k.forward(k, deallocate=True)
 
         # q = to_memory_config(q, ttnn.DRAM_MEMORY_CONFIG, deallocate=True)
         # k = to_memory_config(k, ttnn.DRAM_MEMORY_CONFIG, deallocate=True)
@@ -131,7 +131,7 @@ class TtAttentionPart:
         if self._out_proj is None:
             return x
 
-        return self._out_proj(x)
+        return self._out_proj.forward(x)
 
         # return to_memory_config(
         #     result,
@@ -150,7 +150,7 @@ class TtAttention:
         self._spatial_attn = TtAttentionPart(parameters.spatial)
         self._prompt_attn = TtAttentionPart(parameters.prompt) if parameters.prompt is not None else None
 
-    def __call__(
+    def forward(
         self,
         *,
         spatial: ttnn.Tensor,

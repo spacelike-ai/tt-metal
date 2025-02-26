@@ -343,7 +343,7 @@ class TtFluxPipeline:
         timestep = ttnn.repeat(timestep, ttnn.Shape([batch_size, 1]))
         timestep = ttnn.to_layout(timestep, ttnn.TILE_LAYOUT)
 
-        noise_pred = self._tt_transformer(
+        noise_pred = self._tt_transformer.forward(
             spatial=latents,
             prompt=prompt_embeds,
             pooled_projection=pooled_prompt_embeds,
@@ -461,7 +461,7 @@ def _get_t5_prompt_embeds(
             tt_text_input_ids = ttnn.from_torch(
                 text_input_ids, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
             )
-            tt_prompt_embeds = text_encoder(tt_text_input_ids)
+            tt_prompt_embeds = text_encoder.forward(tt_text_input_ids)
         with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=0)):
             prompt_embeds = ttnn.to_torch(tt_prompt_embeds)[: text_input_ids.shape[0]]
     else:

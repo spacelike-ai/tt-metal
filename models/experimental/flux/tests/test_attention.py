@@ -82,11 +82,11 @@ def test_attention(
 
     if use_tracing:
         # cache
-        tt_model(**model_args)
+        tt_model.forward(**model_args)
 
         # trace
         tid = ttnn.begin_trace_capture(mesh_device)
-        tt_spatial_output, tt_prompt_output = tt_model(**model_args)
+        tt_spatial_output, tt_prompt_output = tt_model.forward(**model_args)
         ttnn.end_trace_capture(mesh_device, tid)
 
         # execute
@@ -98,7 +98,7 @@ def test_attention(
         ttnn.execute_trace(mesh_device, tid)
     else:
         # compile
-        tt_model(**model_args)
+        tt_model.forward(**model_args)
 
         # execute
         ttnn.copy_host_to_device_tensor(tt_spatial_host, tt_spatial)
@@ -106,7 +106,7 @@ def test_attention(
             ttnn.copy_host_to_device_tensor(tt_prompt_host, tt_prompt)
         ttnn.copy_host_to_device_tensor(tt_imagerot1_host, tt_imagerot1)
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
-        tt_spatial_output, tt_prompt_output = tt_model(**model_args)
+        tt_spatial_output, tt_prompt_output = tt_model.forward(**model_args)
 
     with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
         tt_spatial_output_torch = ttnn.to_torch(tt_spatial_output)[:batch_size]

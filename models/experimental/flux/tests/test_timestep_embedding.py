@@ -60,7 +60,7 @@ def test_timestep_embedding(
     with torch.no_grad():
         torch_output = torch_model(timestep, pooled_projection)
 
-    tt_output = tt_model(timestep=tt_timestep, pooled_projection=tt_pooled_projection)
+    tt_output = tt_model.forward(timestep=tt_timestep, pooled_projection=tt_pooled_projection)
     with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
         tt_output_torch = ttnn.to_torch(tt_output)[:batch_size]
 

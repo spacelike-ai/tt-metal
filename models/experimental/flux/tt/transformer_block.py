@@ -123,7 +123,7 @@ class TtTransformerBlock:
         assert self._spatial_attn is not None
 
         scaled = inp * (1 + scale) + shift
-        attn, _ = self._spatial_attn(spatial=scaled, image_rotary_emb=image_rotary_emb, deallocate=True)
+        attn, _ = self._spatial_attn.forward(spatial=scaled, image_rotary_emb=image_rotary_emb, deallocate=True)
 
         result = gate * attn
 
@@ -148,7 +148,7 @@ class TtTransformerBlock:
 
         prompt_scaled = prompt * (1 + prompt_scale) + prompt_shift
 
-        spatial_attn, prompt_attn = self._dual_attn(
+        spatial_attn, prompt_attn = self._dual_attn.forward(
             spatial=spatial_scaled, prompt=prompt_scaled, image_rotary_emb=image_rotary_emb, deallocate=True
         )
 
@@ -163,7 +163,7 @@ class TtTransformerBlock:
         self, inp: ttnn.Tensor, *, gate: ttnn.Tensor, scale: ttnn.Tensor, shift: ttnn.Tensor, gather: bool = False
     ) -> ttnn.Tensor:
         scaled = inp * (1 + scale) + shift
-        result = gate * self._spatial_ff(scaled, gather=gather)
+        result = gate * self._spatial_ff.forward(scaled, gather=gather)
         ttnn.deallocate(scaled)
         return result
 
@@ -173,11 +173,11 @@ class TtTransformerBlock:
         assert self._prompt_ff is not None
 
         scaled = inp * (1 + scale) + shift
-        result = gate * self._prompt_ff(scaled, gather=gather)
+        result = gate * self._prompt_ff.forward(scaled, gather=gather)
         ttnn.deallocate(scaled)
         return result
 
-    def __call__(  # noqa: PLR0915
+    def forward(  # noqa: PLR0915
         self,
         *,
         spatial: ttnn.Tensor,
@@ -188,8 +188,8 @@ class TtTransformerBlock:
     ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
         t = ttnn.silu(time_embed, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
-        spatial_time = self._spatial_time_embed(t, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        prompt_time = self._prompt_time_embed(t, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        spatial_time = self._spatial_time_embed.forward(t, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        prompt_time = self._prompt_time_embed.forward(t, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         ttnn.deallocate(t)
 
         if self._spatial_attn is not None:  # TODO: branch needed?
@@ -238,8 +238,8 @@ class TtTransformerBlock:
                 prompt_gate_ff,
             ] = chunk_time(prompt_time, 6)
 
-        spatial_normed = self._spatial_norm_1(spatial)
-        prompt_normed = self._prompt_norm_1(prompt)
+        spatial_normed = self._spatial_norm_1.forward(spatial)
+        prompt_normed = self._prompt_norm_1.forward(prompt)
 
         spatial_normed = ttnn.clone(spatial_normed, dtype=ttnn.bfloat8_b)
         prompt_normed = ttnn.clone(prompt_normed, dtype=ttnn.bfloat8_b)
@@ -284,7 +284,7 @@ class TtTransformerBlock:
             ttnn.deallocate(spatial_scale_attn)
             ttnn.deallocate(spatial_shift_attn)
 
-        spatial_normed = self._spatial_norm_2(spatial)
+        spatial_normed = self._spatial_norm_2.forward(spatial)
 
         spatial_normed = ttnn.clone(spatial_normed, dtype=ttnn.bfloat8_b)
 
@@ -306,7 +306,7 @@ class TtTransformerBlock:
         prompt += prompt_attn
         ttnn.deallocate(prompt_attn)
 
-        prompt_normed = self._prompt_norm_2(prompt)
+        prompt_normed = self._prompt_norm_2.forward(prompt)
         prompt += self._prompt_ff_block(
             prompt_normed, gate=prompt_gate_ff, scale=prompt_scale_ff, shift=prompt_shift_ff, gather=gather
         )

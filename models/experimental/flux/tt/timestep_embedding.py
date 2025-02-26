@@ -69,7 +69,7 @@ class TtCombinedTimestepTextProjEmbeddings:
 
         self._time_proj_factor = self._create_time_proj_factor(num_channels=256, device=device)
 
-    def __call__(self, *, timestep: ttnn.Tensor, pooled_projection: ttnn.Tensor) -> ttnn.Tensor:
+    def forward(self, *, timestep: ttnn.Tensor, pooled_projection: ttnn.Tensor) -> ttnn.Tensor:
         assert timestep.dtype == ttnn.float32
 
         batch_size = timestep.shape[0]
@@ -88,8 +88,8 @@ class TtCombinedTimestepTextProjEmbeddings:
         timesteps_proj = ttnn.concat([c, s], dim=-1)
         timesteps_proj = ttnn.clone(timesteps_proj, dtype=pooled_projection.dtype)
 
-        time_embed = self._timestep_embedder(timesteps_proj)
-        text_embed = self._text_embedder(pooled_projection)
+        time_embed = self._timestep_embedder.forward(timesteps_proj)
+        text_embed = self._text_embedder.forward(pooled_projection)
 
         return time_embed + text_embed
 
@@ -114,7 +114,7 @@ class _TimestepEmbedding:
         self._linear_1 = TtLinear(parameters.linear_1)
         self._linear_2 = TtLinear(parameters.linear_2)
 
-    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        x = self._linear_1(x)
+    def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        x = self._linear_1.forward(x)
         x = ttnn.silu(x)
-        return self._linear_2(x)
+        return self._linear_2.forward(x)

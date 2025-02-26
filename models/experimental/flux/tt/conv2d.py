@@ -75,7 +75,7 @@ class TtConv2d:
         self._device = parameters.device
         self._weights_dtype = parameters.dtype
 
-    def call_without_reshape(
+    def forward_without_reshape(
         self, x: ttnn.Tensor, *, dtype: ttnn.DataType | None = None
     ) -> tuple[ttnn.Tensor, list[int]]:
         batch_size = x.shape[0]
@@ -112,8 +112,8 @@ class TtConv2d:
         shape = [batch_size, output_height, output_width, self._out_channels]
         return result, shape
 
-    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        result, shape = self.call_without_reshape(x)
+    def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        result, shape = self.forward_without_reshape(x)
         # TODO: deallocate result
         # TODO: this reshape is not correct if the tensor is replicated over multiple devices
         return result.reshape(shape)

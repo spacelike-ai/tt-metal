@@ -109,12 +109,12 @@ def test_transformer(  # noqa: PLR0915
     if use_tracing:
         # cache
         logger.info("caching...")
-        tt_model(**model_args)
+        tt_model.forward(**model_args)
 
         # trace
         logger.info("tracing...")
         tid = ttnn.begin_trace_capture(mesh_device)
-        tt_output = tt_model(**model_args)
+        tt_output = tt_model.forward(**model_args)
         ttnn.end_trace_capture(mesh_device, tid)
 
         # execute
@@ -129,7 +129,7 @@ def test_transformer(  # noqa: PLR0915
     else:
         # compile
         logger.info("compiling...")
-        tt_model(**model_args)
+        tt_model.forward(**model_args)
 
         # execute
         logger.info("executing...")
@@ -139,7 +139,7 @@ def test_transformer(  # noqa: PLR0915
         ttnn.copy_host_to_device_tensor(tt_timestep_host, tt_timestep)
         ttnn.copy_host_to_device_tensor(tt_imagerot1_host, tt_imagerot1)
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
-        tt_output = tt_model(**model_args)
+        tt_output = tt_model.forward(**model_args)
 
     with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
         tt_output_torch = ttnn.to_torch(tt_output)[:batch_size]

@@ -71,7 +71,7 @@ def test_conv2d(
     with torch.no_grad():
         torch_output = torch_model(torch_input_tensor)
 
-    tt_output, tt_output_shape = tt_model.call_without_reshape(tt_input_tensor)
+    tt_output, tt_output_shape = tt_model.forward_without_reshape(tt_input_tensor)
 
     with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
         shape = [-1, *tt_output_shape[1:]]

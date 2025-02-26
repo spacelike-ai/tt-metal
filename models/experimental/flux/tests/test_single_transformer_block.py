@@ -76,11 +76,11 @@ def test_single_transformer_block(
 
     if use_tracing:
         # cache
-        tt_model(**model_args)
+        tt_model.forward(**model_args)
 
         # trace
         tid = ttnn.begin_trace_capture(mesh_device)
-        tt_combined_output = tt_model(**model_args)
+        tt_combined_output = tt_model.forward(**model_args)
         ttnn.end_trace_capture(mesh_device, tid)
 
         # execute
@@ -91,14 +91,14 @@ def test_single_transformer_block(
         ttnn.execute_trace(mesh_device, tid)
     else:
         # compile
-        tt_model(**model_args)
+        tt_model.forward(**model_args)
 
         # execute
         ttnn.copy_host_to_device_tensor(tt_combined_host, tt_combined)
         ttnn.copy_host_to_device_tensor(tt_time_host, tt_time)
         ttnn.copy_host_to_device_tensor(tt_imagerot1_host, tt_imagerot1)
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
-        tt_combined_output = tt_model(**model_args)
+        tt_combined_output = tt_model.forward(**model_args)
 
     with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
         tt_combined_output_torch = ttnn.to_torch(tt_combined_output)[:batch_size]

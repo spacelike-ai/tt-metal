@@ -69,12 +69,12 @@ def test_t5_encoder(*, mesh_device: ttnn.MeshDevicel) -> None:
 
     logger.info("compiling...")
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        tt_model(tt_tokens)
+        tt_model.forward(tt_tokens)
 
     logger.info("executing...")
     start_time = time.time()
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        tt_output = tt_model(tt_tokens)
+        tt_output = tt_model.forward(tt_tokens)
     logger.info(f"TT-NN runtime: {time.time() - start_time}")
     logger.info("done...")
 

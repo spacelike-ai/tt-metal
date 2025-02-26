@@ -39,7 +39,7 @@ class TtRmsNorm:
         self._eps = eps
         self._weight = parameters.weight
 
-    def __call__(self, x: ttnn.Tensor, *, deallocate: bool = False) -> ttnn.Tensor:
+    def forward(self, x: ttnn.Tensor, *, deallocate: bool = False) -> ttnn.Tensor:
         output = ttnn.rms_norm(x, weight=self._weight, epsilon=self._eps)
 
         if deallocate:
@@ -79,7 +79,7 @@ class TtLayerNorm:
         self._weight = parameters.weight
         self._bias = parameters.bias
 
-    def __call__(
+    def forward(
         self,
         x: ttnn.Tensor,
         memory_config: ttnn.MemoryConfig | None = None,

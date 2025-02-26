@@ -80,7 +80,7 @@ class TtT5Encoder:
 
         self._device = parameters.device
 
-    def __call__(self, input_ids: ttnn.Tensor) -> ttnn.Tensor:
+    def forward(self, input_ids: ttnn.Tensor) -> ttnn.Tensor:
         _batch_size, seq_length = input_ids.shape
 
         # TODO: Remove the conversion to row major layout once ttnn.embedding works with tiled input
@@ -98,9 +98,9 @@ class TtT5Encoder:
 
         x = inputs_embeds
         for block in self._blocks:
-            x = block(x, position_bias=position_bias)
+            x = block.forward(x, position_bias=position_bias)
 
-        return self._norm(x)
+        return self._norm.forward(x)
 
 
 @dataclass
@@ -131,9 +131,9 @@ class TtT5Block:
         )
         self._ff = TtT5LayerFF(parameters.ff, layer_norm_epsilon=layer_norm_epsilon)
 
-    def __call__(self, x: ttnn.Tensor, *, position_bias: ttnn.Tensor) -> ttnn.Tensor:
-        x = self._attention(x, position_bias=position_bias)
-        return self._ff(x)
+    def forward(self, x: ttnn.Tensor, *, position_bias: ttnn.Tensor) -> ttnn.Tensor:
+        x = self._attention.forward(x, position_bias=position_bias)
+        return self._ff.forward(x)
 
 
 @dataclass
@@ -160,9 +160,9 @@ class TtT5LayerSelfAttention:
         self._attention = TtT5Attention(parameters.attention, num_heads=num_heads)
         self._norm = TtT5LayerNorm(parameters.norm, eps=layer_norm_epsilon)
 
-    def __call__(self, x: ttnn.Tensor, *, position_bias: ttnn.Tensor) -> ttnn.Tensor:
-        normed = self._norm(x)
-        attn = self._attention(normed, position_bias=position_bias)
+    def forward(self, x: ttnn.Tensor, *, position_bias: ttnn.Tensor) -> ttnn.Tensor:
+        normed = self._norm.forward(x)
+        attn = self._attention.forward(normed, position_bias=position_bias)
         return x + attn
 
 
@@ -198,12 +198,12 @@ class TtT5Attention:
         self._v_proj = TtLinear(parameters.v_proj)
         self._o_proj = TtLinear(parameters.o_proj)
 
-    def __call__(self, x: ttnn.Tensor, *, position_bias: ttnn.Tensor) -> ttnn.Tensor:
+    def forward(self, x: ttnn.Tensor, *, position_bias: ttnn.Tensor) -> ttnn.Tensor:
         batch_size, seq_length, _ = x.shape
 
-        q = self._q_proj(x)
-        k = self._k_proj(x)
-        v = self._v_proj(x)
+        q = self._q_proj.forward(x)
+        k = self._k_proj.forward(x)
+        v = self._v_proj.forward(x)
 
         qkv = ttnn.concat([q, k, v], dim=-1)
         q, k, v = ttnn.transformer.split_query_key_value_and_split_heads(
@@ -215,7 +215,7 @@ class TtT5Attention:
         attn = ttnn.matmul(attn_weights, v)
         attn = ttnn.transformer.concatenate_heads(attn)
 
-        return self._o_proj(attn)
+        return self._o_proj.forward(attn)
 
 
 @dataclass
@@ -244,9 +244,9 @@ class TtT5LayerFF:
         self._dense_gated_dense = TtT5DenseGatedActDense(parameters.dense_gated_dense)
         self._norm = TtT5LayerNorm(parameters.norm, eps=layer_norm_epsilon)
 
-    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        fw = self._norm(x)
-        fw = self._dense_gated_dense(fw)
+    def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        fw = self._norm.forward(x)
+        fw = self._dense_gated_dense.forward(fw)
         return x + fw
 
 
@@ -277,11 +277,11 @@ class TtT5DenseGatedActDense:
         self._wi1 = TtLinear(parameters.wi1)
         self._wo = TtLinear(parameters.wo)
 
-    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        gelu = new_gelu_activation(self._wi0(x))
-        linear = self._wi1(x)
+    def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        gelu = new_gelu_activation(self._wi0.forward(x))
+        linear = self._wi1.forward(x)
         x = gelu * linear
-        return self._wo(x)
+        return self._wo.forward(x)
 
 
 @dataclass
@@ -306,7 +306,7 @@ class TtT5LayerNorm:
         self._weight = parameters.weight
         self._eps = eps
 
-    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
+    def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
         variance = ttnn.mean(ttnn.pow(x, 2), -1, keepdim=True)
         x *= ttnn.rsqrt(variance + self._eps)
         return self._weight * x
