@@ -42,8 +42,11 @@ constexpr uint32_t RUN_MSG_DONE = 0;
 // 0x80808000 is a micro-optimization, calculated with 1 riscv insn
 constexpr uint32_t RUN_SYNC_MSG_INIT = 0x40;
 constexpr uint32_t RUN_SYNC_MSG_GO = 0x80;
+// Trigger loading CBs (and IRAM) before actually running the kernel.
+constexpr uint32_t RUN_SYNC_MSG_LOAD = 0x1;
+constexpr uint32_t RUN_SYNC_MSG_WAITING_FOR_RESET = 0x2;
+constexpr uint32_t RUN_SYNC_MSG_INIT_SYNC_REGISTERS = 0x3;
 constexpr uint32_t RUN_SYNC_MSG_DONE = 0;
-constexpr uint32_t RUN_SYNC_MSG_ALL_TRISCS_GO = 0x80808000;
 constexpr uint32_t RUN_SYNC_MSG_ALL_GO = 0x80808080;
 constexpr uint32_t RUN_SYNC_MSG_ALL_SLAVES_DONE = 0;
 
@@ -125,15 +128,22 @@ struct kernel_config_msg_t {
     volatile uint8_t min_remote_cb_start_index;
     volatile uint8_t exit_erisc_kernel;
     volatile uint8_t enables;
-    volatile uint8_t pad2[8];
+    volatile uint8_t sub_device_origin_x;  // Logical X coordinate of the sub device origin
+    volatile uint8_t sub_device_origin_y;  // Logical Y coordinate of the sub device origin
+    volatile uint8_t pad2[6];
     volatile uint8_t preload;  // Must be at end, so it's only written when all other data is written.
 } __attribute__((packed));
 
 struct go_msg_t {
-    volatile uint8_t dispatch_message_offset;
-    volatile uint8_t master_x;
-    volatile uint8_t master_y;
-    volatile uint8_t signal;  // INIT, GO, DONE, RESET_RD_PTR
+    union {
+        uint32_t all;
+        struct {
+            uint8_t dispatch_message_offset;
+            uint8_t master_x;
+            uint8_t master_y;
+            uint8_t signal;  // INIT, GO, DONE, RESET_RD_PTR
+        };
+    };
 } __attribute__((packed));
 
 struct launch_msg_t {  // must be cacheline aligned
@@ -308,9 +318,9 @@ struct addressable_core_t {
 // This is the number of Ethernet cores on WH (Ethernet cores can be queried through Virtual Coordinates).
 // All other Non Worker Cores are not accessible through virtual coordinates. Subject to change, depending on the arch.
 constexpr static std::uint32_t MAX_VIRTUAL_NON_WORKER_CORES = 18;
-// This is the total number of Non Worker Cores on WH (first term is Ethernet, second term is PCIe and last term is
+// This is the total number of Non Worker Cores on WH (first term is DRAM, second term is PCIe and last term is
 // DRAM).
-constexpr static std::uint32_t MAX_NON_WORKER_CORES = MAX_VIRTUAL_NON_WORKER_CORES + 1 + 16;
+constexpr static std::uint32_t MAX_NON_WORKER_CORES = 24 + 1 + 14;
 constexpr static std::uint32_t MAX_HARVESTED_ROWS = 2;
 constexpr static std::uint8_t CORE_COORD_INVALID = 0xFF;
 struct core_info_msg_t {
@@ -326,7 +336,9 @@ struct core_info_msg_t {
     volatile uint8_t noc_size_y;
     volatile uint8_t worker_grid_size_x;
     volatile uint8_t worker_grid_size_y;
-    volatile uint8_t pad[25];
+    volatile uint8_t absolute_logical_x;  // Logical X coordinate of this core
+    volatile uint8_t absolute_logical_y;  // Logical Y coordinate of this core
+    volatile uint8_t pad[23];
 };
 
 constexpr uint32_t launch_msg_buffer_num_entries = 8;
@@ -335,7 +347,7 @@ struct mailboxes_t {
     struct slave_sync_msg_t slave_sync;
     uint32_t launch_msg_rd_ptr;
     struct launch_msg_t launch[launch_msg_buffer_num_entries];
-    struct go_msg_t go_message;
+    volatile struct go_msg_t go_message;
     struct watcher_msg_t watcher;
     struct dprint_buf_msg_t dprint_buf;
     uint32_t pads_2[PROFILER_NOC_ALIGNMENT_PAD_COUNT];

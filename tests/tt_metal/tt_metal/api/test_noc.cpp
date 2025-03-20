@@ -7,6 +7,7 @@
 #include "device_fixture.hpp"
 #include <tt-metalium/tt_metal.hpp>
 #include <tt-metalium/host_api.hpp>
+#include <tt-metalium/allocator.hpp>
 #include "tt_metal/test_utils/env_vars.hpp"
 
 // FIXME: ARCH_NAME
@@ -19,7 +20,7 @@ namespace unit_tests::basic::test_noc {
 
 const uint32_t init_value = 0x1234B33F;
 
-uint32_t read_reg(IDevice* device, CoreCoord logical_node, uint32_t reg_addr) {
+uint32_t read_reg(tt::tt_metal::IDevice* device, CoreCoord logical_node, uint32_t reg_addr) {
     // Read and return reg value form reading
     uint32_t reg_data = unit_tests::basic::test_noc::init_value;
     tt_metal::detail::ReadRegFromDevice(device, logical_node, reg_addr, reg_data);
@@ -27,7 +28,10 @@ uint32_t read_reg(IDevice* device, CoreCoord logical_node, uint32_t reg_addr) {
 }
 
 void read_translation_table(
-    IDevice* device, CoreCoord logical_node, std::vector<unsigned int>& x_remap, std::vector<unsigned int>& y_remap) {
+    tt::tt_metal::IDevice* device,
+    CoreCoord logical_node,
+    std::vector<unsigned int>& x_remap,
+    std::vector<unsigned int>& y_remap) {
 #ifdef NOC_X_ID_TRANSLATE_TABLE_0
     std::vector<uint32_t> x_reg_addrs = {
         NOC_CFG(NOC_X_ID_TRANSLATE_TABLE_0),
@@ -169,6 +173,8 @@ TEST(NOC, TensixVerifyNocIdentityTranslationTable) {
     ASSERT_TRUE(tt::tt_metal::CloseDevice(device));
 }
 
+namespace tt::tt_metal {
+
 // Tests that kernel can write to and read from a stream register address
 // This is meant to exercise noc_inline_dw_write API
 TEST_F(DeviceFixture, TensixDirectedStreamRegWriteRead) {
@@ -228,3 +234,55 @@ TEST_F(DeviceFixture, TensixDirectedStreamRegWriteRead) {
         }
     }
 }
+
+// Test inline writes from many cores to an auto-incrementing register on one core.
+TEST_F(DeviceFixture, TensixIncrementStreamRegWrite) {
+    CoreCoord start_core{0, 0};
+    const uint32_t stream_id = 1;
+
+    for (tt_metal::IDevice* device : this->devices_) {
+        tt_metal::Program program = tt_metal::CreateProgram();
+        CoreCoord logical_grid_size = device->compute_with_storage_grid_size();
+        CoreCoord end_core{logical_grid_size.x - 1, logical_grid_size.y - 1};
+        CoreRange all_cores(start_core, end_core);
+        tt_metal::KernelHandle kernel_id = tt_metal::CreateKernel(
+            program,
+            "tests/tt_metal/tt_metal/test_kernels/dataflow/streams/stream_increment_reg_write.cpp",
+            all_cores,
+            tt_metal::DataMovementConfig{
+                .processor = tt_metal::DataMovementProcessor::RISCV_0, .noc = tt_metal::NOC::NOC_0});
+        const uint32_t logical_target_x = 0;
+        const uint32_t logical_target_y = 0;
+        CoreCoord logical_target_core(logical_target_x, logical_target_y);
+        CoreCoord worker_target_core = device->worker_core_from_logical_core(logical_target_core);
+
+        uint32_t semaphore = tt_metal::CreateSemaphore(program, all_cores, 0);
+        auto top_left = device->virtual_core_from_logical_core({0, 0}, CoreType::WORKER);
+        auto bottom_right = device->virtual_core_from_logical_core(end_core, CoreType::WORKER);
+
+        for (uint32_t x = 0; x < logical_grid_size.x; x++) {
+            for (uint32_t y = 0; y < logical_grid_size.y; y++) {
+                CoreCoord logical_core(x, y);
+
+                tt_metal::SetRuntimeArgs(
+                    program,
+                    kernel_id,
+                    logical_core,
+                    {worker_target_core.x,
+                     worker_target_core.y,
+                     stream_id,
+                     logical_core == logical_target_core ? logical_grid_size.x * logical_grid_size.y : 0,
+                     semaphore,
+                     top_left.x,
+                     bottom_right.x,
+                     top_left.y,
+                     bottom_right.y,
+                     all_cores.size()});
+            }
+        }
+
+        tt_metal::detail::LaunchProgram(device, program);
+    }
+}
+
+}  // namespace tt::tt_metal

@@ -6,6 +6,7 @@
 #include "gtest/gtest.h"
 #include "buffer_test_utils.hpp"
 #include <tt-metalium/host_api.hpp>
+#include <tt-metalium/allocator.hpp>
 #include "tt_metal/test_utils/stimulus.hpp"
 
 using tt::tt_metal::IDevice;
@@ -40,6 +41,8 @@ bool SimpleDramWriteOnly(IDevice* device, size_t local_address, size_t byte_size
     return pass;
 }
 }  // namespace tt::test::buffer::detail
+
+namespace tt::tt_metal {
 
 TEST_F(DeviceFixture, TestSimpleDramBufferReadOnlyLo) {
     for (unsigned int id = 0; id < num_devices_; id++) {
@@ -85,3 +88,5 @@ TEST_F(DeviceFixture, TestSimpleDramBufferWriteOnlyHi) {
         ASSERT_TRUE(SimpleDramWriteOnly(this->devices_.at(id), hi_address, 16 * 1024));
     }
 }
+
+}  // namespace tt::tt_metal

@@ -23,7 +23,6 @@ on:
         required: true
         type: choice
         options:
-          - grayskull
           - wormhole_b0
           - blackhole
       runner-label:
@@ -52,8 +51,6 @@ jobs:
       matrix:
         test-group: [
           {name: All C++, cmd: ./tests/scripts/run_cpp_unit_tests.sh},
-          {name: tools, cmd: ./tests/scripts/run_tools_tests.sh},
-
           {name: user kernel path, cmd: "rm -rf /tmp/kernels && TT_METAL_KERNEL_PATH=/tmp/kernels ./build/test/tt_metal/unit_tests_api_${{ inputs.arch }} --gtest_filter=CompileProgramWithKernelPathEnvVarFixture.*"},
           {name: api, cmd: "./build/test/tt_metal/unit_tests_api_${{ inputs.arch }}"},
           {name: debug_tools, cmd: "./build/test/tt_metal/unit_tests_debug_tools_${{ inputs.arch }}"},
@@ -99,7 +96,8 @@ jobs:
         with:
           slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
           owner: U06CXU895AP # Michael Chiou
-      - uses: ./.github/actions/upload-artifact-with-job-uuid
+      - uses: tenstorrent/tt-metal/.github/actions/upload-artifact-with-job-uuid@main
+        timeout-minutes: 10
         if: ${{ !cancelled() }}
         with:
           path: |
@@ -108,3 +106,9 @@ jobs:
       - name: Generate system logs on failure
         uses: ./.github/actions/generate-system-logs
         if: ${{ failure() }}
+      - name: Generate gtest annotations on failure
+        uses: ./.github/actions/generate-gtest-failure-message
+        if: ${{ failure() }}
+        with:
+          path: |
+            generated/test_reports/

@@ -4,15 +4,7 @@
 
 #pragma once
 
-#include <stdint.h>
-
-#if defined(KERNEL_BUILD) || defined(FW_BUILD)
-#include "risc_attribs.h"
-#else
-#define tt_l1_ptr
-#define tt_reg_ptr
-#define FORCE_INLINE inline
-#endif
+#include <cstdint>
 
 // TODO: move routing table here
 namespace tt::tt_fabric {
@@ -35,9 +27,25 @@ static_assert(
     (sizeof(std::uint32_t) / sizeof(chan_id_t)) == NUM_CHANNELS_PER_UINT32,
     "LOG_BASE_2_NUM_CHANNELS_PER_UINT32 must be equal to log2(sizeof(std::uint32_t) / sizeof(chan_id_t))");
 
+static constexpr std::uint32_t CLIENT_INTERFACE_SIZE = 3280;
+static constexpr std::uint32_t CLIENT_HEADER_BUFFER_ENTRIES = 4;
+static constexpr std::uint32_t PULL_CLIENT_INTERFACE_SIZE = 304;
+static constexpr std::uint32_t PUSH_CLIENT_INTERFACE_SIZE = 240;
+static constexpr std::uint32_t PACKET_WORD_SIZE_BYTES = 16;
+static constexpr std::uint32_t PACKET_HEADER_SIZE_BYTES = 48;
+static constexpr std::uint32_t PACKET_HEADER_SIZE_WORDS = PACKET_HEADER_SIZE_BYTES / PACKET_WORD_SIZE_BYTES;
+
 enum eth_chan_magic_values {
     INVALID_DIRECTION = 0xDD,
     INVALID_ROUTING_TABLE_ENTRY = 0xFF,
+};
+
+enum eth_chan_directions {
+    EAST = 0,
+    WEST = 1,
+    NORTH = 2,
+    SOUTH = 3,
+    COUNT = 4,
 };
 
 struct routing_table_t {
@@ -45,10 +53,7 @@ struct routing_table_t {
 };
 
 struct port_direction_t {
-    chan_id_t north;
-    chan_id_t south;
-    chan_id_t east;
-    chan_id_t west;
+    chan_id_t directions[eth_chan_directions::COUNT];
 };
 
 struct fabric_router_l1_config_t {

@@ -11,7 +11,11 @@
 #include <tt-metalium/tt_metal.hpp>
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/command_queue.hpp>
+#include <tt-metalium/allocator.hpp>
+
 #include "tt_metal/tt_metal/perf_microbenchmark/common/util.hpp"
+
+#include "test_common.hpp"
 
 using namespace tt;
 using namespace tt::tt_metal;

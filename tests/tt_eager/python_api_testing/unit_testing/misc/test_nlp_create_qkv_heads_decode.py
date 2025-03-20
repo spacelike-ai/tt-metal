@@ -218,10 +218,10 @@ def run_test_create_min_width_shard(
     sub_core_grids=None,
 ):
     # Split Heads
-    if not overlap_coregrid and batch >= 32:
+    if not overlap_coregrid and (slice_size >= 32 if slice_size is not None else batch >= 32):
         # Test with smaller batch size for CI to pass on devices not utlizing full coregrid
         pytest.skip(
-            "Skipping tests for batch>=32 for non-overlapping coregrid as CI device does not support full coregrid"
+            "Skipping tests for batch_per_device>=32 for non-overlapping coregrid as CI device does not support full coregrid"
         )
     seq_len = 1
     total_heads = n_local_heads + n_local_kv_heads * 2
@@ -360,8 +360,7 @@ def test_create_min_width_shard(
             overlap_coregrid=overlap_coregrid,
         )
 
-    # BH does s2i and i2s inside of to_device and from_device as device ops
-    expected_entries = 1 if not is_blackhole() else 4 if overlap_coregrid else 5
+    expected_entries = 1
     assert device.num_program_cache_entries() == expected_entries
 
 
@@ -410,7 +409,7 @@ def test_create_heads_with_slice(
             slice_size=slice_size,
         )
     # BH does s2i and i2s inside of to_device and from_device as device ops
-    expected_entries = 1 if not is_blackhole() else 4 if overlap_coregrid else 5
+    expected_entries = 1
     assert device.num_program_cache_entries() == expected_entries
 
 

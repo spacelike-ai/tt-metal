@@ -14,6 +14,7 @@
 #include "ttnn/tensor/types.hpp"
 #include "tests/tt_metal/tt_metal/common/dispatch_fixture.hpp"
 #include <tt-metalium/host_api.hpp>
+#include <thread>
 
 #include "ttnn/operations/eltwise/binary/binary.hpp"
 #include "ttnn/operations/eltwise/unary/unary.hpp"
@@ -187,11 +188,7 @@ TEST_F(DispatchFixture, TestAsyncRefCountManager) {
             /*layout=*/std::nullopt,
             *device);
         uint32_t tensor2_device_buf_addr = get_device_buffer_address(tensor2);
-        // Assign tensor1 to tensor2 and ensure that ref counts are appropriately updated with the buffer for tensor2
-        // deallocated
         tensor2 = tensor1;
-        EXPECT_EQ(tensor2.tensor_attributes->main_thread_ref_count, 2);
-        EXPECT_EQ(tensor1.tensor_attributes->main_thread_ref_count, 2);
         // To check if tensor2 is deallocated, create a third tensor on device and ensure that its address matches the
         // prev addr for tensor2
         Tensor tensor3 = ttnn::full(
@@ -215,7 +212,6 @@ TEST_F(DispatchFixture, TestAsyncRefCountManager) {
         // This step will copy the tensor to a temp rval and std::move it back to the caller's instance of device_tensor
         // Ensure ref count and address remain unchanged
         device_tensor = tensor_identity_copy_function(device_tensor);
-        EXPECT_EQ(device_tensor.tensor_attributes->main_thread_ref_count, 1);
         EXPECT_EQ(get_device_buffer_address(device_tensor), device_tensor_address);
     }
 
@@ -228,7 +224,6 @@ TEST_F(DispatchFixture, TestAsyncRefCountManager) {
             /*layout=*/std::nullopt,
             *device);
         Tensor tensor2 = std::move(tensor1);
-        EXPECT_EQ(tensor2.tensor_attributes->main_thread_ref_count, 1);
     }
 
     log_info(LogTest, "Testing Device tensor self-assignment");
@@ -240,7 +235,6 @@ TEST_F(DispatchFixture, TestAsyncRefCountManager) {
         *device);
     uint32_t tensor_to_self_assign_address = get_device_buffer_address(tensor_to_self_assign);
     tensor_to_self_assign = tensor_to_self_assign;
-    EXPECT_EQ(tensor_to_self_assign.tensor_attributes->main_thread_ref_count, 1);
     tensor_to_self_assign = std::move(tensor_to_self_assign);
     EXPECT_EQ(get_device_buffer_address(tensor_to_self_assign), tensor_to_self_assign_address);
     auto barrier_tensor = tensor_to_self_assign.cpu();

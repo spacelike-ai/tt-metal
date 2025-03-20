@@ -43,7 +43,6 @@ set(PERF_MICROBENCH_TESTS_SRCS
 )
 
 set(ARCHITECTURES
-    "grayskull"
     "wormhole"
     "blackhole"
 )
@@ -79,6 +78,7 @@ foreach(arch ${ARCHITECTURES})
                 "$<TARGET_PROPERTY:Metalium::Metal,INCLUDE_DIRECTORIES>"
                 ${PROJECT_SOURCE_DIR}/ttnn/cpp/ttnn/deprecated # this all should go away and be replaced with link to ttnn
                 ${PROJECT_SOURCE_DIR}/tests
+                ${PROJECT_SOURCE_DIR}/tests/tt_metal/test_utils
                 ${CMAKE_CURRENT_SOURCE_DIR}
         )
         set_target_properties(
