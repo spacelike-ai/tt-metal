@@ -92,7 +92,8 @@ enum class UnaryOpType {
     FILL,
     PRELU_SFPU,
     INTERLEAVED_COMPLEX_ROTATE,
-    ZERO_POINT
+    ZERO_POINT,
+    MISH,
 };
 
 struct UnaryWithParam {
