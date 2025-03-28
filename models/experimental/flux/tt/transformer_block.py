@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -31,6 +30,7 @@ class TtTransformerBlockParameters:
     spatial_norm_2: TtLayerNormParameters
     prompt_ff: TtFeedForwardParameters | None
     spatial_ff: TtFeedForwardParameters
+    gather: bool
 
     @classmethod
     def from_torch(
@@ -38,12 +38,10 @@ class TtTransformerBlockParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device | ttnn.MeshDevice,
+        device: ttnn.MeshDevice,
         linear_on_host: bool = False,
     ) -> TtTransformerBlockParameters:
-        is_mesh_device = isinstance(device, ttnn.MeshDevice)
-
-        with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)) if is_mesh_device else nullcontext():
+        with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
             spatial_ff = TtFeedForwardParameters.from_torch(
                 substate(state, "ff"), dtype=dtype, device=device, linear_on_host=linear_on_host
             )
@@ -81,6 +79,7 @@ class TtTransformerBlockParameters:
             ),
             spatial_ff=spatial_ff,
             prompt_ff=prompt_ff,
+            gather=device.get_num_devices() > 1,
         )
 
 
@@ -110,6 +109,8 @@ class TtTransformerBlock:
         self._prompt_time_embed = TtLinear(parameters.prompt_time_embed)
 
         self._context_pre_only = self._prompt_ff is None
+
+        self._gather = parameters.gather
 
     def _spatial_attn_block(
         self,
@@ -160,20 +161,20 @@ class TtTransformerBlock:
         return spatial_attn_scaled, prompt_attn_scaled
 
     def _spatial_ff_block(
-        self, inp: ttnn.Tensor, *, gate: ttnn.Tensor, scale: ttnn.Tensor, shift: ttnn.Tensor, gather: bool = False
+        self, inp: ttnn.Tensor, *, gate: ttnn.Tensor, scale: ttnn.Tensor, shift: ttnn.Tensor
     ) -> ttnn.Tensor:
         scaled = inp * (1 + scale) + shift
-        result = gate * self._spatial_ff.forward(scaled, gather=gather)
+        result = gate * self._spatial_ff.forward(scaled, gather=self._gather)
         ttnn.deallocate(scaled)
         return result
 
     def _prompt_ff_block(
-        self, inp: ttnn.Tensor, *, gate: ttnn.Tensor, scale: ttnn.Tensor, shift: ttnn.Tensor, gather: bool = False
+        self, inp: ttnn.Tensor, *, gate: ttnn.Tensor, scale: ttnn.Tensor, shift: ttnn.Tensor
     ) -> ttnn.Tensor:
         assert self._prompt_ff is not None
 
         scaled = inp * (1 + scale) + shift
-        result = gate * self._prompt_ff.forward(scaled, gather=gather)
+        result = gate * self._prompt_ff.forward(scaled, gather=self._gather)
         ttnn.deallocate(scaled)
         return result
 
@@ -184,7 +185,6 @@ class TtTransformerBlock:
         prompt: ttnn.Tensor,
         time_embed: ttnn.Tensor,
         image_rotary_emb: tuple[ttnn.Tensor, ttnn.Tensor] | None = None,
-        gather: bool = False,
     ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
         t = ttnn.silu(time_embed, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
@@ -289,7 +289,7 @@ class TtTransformerBlock:
         spatial_normed = ttnn.clone(spatial_normed, dtype=ttnn.bfloat8_b)
 
         spatial += self._spatial_ff_block(
-            spatial_normed, gate=spatial_gate_ff, scale=spatial_scale_ff, shift=spatial_shift_ff, gather=gather
+            spatial_normed, gate=spatial_gate_ff, scale=spatial_scale_ff, shift=spatial_shift_ff
         )
         ttnn.deallocate(spatial_normed)
         ttnn.deallocate(spatial_gate_ff)
@@ -308,7 +308,7 @@ class TtTransformerBlock:
 
         prompt_normed = self._prompt_norm_2.forward(prompt)
         prompt += self._prompt_ff_block(
-            prompt_normed, gate=prompt_gate_ff, scale=prompt_scale_ff, shift=prompt_shift_ff, gather=gather
+            prompt_normed, gate=prompt_gate_ff, scale=prompt_scale_ff, shift=prompt_shift_ff
         )
         ttnn.deallocate(prompt_normed)
         ttnn.deallocate(prompt_gate_ff)

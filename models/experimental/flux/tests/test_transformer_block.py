@@ -79,7 +79,6 @@ def test_transformer_block(
         prompt=tt_prompt,
         time_embed=tt_time,
         image_rotary_emb=(tt_imagerot1, tt_imagerot2),
-        gather=mesh_device.get_num_devices() > 1,
     )
 
     if use_tracing:
