@@ -26,6 +26,7 @@ class TtFluxSingleTransformerBlockParameters:
     time_embed: TtLinearParameters
     proj_mlp: TtLinearParameters
     proj_out: TtLinearParameters
+    gather: bool
 
     @classmethod
     def from_torch(
@@ -33,21 +34,26 @@ class TtFluxSingleTransformerBlockParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,
+        device: ttnn.MeshDevice,
         linear_on_host: bool = False,
     ) -> TtFluxSingleTransformerBlockParameters:
+        with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
+            proj_mlp = TtLinearParameters.from_torch(
+                substate(state, "proj_mlp"), dtype=dtype, device=device, on_host=linear_on_host
+            )
+            proj_out = TtLinearParameters.from_torch(
+                substate(state, "proj_out"), dtype=dtype, device=device, on_host=linear_on_host
+            )
+
         return cls(
             attn=TtAttentionParameters.from_torch(substate(state, "attn"), dtype=dtype, device=device),
             norm=TtLayerNormParameters.from_torch(substate(state, "norm"), dtype=dtype, device=device),
             time_embed=TtLinearParameters.from_torch(
                 substate(state, "norm.linear"), dtype=dtype, device=device, unsqueeze_bias=True
             ),
-            proj_mlp=TtLinearParameters.from_torch(
-                substate(state, "proj_mlp"), dtype=dtype, device=device, on_host=linear_on_host
-            ),
-            proj_out=TtLinearParameters.from_torch(
-                substate(state, "proj_out"), dtype=dtype, device=device, on_host=linear_on_host
-            ),
+            proj_mlp=proj_mlp,
+            proj_out=proj_out,
+            gather=device.get_num_devices() > 1,
         )
 
 
@@ -65,6 +71,8 @@ class TtFluxSingleTransformerBlock:
         self._proj_mlp = TtLinear(parameters.proj_mlp)
         self._proj_out = TtLinear(parameters.proj_out)
 
+        self._gather = parameters.gather
+
     def forward(
         self,
         *,
@@ -80,13 +88,18 @@ class TtFluxSingleTransformerBlock:
 
         mlp_combined = self._proj_mlp.forward(norm_combined)
         ttnn.gelu(mlp_combined, output_tensor=mlp_combined, fast_and_approximate_mode=False)
+        if self._gather:
+            mlp_combined = ttnn.all_gather(mlp_combined, dim=-1)
         attn, _ = self._attn.forward(spatial=norm_combined, image_rotary_emb=image_rotary_emb)
         # TODO: PCC of attn seems a bit low
 
         ttnn.deallocate(norm_combined)
 
         additional = ttnn.concat([attn, mlp_combined], dim=2)
-        additional = gate_msa * self._proj_out.forward(additional)
+        proj_out = self._proj_out.forward(additional)
+        if self._gather:
+            proj_out = ttnn.all_gather(proj_out, dim=-1)
+        additional = gate_msa * proj_out
 
         combined += additional
 
