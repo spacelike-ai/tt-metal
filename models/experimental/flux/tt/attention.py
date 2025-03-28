@@ -20,6 +20,7 @@ class TtAttentionPartParameters:
     qkv_proj: TtLinearParameters
     norm_q: TtRmsNormParameters
     norm_k: TtRmsNormParameters
+    gather: bool
     out_proj: TtLinearParameters | None
 
 
@@ -36,27 +37,51 @@ class TtAttentionParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
     ) -> TtAttentionParameters:
-        spatial_qkv_proj = _merge_qkv_proj(substate(state, "to_q"), substate(state, "to_k"), substate(state, "to_v"))
-        prompt_qkv_proj = _merge_qkv_proj(
-            substate(state, "add_q_proj"), substate(state, "add_k_proj"), substate(state, "add_v_proj")
-        )
+        gather = device.get_num_devices() > 1
+
+        with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
+            spatial_qkv_proj = TtLinearParameters.from_torch(
+                _merge_qkv_proj(substate(state, "to_q"), substate(state, "to_k"), substate(state, "to_v")),
+                dtype=dtype,
+                device=device,
+            )
+            prompt_qkv_proj = (
+                TtLinearParameters.from_torch(
+                    _merge_qkv_proj(
+                        substate(state, "add_q_proj"), substate(state, "add_k_proj"), substate(state, "add_v_proj")
+                    ),
+                    dtype=dtype,
+                    device=device,
+                )
+                if has_substate(state, "add_q_proj")
+                else None
+            )
+
+            spatial_out_proj = (
+                TtLinearParameters.from_torch(substate(state, "to_out.0"), dtype=dtype, device=device)
+                if has_substate(state, "to_out.0")
+                else None
+            )
+            prompt_out_proj = (
+                TtLinearParameters.from_torch(substate(state, "to_add_out"), dtype=dtype, device=device)
+                if prompt_qkv_proj
+                else None
+            )
 
         return cls(
             spatial=TtAttentionPartParameters(
-                qkv_proj=TtLinearParameters.from_torch(spatial_qkv_proj, dtype=dtype, device=device),
+                qkv_proj=spatial_qkv_proj,
                 norm_q=TtRmsNormParameters.from_torch(substate(state, "norm_q"), dtype=dtype, device=device),
                 norm_k=TtRmsNormParameters.from_torch(substate(state, "norm_k"), dtype=dtype, device=device),
-                out_proj=TtLinearParameters.from_torch(substate(state, "to_out.0"), dtype=dtype, device=device)
-                if has_substate(state, "to_out.0")
-                else None,
+                out_proj=spatial_out_proj,
+                gather=gather,
             ),
             prompt=TtAttentionPartParameters(
-                qkv_proj=TtLinearParameters.from_torch(prompt_qkv_proj, dtype=dtype, device=device),
+                qkv_proj=prompt_qkv_proj,
                 norm_q=TtRmsNormParameters.from_torch(substate(state, "norm_added_q"), dtype=dtype, device=device),
                 norm_k=TtRmsNormParameters.from_torch(substate(state, "norm_added_k"), dtype=dtype, device=device),
-                out_proj=TtLinearParameters.from_torch(substate(state, "to_add_out"), dtype=dtype, device=device)
-                if has_substate(state, "to_add_out")
-                else None,
+                out_proj=prompt_out_proj,
+                gather=gather,
             )
             if has_substate(state, "add_q_proj")
             else None,
@@ -73,6 +98,8 @@ class TtAttentionPart:
         self._out_proj = TtLinear(parameters.out_proj) if parameters.out_proj is not None else None
         self._norm_q = TtRmsNorm(parameters.norm_q, eps=eps)
         self._norm_k = TtRmsNorm(parameters.norm_k, eps=eps)
+
+        self._gather = parameters.gather
 
     def qkv(self, x: ttnn.Tensor, *, num_heads: int, deallocate: bool) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
         _batch_size, sequence_length, _embedding_dim = x.shape
@@ -112,6 +139,9 @@ class TtAttentionPart:
             deallocate=deallocate,
         )
 
+        if self._gather:
+            qkv = ttnn.all_gather(qkv, dim=-1)
+
         # qkv = ttnn.reallocate(qkv)
         # qkv = to_memory_config(qkv, ttnn.L1_MEMORY_CONFIG, deallocate=True)
 
@@ -131,7 +161,11 @@ class TtAttentionPart:
         if self._out_proj is None:
             return x
 
-        return self._out_proj.forward(x)
+        x = self._out_proj.forward(x)
+        if self._gather:
+            x = ttnn.all_gather(x, dim=-1)
+
+        return x
 
         # return to_memory_config(
         #     result,
@@ -261,9 +295,9 @@ class TtAttention:
 
 
 def _merge_qkv_proj(
-    q_state: dict[str, torch.Tensor],
-    k_state: dict[str, torch.Tensor],
-    v_state: dict[str, torch.Tensor],
+    q_state: dict[str, torch.Tensor | None],
+    k_state: dict[str, torch.Tensor | None],
+    v_state: dict[str, torch.Tensor | None],
 ) -> dict[str, torch.Tensor]:
     return {
         "weight": torch.cat([q_state["weight"], k_state["weight"], v_state["weight"]]) if "weight" in q_state else None,
