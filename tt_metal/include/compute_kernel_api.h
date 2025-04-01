@@ -84,8 +84,9 @@ ALWI void rsqrt_tile(uint32_t idst) {
 /**
  * Please refer to documentation for any_init.
  */
+template <bool fast_and_approx = false>
 ALWI void sigmoid_tile_init() {
-    MATH((llk_math_eltwise_unary_sfpu_sigmoid_init<APPROX>()));  // TODO(AP): move out init
+    MATH((llk_math_eltwise_unary_sfpu_sigmoid_init<fast_and_approx>()));
 }
 
 // clang-format off
@@ -102,7 +103,10 @@ ALWI void sigmoid_tile_init() {
  * | idst            | The index of the tile in DST register buffer to perform the computation on | uint32_t | Must be less than the size of the DST register buffer | True     |
  */
 // clang-format on
-ALWI void sigmoid_tile(uint32_t idst) { MATH((llk_math_eltwise_unary_sfpu_sigmoid<APPROX>(idst))); }
+template <bool fast_and_approx = false>
+ALWI void sigmoid_tile(uint32_t idst) {
+    MATH((llk_math_eltwise_unary_sfpu_sigmoid<fast_and_approx>(idst)));
+}
 
 /**
  * Please refer to documentation for any_init.

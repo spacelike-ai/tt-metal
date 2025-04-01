@@ -10,10 +10,9 @@
 #include <tt-metalium/fabric_host_interface.h>
 
 #include "launch_message_ring_buffer_state.hpp"
-#include "memcpy.hpp"
 #include "dispatch_settings.hpp"
 #include "buffer.hpp"
-#include "umd/device/tt_core_coordinates.h"
+#include <umd/device/tt_core_coordinates.h>
 
 #include "command_queue_common.hpp"
 #include "system_memory_manager.hpp"

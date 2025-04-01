@@ -89,9 +89,10 @@ class TtLlamaMLP(LightweightModule):
 
     def prefetch(self, prefetcher_setup, tt_ccl):
         self.prefetcher_setup = prefetcher_setup
-        self.prefetcher_setup.insert_tensor(self.w1)
-        self.prefetcher_setup.insert_tensor(self.w3)
-        self.prefetcher_setup.insert_tensor(self.w2)
+        if tt_ccl.mode == "decode":
+            self.prefetcher_setup.insert_tensor(self.w1)
+            self.prefetcher_setup.insert_tensor(self.w3)
+            self.prefetcher_setup.insert_tensor(self.w2)
         self.tt_ccl = tt_ccl
 
     def forward(self, x: ttnn.Tensor, mode) -> ttnn.Tensor:
@@ -119,7 +120,7 @@ class TtLlamaMLP(LightweightModule):
             w1_out,
             cluster_axis=1,
             num_links=3,
-            memory_config=self.model_config["MUL_IN_MEMCFG"],
+            memory_config=self.model_config["FF2_IN_RING_MEMCFG"],
         )
 
         w3_out = ttnn.linear(
@@ -140,7 +141,7 @@ class TtLlamaMLP(LightweightModule):
                 w3_out,
                 cluster_axis=1,
                 num_links=3,
-                memory_config=self.model_config["MUL_IN_MEMCFG"],
+                memory_config=self.model_config["FF2_IN_RING_MEMCFG"],
             )
         except Exception as e:
             print(e)
@@ -151,10 +152,10 @@ class TtLlamaMLP(LightweightModule):
             w3_out_reduced,
             input_tensor_a_activation=ttnn.UnaryOpType.SILU,
             dtype=ttnn.bfloat16,
-            memory_config=self.model_config["MUL_IN_MEMCFG"],
+            memory_config=self.model_config["FF2_IN_RING_MEMCFG"],
         )
 
-        w2_in = ttnn.to_memory_config(w2_in, self.model_config["FF2_IN_RING_MEMCFG"])
+        # w2_in = ttnn.to_memory_config(w2_in, self.model_config["FF2_IN_RING_MEMCFG"])
 
         # print("eltwise mul", w2_in)
 

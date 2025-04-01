@@ -15,10 +15,17 @@ int main(int argc, char** argv) {
     std::size_t packet_payload_size_bytes = std::stoi(argv[arg_idx++]);
     uint32_t fabric_mode = std::stoi(argv[arg_idx++]);
     bool disable_sends_for_interior_workers = std::stoi(argv[arg_idx++]);
+    bool unidirectional_test = std::stoi(argv[arg_idx++]);
 
     uint32_t min_test_num_devices = 8;
     if (tt::tt_metal::GetNumAvailableDevices() < min_test_num_devices) {
         tt::log_warning("This test can only be run on T3000 or TG devices");
+        return 1;
+    }
+
+    uint32_t tg_num_devices = 32;
+    if (num_links > 2 && tt::tt_metal::GetNumAvailableDevices() < tg_num_devices) {
+        tt::log_warning("This test with {} links can only be run on TG devices", num_links);
         return 1;
     }
 
@@ -27,6 +34,7 @@ int main(int argc, char** argv) {
     params.line_size = line_size;
     params.fabric_mode = static_cast<FabricTestMode>(fabric_mode);
     params.disable_sends_for_interior_workers = disable_sends_for_interior_workers;
+    params.disable_end_workers_in_backward_direction = unidirectional_test;
     RunWriteThroughputStabilityTestWithPersistentFabric(
         num_mcasts, num_unicasts, num_links, num_op_invocations, params, packet_payload_size_bytes);
 }

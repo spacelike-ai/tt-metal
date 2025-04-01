@@ -2,23 +2,37 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include <tt-metalium/math.hpp>
-#include <tt-metalium/sub_device_types.hpp>
+#include <stdint.h>
 #include <tt-metalium/assert.hpp>
-#include <tt-metalium/host_api.hpp>
 #include <tt-metalium/device.hpp>
-#include <tt-metalium/program_impl.hpp>
-#include <tt-metalium/tt_metal.hpp>
-#include <tt-metalium/hal_exp.hpp>
 #include <tt-metalium/erisc_datamover_builder.hpp>
 #include <tt-metalium/fabric_edm_packet_header.hpp>
-
-#include <iterator>
-#include <vector>
+#include <tt-metalium/hal.hpp>
+#include <tt-metalium/host_api.hpp>
+#include <tt-metalium/math.hpp>
+#include <tt-metalium/tt_metal.hpp>
 #include <algorithm>
-#include <ranges>
+#include <array>
+#include <cstddef>
+#include <functional>
+#include <iterator>
+#include <numeric>
+#include <optional>
+#include <unordered_set>
+#include <variant>
+#include <vector>
 
-using namespace tt::tt_metal::experimental;
+#include "core_coord.hpp"
+#include "fabric_edm_types.hpp"
+#include "logger.hpp"
+#include "system_memory_manager.hpp"
+#include <umd/device/tt_core_coordinates.h>
+
+namespace tt {
+namespace tt_metal {
+class Program;
+}  // namespace tt_metal
+}  // namespace tt
 
 namespace tt::tt_fabric {
 
@@ -36,7 +50,7 @@ namespace tt::tt_fabric {
 
 FabricEriscDatamoverConfig::FabricEriscDatamoverConfig() {
     // Global
-    this->handshake_addr = tt::tt_metal::experimental::hal::get_erisc_l1_unreserved_base() /* + 1024*/;
+    this->handshake_addr = tt::tt_metal::hal::get_erisc_l1_unreserved_base() /* + 1024*/;
     this->edm_channel_ack_addr = handshake_addr + eth_channel_sync_size;
     this->termination_signal_address =
         edm_channel_ack_addr +
@@ -95,8 +109,8 @@ FabricEriscDatamoverConfig::FabricEriscDatamoverConfig() {
     }
 
     // Channel Allocations
-    this->max_l1_loading_size = tt::tt_metal::experimental::hal::get_erisc_l1_unreserved_size() +
-                                tt::tt_metal::experimental::hal::get_erisc_l1_unreserved_base();
+    this->max_l1_loading_size =
+        tt::tt_metal::hal::get_erisc_l1_unreserved_size() + tt::tt_metal::hal::get_erisc_l1_unreserved_base();
     this->buffer_region_start = (buffer_address + buffer_alignment) & ~(buffer_alignment - 1);  // Align
     this->available_channel_buffering_space = max_l1_loading_size - buffer_region_start;
 }
@@ -370,8 +384,8 @@ FabricEriscDatamoverBuilder::FabricEriscDatamoverBuilder(
     config(config),
     my_chip_id(my_chip_id),
     peer_chip_id(peer_chip_id),
-    handshake_address(
-        tt::round_up(hal::get_erisc_l1_unreserved_base(), FabricEriscDatamoverConfig::eth_channel_sync_size)),
+    handshake_address(tt::round_up(
+        tt::tt_metal::hal::get_erisc_l1_unreserved_base(), FabricEriscDatamoverConfig::eth_channel_sync_size)),
     channel_buffer_size(config.channel_buffer_size_bytes),
     sender_channels_num_buffers(config.sender_channels_num_buffers),
     receiver_channels_num_buffers(config.receiver_channels_num_buffers),
