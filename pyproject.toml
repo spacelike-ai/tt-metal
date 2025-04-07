@@ -40,6 +40,15 @@ requires-python = ">=3.8"
 description = "General compute framework for Tenstorrent devices"
 dynamic = ["version"]
 
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+torchvision = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.black]
 line-length = 120
 include = '^.*(ttnn|tests/scripts|tests/ttnn|tests/tt_eager/python_api_testing|tt_eager/tt_lib|tests/scripts|models/demos|infra|.github)/.*\.py$'
