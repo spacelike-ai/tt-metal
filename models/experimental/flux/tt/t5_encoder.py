@@ -35,6 +35,7 @@ class TtT5EncoderParameters:
     norm: TtT5LayerNorm
     attention_bias: torch.Tensor
     device: ttnn.Device | ttnn.MeshDevice
+    gather: bool
 
     @classmethod
     def from_torch(
@@ -44,10 +45,13 @@ class TtT5EncoderParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
     ) -> TtT5EncoderParameters:
-        return cls(
-            token_embedding=ttnn.from_torch(
+        with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
+            token_embedding = ttnn.from_torch(
                 state["encoder.embed_tokens.weight"], dtype=dtype, device=device, layout=ttnn.TILE_LAYOUT
-            ),
+            )
+
+        return cls(
+            token_embedding=token_embedding,
             blocks=[
                 TtT5BlockParameters.from_torch(s, dtype=dtype, device=device)
                 for s in indexed_substates(state, "encoder.block")
@@ -57,6 +61,7 @@ class TtT5EncoderParameters:
             ),
             attention_bias=state["encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"],
             device=device,
+            gather=device.get_num_devices() > 1,
         )
 
 
@@ -81,6 +86,7 @@ class TtT5Encoder:
         self._relative_attention_max_distance = relative_attention_max_distance
 
         self._device = parameters.device
+        self._gather = parameters.gather
 
     def forward(self, input_ids: ttnn.Tensor) -> ttnn.Tensor:
         _batch_size, seq_length = input_ids.shape
@@ -89,6 +95,8 @@ class TtT5Encoder:
         # https://github.com/tenstorrent/tt-metal/issues/17643
         input_ids = ttnn.to_layout(input_ids, ttnn.ROW_MAJOR_LAYOUT)
         inputs_embeds = ttnn.embedding(input_ids, self._token_embedding, layout=ttnn.TILE_LAYOUT)
+        if self._gather:
+            inputs_embeds = ttnn.all_gather(inputs_embeds, dim=-1)
 
         position_bias = _compute_bias(
             seq_length=seq_length,
@@ -174,6 +182,7 @@ class TtT5AttentionParameters:
     k_proj: ttnn.Tensor
     v_proj: ttnn.Tensor
     o_proj: ttnn.Tensor
+    gather: bool
 
     @classmethod
     def from_torch(
@@ -183,12 +192,14 @@ class TtT5AttentionParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
     ) -> TtT5AttentionParameters:
-        return cls(
-            q_proj=TtLinearParameters.from_torch(substate(state, "q"), dtype=dtype, device=device),
-            k_proj=TtLinearParameters.from_torch(substate(state, "k"), dtype=dtype, device=device),
-            v_proj=TtLinearParameters.from_torch(substate(state, "v"), dtype=dtype, device=device),
-            o_proj=TtLinearParameters.from_torch(substate(state, "o"), dtype=dtype, device=device),
-        )
+        with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
+            return cls(
+                q_proj=TtLinearParameters.from_torch(substate(state, "q"), dtype=dtype, device=device),
+                k_proj=TtLinearParameters.from_torch(substate(state, "k"), dtype=dtype, device=device),
+                v_proj=TtLinearParameters.from_torch(substate(state, "v"), dtype=dtype, device=device),
+                o_proj=TtLinearParameters.from_torch(substate(state, "o"), dtype=dtype, device=device),
+                gather=device.get_num_devices() > 1,
+            )
 
 
 class TtT5Attention:
@@ -200,14 +211,21 @@ class TtT5Attention:
         self._v_proj = TtLinear(parameters.v_proj)
         self._o_proj = TtLinear(parameters.o_proj)
 
+        self._gather = parameters.gather
+
     def forward(self, x: ttnn.Tensor, *, position_bias: ttnn.Tensor) -> ttnn.Tensor:
         batch_size, seq_length, _ = x.shape
 
         q = self._q_proj.forward(x)
         k = self._k_proj.forward(x)
         v = self._v_proj.forward(x)
+        if self._gather:
+            q = ttnn.all_gather(q, dim=-1)
+            k = ttnn.all_gather(k, dim=-1)
+            v = ttnn.all_gather(v, dim=-1)
 
         qkv = ttnn.concat([q, k, v], dim=-1)
+
         q, k, v = ttnn.transformer.split_query_key_value_and_split_heads(
             qkv, num_heads=self._num_heads, transpose_key=True
         )
@@ -217,7 +235,11 @@ class TtT5Attention:
         attn = ttnn.matmul(attn_weights, v)
         attn = ttnn.transformer.concatenate_heads(attn)
 
-        return self._o_proj.forward(attn)
+        result = self._o_proj.forward(attn)
+        if self._gather:
+            result = ttnn.all_gather(result, dim=-1)
+
+        return result
 
 
 @dataclass
@@ -257,6 +279,7 @@ class TtT5DenseGatedActDenseParameters:
     wi0: TtLinearParameters
     wi1: TtLinearParameters
     wo: TtLinearParameters
+    gather: bool
 
     @classmethod
     def from_torch(
@@ -266,11 +289,13 @@ class TtT5DenseGatedActDenseParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
     ) -> TtT5DenseGatedActDenseParameters:
-        return cls(
-            wi0=TtLinearParameters.from_torch(substate(state, "wi_0"), dtype=dtype, device=device),
-            wi1=TtLinearParameters.from_torch(substate(state, "wi_1"), dtype=dtype, device=device),
-            wo=TtLinearParameters.from_torch(substate(state, "wo"), dtype=dtype, device=device),
-        )
+        with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
+            return cls(
+                wi0=TtLinearParameters.from_torch(substate(state, "wi_0"), dtype=dtype, device=device),
+                wi1=TtLinearParameters.from_torch(substate(state, "wi_1"), dtype=dtype, device=device),
+                wo=TtLinearParameters.from_torch(substate(state, "wo"), dtype=dtype, device=device),
+                gather=device.get_num_devices() > 1,
+            )
 
 
 class TtT5DenseGatedActDense:
@@ -279,11 +304,20 @@ class TtT5DenseGatedActDense:
         self._wi1 = TtLinear(parameters.wi1)
         self._wo = TtLinear(parameters.wo)
 
+        self._gather = parameters.gather
+
     def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
         gelu = new_gelu_activation(self._wi0.forward(x))
         linear = self._wi1.forward(x)
         x = gelu * linear
-        return self._wo.forward(x)
+        if self._gather:
+            x = ttnn.all_gather(x, dim=-1)
+
+        result = self._wo.forward(x)
+        if self._gather:
+            result = ttnn.all_gather(result, dim=-1)
+
+        return result
 
 
 @dataclass
