@@ -31,7 +31,7 @@ class TtT5Config:
 @dataclass
 class TtT5EncoderParameters:
     token_embedding: ttnn.Tensor
-    blocks: [TtT5BlockParameters]
+    blocks: list[TtT5BlockParameters]
     norm: TtT5LayerNorm
     attention_bias: torch.Tensor
     device: ttnn.Device | ttnn.MeshDevice
