@@ -20,7 +20,7 @@ from ..tt.utils import assert_quality
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
 @pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
 @pytest.mark.usefixtures("use_program_cache")
-def test_t5_encoder(*, mesh_device: ttnn.MeshDevicel) -> None:
+def test_t5_encoder(*, mesh_device: ttnn.MeshDevice) -> None:
     batch_size = 1
 
     hf_model = T5EncoderModel.from_pretrained("black-forest-labs/FLUX.1-schnell", subfolder="text_encoder_2")
