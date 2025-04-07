@@ -39,6 +39,7 @@ dev = [
     "bert-score==0.3.12",
     "black==24.3.0",
     "blobfile==2.1.1",
+    "botocore>=1.37.29",
     "breathe==4.35.0",
     "build==0.10.0",
     "clang-format==19.1.4",
