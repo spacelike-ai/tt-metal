@@ -45,7 +45,9 @@ class TtT5EncoderParameters:
         device: ttnn.Device | ttnn.MeshDevice,
     ) -> TtT5EncoderParameters:
         return cls(
-            token_embedding=ttnn.from_torch(state["encoder.embed_tokens.weight"], dtype=dtype, device=device),
+            token_embedding=ttnn.from_torch(
+                state["encoder.embed_tokens.weight"], dtype=dtype, device=device, layout=ttnn.TILE_LAYOUT
+            ),
             blocks=[
                 TtT5BlockParameters.from_torch(s, dtype=dtype, device=device)
                 for s in indexed_substates(state, "encoder.block")

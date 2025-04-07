@@ -44,7 +44,9 @@ def test_t5_encoder(*, mesh_device: ttnn.MeshDevice) -> None:
 
     start_time = time.time()
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = TtT5EncoderParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat16)
+        parameters = TtT5EncoderParameters.from_torch(
+            torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
+        )
     tt_model = TtT5Encoder(
         parameters,
         num_heads=hf_model.config.num_heads,
@@ -82,4 +84,4 @@ def test_t5_encoder(*, mesh_device: ttnn.MeshDevice) -> None:
         tt_output_torch = ttnn.to_torch(tt_output)[:batch_size]
 
     assert output.shape == tt_output_torch.shape
-    assert_quality(output, tt_output_torch, pcc=0.945, mse=0.00282)
+    assert_quality(output, tt_output_torch, pcc=0.944, mse=0.00307)

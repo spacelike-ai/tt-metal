@@ -81,7 +81,7 @@ class TtFluxPipeline:
             logger.info("creating TT-NN text encoder...")
             with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)):
                 parameters = TtT5EncoderParameters.from_torch(
-                    torch_text_encoder_2.state_dict(), device=device, dtype=ttnn.bfloat16
+                    torch_text_encoder_2.state_dict(), device=device, dtype=ttnn.bfloat8_b
                 )
             self._text_encoder_2 = TtT5Encoder(
                 parameters,
