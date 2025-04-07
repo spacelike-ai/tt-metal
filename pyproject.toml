@@ -1,11 +1,3 @@
-[build-system]
-requires = [
-  "setuptools==69.5.1",
-  "setuptools-scm==7.1.0",
-  "wheel",
-]
-build-backend = "setuptools.build_meta"
-
 [project]
 # To change to eager, or something similar
 name = "ttnn"
@@ -108,6 +100,16 @@ dev = [
     "xlsxwriter==3.0.8",
     "yamllint==1.32.0",
 ]
+
+[build-system]
+requires = ["hatchling >= 1.27", "hatch-vcs >= 0.4.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ttnn/ttnn"]
+
+[tool.hatch.version]
+source = "vcs"
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu" }]
