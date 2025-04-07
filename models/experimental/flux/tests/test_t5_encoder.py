@@ -82,4 +82,4 @@ def test_t5_encoder(*, mesh_device: ttnn.MeshDevice) -> None:
         tt_output_torch = ttnn.to_torch(tt_output)[:batch_size]
 
     assert output.shape == tt_output_torch.shape
-    assert_quality(output, tt_output_torch, pcc=0.945)
+    assert_quality(output, tt_output_torch, pcc=0.945, mse=0.00282)
