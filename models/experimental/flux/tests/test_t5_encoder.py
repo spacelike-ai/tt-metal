@@ -74,9 +74,13 @@ def test_t5_encoder(*, mesh_device: ttnn.MeshDevice) -> None:
         tt_model.forward(tt_tokens)
 
     logger.info("executing...")
+    ttnn.synchronize_device(mesh_device)
     start_time = time.time()
+
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
         tt_output = tt_model.forward(tt_tokens)
+
+    ttnn.synchronize_device(mesh_device)
     logger.info(f"TT-NN runtime: {time.time() - start_time}")
     logger.info("done...")
 
