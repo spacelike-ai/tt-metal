@@ -2819,11 +2819,11 @@ name = "llama-models"
 version = "0.0.42"
 source = { git = "https://github.com/tenstorrent/llama-models.git?rev=tt_metal_tag#d1273428f4a8500accd0a00fc484faed46aaf724" }
 dependencies = [
-    { name = "jinja2", marker = "python_full_version >= '3.12'" },
-    { name = "pillow", marker = "python_full_version >= '3.12'" },
-    { name = "pydantic", marker = "python_full_version >= '3.12'" },
-    { name = "pyyaml", marker = "python_full_version >= '3.12'" },
-    { name = "tiktoken", marker = "python_full_version >= '3.12'" },
+    { name = "jinja2", marker = "python_full_version >= '3.10'" },
+    { name = "pillow", marker = "python_full_version >= '3.10'" },
+    { name = "pydantic", marker = "python_full_version >= '3.10'" },
+    { name = "pyyaml", marker = "python_full_version >= '3.10'" },
+    { name = "tiktoken", marker = "python_full_version >= '3.10'" },
 ]
 
 [[package]]
@@ -6457,7 +6457,7 @@ wheels = [
 
 [[package]]
 name = "ttnn"
-version = "0.1.0rc3.dev14+g7d1d8b3d43.d20250407"
+version = "0.1.0rc3.dev15+g2d05fc7001.d20250407"
 source = { editable = "." }
 dependencies = [
     { name = "bokeh" },
@@ -6508,7 +6508,7 @@ dev = [
     { name = "jiwer" },
     { name = "jsbeautifier" },
     { name = "librosa" },
-    { name = "llama-models", marker = "python_full_version >= '3.12'" },
+    { name = "llama-models", marker = "python_full_version >= '3.10'" },
     { name = "loguru" },
     { name = "lxml" },
     { name = "multiprocess" },
@@ -6599,7 +6599,7 @@ dev = [
     { name = "jiwer", specifier = "==3.0.5" },
     { name = "jsbeautifier", specifier = "==1.14.7" },
     { name = "librosa", specifier = "==0.10.0" },
-    { name = "llama-models", marker = "python_full_version >= '3.12'", git = "https://github.com/tenstorrent/llama-models.git?rev=tt_metal_tag" },
+    { name = "llama-models", marker = "python_full_version >= '3.10'", git = "https://github.com/tenstorrent/llama-models.git?rev=tt_metal_tag" },
     { name = "loguru", specifier = ">=0.6.0" },
     { name = "lxml", specifier = "==4.9.4" },
     { name = "multiprocess", specifier = "==0.70.14" },
