@@ -257,6 +257,7 @@ class TtFluxPipeline:
             tt_imagerot2 = ttnn.from_torch(image_rotary_emb[1], layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
 
         logger.info("denoising...")
+        ttnn.synchronize_device(self._device)
         denoising_start_time = time.time()
 
         ttnn.copy_host_to_device_tensor(tt_prompt_embeds, self._trace.prompt_input)
@@ -298,6 +299,7 @@ class TtFluxPipeline:
                 image_rotary_emb=(self._trace.imagerot1_input, self._trace.imagerot2_input),
             )
 
+        ttnn.synchronize_device(self._device)
         denoising_end_time = time.time()
 
         logger.info("decoding image...")
