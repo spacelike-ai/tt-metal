@@ -115,8 +115,7 @@ class TtFluxTransformer2DModel:
         prompt = ttnn.clone(prompt, dtype=spatial.dtype)
 
         combined = ttnn.concat([prompt, spatial], dim=1)
-        ttnn.deallocate(prompt)
-        ttnn.deallocate(spatial)
+        del prompt, spatial
 
         for i, block in enumerate(self._single_transformer_blocks, start=1):
             combined = block.forward(
@@ -129,7 +128,7 @@ class TtFluxTransformer2DModel:
                 ttnn.DumpDeviceProfiler(combined.device())  # TODO: allow for mesh device
 
         spatial = combined[:, prompt_sequence_length:]
-        ttnn.deallocate(combined)
+        del combined
 
         spatial_time = self._time_embed_out.forward(ttnn.silu(time_embed))
         [scale, shift] = chunk_time(spatial_time, 2)

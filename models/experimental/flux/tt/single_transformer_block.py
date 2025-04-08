@@ -93,7 +93,7 @@ class TtFluxSingleTransformerBlock:
         attn, _ = self._attn.forward(spatial=norm_combined, image_rotary_emb=image_rotary_emb)
         # TODO: PCC of attn seems a bit low
 
-        ttnn.deallocate(norm_combined)
+        del norm_combined
 
         additional = ttnn.concat([attn, mlp_combined], dim=2)
         proj_out = self._proj_out.forward(additional)

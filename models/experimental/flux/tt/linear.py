@@ -83,7 +83,6 @@ class TtLinear:
         core_grid: ttnn.CoreGrid | None = None,
         output_tile: list[int] | None = None,
         dtype: ttnn.DataType | None = None,
-        deallocate: bool = False,
     ) -> ttnn.Tensor:
         msg = f"last value in input shape {list(x.shape)} should be equal to {self._in_channels}"
         assert x.shape[-1] == self._in_channels, msg
@@ -95,7 +94,7 @@ class TtLinear:
             weight = self._weight
             bias = self._bias
 
-        output = ttnn.linear(
+        return ttnn.linear(
             x,
             weight,
             bias=bias,
@@ -105,13 +104,3 @@ class TtLinear:
             output_tile=output_tile,
             dtype=dtype,
         )
-
-        if deallocate:
-            ttnn.deallocate(x)
-
-        if self._paramters_on_host:
-            ttnn.deallocate(weight)
-            if bias is not None:
-                ttnn.deallocate(bias)
-
-        return output

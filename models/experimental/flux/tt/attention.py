@@ -101,7 +101,7 @@ class TtAttentionPart:
 
         self._gather = parameters.gather
 
-    def qkv(self, x: ttnn.Tensor, *, num_heads: int, deallocate: bool) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
+    def qkv(self, x: ttnn.Tensor, *, num_heads: int) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
         _batch_size, sequence_length, _embedding_dim = x.shape
 
         # # Input sharding
@@ -115,7 +115,7 @@ class TtAttentionPart:
         #     mm_a_x = 8
         #     mm_a_x_strategy = ttnn.ShardStrategy.BLOCK
         #     mm_a_x_memory_config = ttnn.L1_BLOCK_SHARDED_MEMORY_CONFIG
-        #     x = to_memory_config(
+        #     x = ttnn.to_memory_config(
         #         x,
         #         memory_config=ttnn.create_sharded_memory_config(
         #             x.shape,
@@ -123,9 +123,7 @@ class TtAttentionPart:
         #             strategy=mm_a_x_strategy,
         #             orientation=ttnn.ShardOrientation.ROW_MAJOR,
         #         ),
-        #         deallocate=deallocate,
         #     )
-        #     deallocate = True
         # else:
         #     mm_a_x = 8
         #     mm_a_y = 6
@@ -136,24 +134,24 @@ class TtAttentionPart:
             # memory_config=mm_a_x_memory_config,
             # core_grid=ttnn.CoreGrid(y=mm_a_y, x=mm_a_x),
             # dtype=ttnn.bfloat8_b,
-            deallocate=deallocate,
         )
+        del x
 
         if self._gather:
             qkv = ttnn.all_gather(qkv, dim=-1)
 
         # qkv = ttnn.reallocate(qkv)
-        # qkv = to_memory_config(qkv, ttnn.L1_MEMORY_CONFIG, deallocate=True)
+        # qkv = ttnn.to_memory_config(qkv, ttnn.L1_MEMORY_CONFIG)
 
         q, k, v = ttnn.transformer.split_query_key_value_and_split_heads(qkv, num_heads=num_heads, transpose_key=False)
-        ttnn.deallocate(qkv)
+        del qkv
 
-        q = self._norm_q.forward(q, deallocate=True)
-        k = self._norm_k.forward(k, deallocate=True)
+        q = self._norm_q.forward(q)
+        k = self._norm_k.forward(k)
 
-        # q = to_memory_config(q, ttnn.DRAM_MEMORY_CONFIG, deallocate=True)
-        # k = to_memory_config(k, ttnn.DRAM_MEMORY_CONFIG, deallocate=True)
-        # v = to_memory_config(v, ttnn.DRAM_MEMORY_CONFIG, deallocate=True)
+        # q = ttnn.to_memory_config(q, ttnn.DRAM_MEMORY_CONFIG)
+        # k = ttnn.to_memory_config(k, ttnn.DRAM_MEMORY_CONFIG)
+        # v = ttnn.to_memory_config(v, ttnn.DRAM_MEMORY_CONFIG)
 
         return q, k, v
 
@@ -167,11 +165,10 @@ class TtAttentionPart:
 
         return x
 
-        # return to_memory_config(
+        # return ttnn.to_memory_config(
         #     result,
         #     memory_config=ttnn.DRAM_MEMORY_CONFIG,
         #     dtype=ttnn.bfloat16,
-        #     deallocate=True,
         # )
 
 
@@ -190,7 +187,6 @@ class TtAttention:
         spatial: ttnn.Tensor,
         prompt: ttnn.Tensor | None = None,
         image_rotary_emb: tuple[ttnn.Tensor, ttnn.Tensor] | None = None,
-        deallocate: bool = False,
     ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
         """
         spatial: N ⊗ S1 ⊗ (H * E1)
@@ -198,7 +194,7 @@ class TtAttention:
         """
         device = spatial.device()
 
-        q, k, v = self._spatial_attn.qkv(spatial, num_heads=self._num_heads, deallocate=deallocate)
+        q, k, v = self._spatial_attn.qkv(spatial, num_heads=self._num_heads)
 
         program_config = ttnn.SDPAProgramConfig(
             compute_with_storage_grid_size=device.compute_with_storage_grid_size(),
@@ -227,23 +223,21 @@ class TtAttention:
                 program_config=program_config,
                 compute_kernel_config=compute_kernel_config,
             )
-            ttnn.deallocate(q)
-            ttnn.deallocate(k)
-            ttnn.deallocate(v)
+            del q, k, v
 
-            concatenated_attn = ttnn.transformer.concatenate_heads(attn)
-            ttnn.deallocate(attn)
+            attn = ttnn.transformer.concatenate_heads(attn)
 
-            spatial = self._spatial_attn.out_proj(concatenated_attn)
+            spatial = self._spatial_attn.out_proj(attn)
             return spatial, None
 
         assert self._prompt_attn is not None
 
-        q2, k2, v2 = self._prompt_attn.qkv(prompt, num_heads=self._num_heads, deallocate=deallocate)
+        q2, k2, v2 = self._prompt_attn.qkv(prompt, num_heads=self._num_heads)
 
         q = ttnn.concat([q2, q], dim=2)
         k = ttnn.concat([k2, k], dim=2)
         v = ttnn.concat([v2, v], dim=2)
+        del q2, k2, v2
 
         if image_rotary_emb is not None:
             q = _apply_rotary_emb(q, image_rotary_emb)
@@ -257,6 +251,8 @@ class TtAttention:
             program_config=program_config,
             compute_kernel_config=compute_kernel_config,
         )
+        del q, k, v
+
         attn = ttnn.transformer.concatenate_heads(attn)
 
         if prompt is not None:

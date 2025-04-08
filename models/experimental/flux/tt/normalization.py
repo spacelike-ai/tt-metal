@@ -39,13 +39,8 @@ class TtRmsNorm:
         self._eps = eps
         self._weight = parameters.weight
 
-    def forward(self, x: ttnn.Tensor, *, deallocate: bool = False) -> ttnn.Tensor:
-        output = ttnn.rms_norm(x, weight=self._weight, epsilon=self._eps)
-
-        if deallocate:
-            ttnn.deallocate(x)
-
-        return output
+    def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        return ttnn.rms_norm(x, weight=self._weight, epsilon=self._eps)
 
 
 @dataclass

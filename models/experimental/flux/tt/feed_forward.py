@@ -48,19 +48,17 @@ class TtFeedForward:
         self.out_proj = TtLinear(parameters.out_proj)
 
     def forward(self, x: ttnn.Tensor, *, gather: bool = False) -> ttnn.Tensor:
-        x2 = self.in_proj.forward(x)
+        x = self.in_proj.forward(x)
         # Turning on fast_and_approximate_mode leads to big changes in the generated image.
         # The image quality might still be okay.
-        x3 = ttnn.gelu(x2, fast_and_approximate_mode=False)
-        ttnn.deallocate(x2)
+        x = ttnn.gelu(x, fast_and_approximate_mode=False)
 
         if gather:
-            x3 = ttnn.all_gather(x3, dim=-1)
+            x = ttnn.all_gather(x, dim=-1)
 
-        result = self.out_proj.forward(x3)
-        ttnn.deallocate(x3)
+        x = self.out_proj.forward(x)
 
         if gather:
-            result = ttnn.all_gather(result, dim=-1)
+            x = ttnn.all_gather(x, dim=-1)
 
-        return result
+        return x

@@ -114,7 +114,6 @@ class TtConv2d:
 
     def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
         result, shape = self.forward_without_reshape(x)
-        # TODO: deallocate result
         # TODO: this reshape is not correct if the tensor is replicated over multiple devices
         return result.reshape(shape)
 

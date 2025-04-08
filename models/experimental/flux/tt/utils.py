@@ -47,32 +47,14 @@ def from_torch_fast(
         # Work around the fact that the shape is erroneously set to the padded shape under certain conditions.
         assert isinstance(conversion_device, ttnn.MeshDevice)
         assert dtype in (ttnn.bfloat4_b, ttnn.bfloat8_b)
-        new = tensor.reshape(ttnn.Shape(t.shape))
-        ttnn.deallocate(tensor)
-        tensor = new
+        tensor = tensor.reshape(ttnn.Shape(t.shape))
 
-    new = ttnn.to_layout(tensor, layout, dtype=dtype, memory_config=memory_config)
-    ttnn.deallocate(tensor)
-    tensor = new
+    tensor = ttnn.to_layout(tensor, layout, dtype=dtype, memory_config=memory_config)
 
     if to_host:
-        new = tensor.cpu()
-        ttnn.deallocate(tensor)
-        tensor = new
+        tensor = tensor.cpu()
 
     return tensor
-
-
-def to_memory_config(
-    t: ttnn.Tensor, memory_config: ttnn.MemoryConfig, *, dtype: ttnn.DataType | None = None, deallocate: bool = False
-) -> ttnn.Tensor:
-    result = ttnn.to_memory_config(t, memory_config, dtype=dtype)
-
-    result_is_same = result.memory_config() == t.memory_config() and result.buffer_address() == t.buffer_address()
-    if deallocate and not result_is_same:
-        ttnn.deallocate(t)
-
-    return result
 
 
 def assert_quality(
