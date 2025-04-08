@@ -10,12 +10,12 @@ import pytest
 import torch
 import ttnn
 
-from ..tt.transformer_block import TtTransformerBlock, TtTransformerBlockParameters
+from ..tt.transformer_block import TransformerBlock, TransformerBlockParameters
 from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
 if TYPE_CHECKING:
     from ..reference import FluxTransformer2DModel
-    from ..reference.transformer_block import TransformerBlock
+    from ..reference.transformer_block import TransformerBlock as TransformerBlockReference
 
 
 @pytest.mark.parametrize(
@@ -40,13 +40,13 @@ def test_transformer_block(
 ) -> None:
     torch.manual_seed(0)
 
-    torch_model: TransformerBlock = parent_torch_model.transformer_blocks[block_index].to(torch.float32)
+    torch_model: TransformerBlockReference = parent_torch_model.transformer_blocks[block_index].to(torch.float32)
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = TtTransformerBlockParameters.from_torch(
+        parameters = TransformerBlockParameters.from_torch(
             torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
         )
-    tt_model = TtTransformerBlock(parameters, num_heads=torch_model.num_heads)
+    tt_model = TransformerBlock(parameters, num_heads=torch_model.num_heads)
 
     embedding_dim = 3072
 

@@ -2,7 +2,7 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-from .pipeline import TtFluxPipeline
-from .transformer import TtFluxTransformer2DModel
+from .pipeline import FluxPipeline
+from .transformer import FluxTransformer2DModel
 
-__all__ = ["TtFluxPipeline", "TtFluxTransformer2DModel"]
+__all__ = ["FluxPipeline", "FluxTransformer2DModel"]

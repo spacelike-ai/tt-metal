@@ -12,8 +12,9 @@ import ttnn
 from loguru import logger
 from transformers.models.t5.modeling_t5 import T5EncoderModel
 
-from ..reference.t5_encoder import T5Config, T5Encoder
-from ..tt.t5_encoder import TtT5Encoder, TtT5EncoderParameters
+from ..reference.t5_encoder import T5Config
+from ..reference.t5_encoder import T5Encoder as T5EncoderReference
+from ..tt.t5_encoder import T5Encoder, T5EncoderParameters
 from ..tt.utils import assert_quality
 
 
@@ -26,7 +27,7 @@ def test_t5_encoder(*, mesh_device: ttnn.MeshDevice) -> None:
     hf_model = T5EncoderModel.from_pretrained("black-forest-labs/FLUX.1-schnell", subfolder="text_encoder_2")
 
     with torch.device("meta"):
-        torch_model = T5Encoder(
+        torch_model = T5EncoderReference(
             T5Config(
                 vocab_size=hf_model.config.vocab_size,
                 d_model=hf_model.config.d_model,
@@ -44,10 +45,8 @@ def test_t5_encoder(*, mesh_device: ttnn.MeshDevice) -> None:
 
     start_time = time.time()
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = TtT5EncoderParameters.from_torch(
-            torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
-        )
-    tt_model = TtT5Encoder(
+        parameters = T5EncoderParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b)
+    tt_model = T5Encoder(
         parameters,
         num_heads=hf_model.config.num_heads,
         relative_attention_num_buckets=hf_model.config.relative_attention_num_buckets,

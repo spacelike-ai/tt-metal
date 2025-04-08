@@ -8,8 +8,8 @@ import pytest
 import torch
 import ttnn
 
-from ..reference.normalization import RmsNorm
-from ..tt.normalization import TtLayerNorm, TtLayerNormParameters, TtRmsNorm, TtRmsNormParameters
+from ..reference.normalization import RmsNorm as RmsNormReference
+from ..tt.normalization import LayerNorm, LayerNormParameters, RmsNorm, RmsNormParameters
 from ..tt.utils import assert_quality
 
 
@@ -31,10 +31,8 @@ def test_layer_norm(
     torch_model = torch.nn.LayerNorm(input_shape[-1:], eps=1.0)
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = TtLayerNormParameters.from_torch(
-            torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
-        )
-    tt_model = TtLayerNorm(parameters, eps=torch_model.eps)
+        parameters = LayerNormParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b)
+    tt_model = LayerNorm(parameters, eps=torch_model.eps)
 
     torch_input_tensor = torch.randn(input_shape)
 
@@ -68,13 +66,13 @@ def test_rms_norm(
 ) -> None:
     torch.manual_seed(0)
 
-    torch_model = RmsNorm(dim=input_shape[-1], eps=1.0)
+    torch_model = RmsNormReference(dim=input_shape[-1], eps=1.0)
     torch.nn.init.normal_(torch_model.weight)
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = TtRmsNormParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b)
+        parameters = RmsNormParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b)
 
-    tt_model = TtRmsNorm(parameters, eps=torch_model.eps)
+    tt_model = RmsNorm(parameters, eps=torch_model.eps)
 
     torch_input_tensor = torch.randn(input_shape)
 

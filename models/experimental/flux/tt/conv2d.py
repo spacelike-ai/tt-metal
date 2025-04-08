@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class TtConv2dParameters:
+class Conv2dParameters:
     weight: ttnn.Tensor
     bias: ttnn.Tensor | None
     device: ttnn.Device | ttnn.MeshDevice
@@ -27,7 +27,7 @@ class TtConv2dParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
-    ) -> TtConv2dParameters:
+    ) -> Conv2dParameters:
         # The function that prepares conv2d weights and biases requires row-major layout, which is
         # not suppoted by block floats.
         intermediate_dtype = dtype if dtype not in [ttnn.bfloat4_b, ttnn.bfloat8_b] else ttnn.bfloat16
@@ -54,10 +54,10 @@ class TtConv2dParameters:
         return self.weight.shape[-2], self.weight.shape[-1]
 
 
-class TtConv2d:
+class Conv2d:
     def __init__(
         self,
-        parameters: TtConv2dParameters,
+        parameters: Conv2dParameters,
         *,
         stride: tuple[int, int] = (1, 1),
         padding: tuple[int, int] = (0, 0),

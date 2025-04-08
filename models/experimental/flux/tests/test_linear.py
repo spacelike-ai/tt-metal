@@ -8,7 +8,7 @@ import pytest
 import torch
 import ttnn
 
-from ..tt.linear import TtLinear, TtLinearParameters
+from ..tt.linear import Linear, LinearParameters
 from ..tt.utils import assert_quality
 
 
@@ -33,8 +33,8 @@ def test_linear(
     torch_model.eval()
 
     with ttnn.distribute(ttnn.ShardTensorToMesh(mesh_device, dim=-1)):
-        parameters = TtLinearParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b)
-    tt_model = TtLinear(parameters)
+        parameters = LinearParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b)
+    tt_model = Linear(parameters)
 
     torch_input_tensor = torch.randn((batch_size, input_dim))
 

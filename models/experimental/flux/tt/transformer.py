@@ -9,27 +9,27 @@ from typing import TYPE_CHECKING
 
 import ttnn
 
-from .linear import TtLinear, TtLinearParameters
-from .normalization import TtLayerNorm, TtLayerNormParameters
-from .single_transformer_block import TtFluxSingleTransformerBlock, TtFluxSingleTransformerBlockParameters
+from .linear import Linear, LinearParameters
+from .normalization import LayerNorm, LayerNormParameters
+from .single_transformer_block import FluxSingleTransformerBlock, FluxSingleTransformerBlockParameters
 from .substate import indexed_substates, substate
-from .timestep_embedding import TtCombinedTimestepTextProjEmbeddings, TtCombinedTimestepTextProjEmbeddingsParameters
-from .transformer_block import TtTransformerBlock, TtTransformerBlockParameters, chunk_time
+from .timestep_embedding import CombinedTimestepTextProjEmbeddings, CombinedTimestepTextProjEmbeddingsParameters
+from .transformer_block import TransformerBlock, TransformerBlockParameters, chunk_time
 
 if TYPE_CHECKING:
     import torch
 
 
 @dataclass
-class TtFluxTransformer2DModelParameters:
-    x_embedder: TtLinearParameters
-    time_text_embed: TtCombinedTimestepTextProjEmbeddingsParameters
-    context_embedder: TtLinearParameters
-    transformer_blocks: list[TtTransformerBlockParameters]
-    single_transformer_blocks: list[TtFluxSingleTransformerBlockParameters]
-    time_embed_out: TtLinearParameters
-    norm_out: TtLayerNormParameters
-    proj_out: TtLinearParameters
+class FluxTransformer2DModelParameters:
+    x_embedder: LinearParameters
+    time_text_embed: CombinedTimestepTextProjEmbeddingsParameters
+    context_embedder: LinearParameters
+    transformer_blocks: list[TransformerBlockParameters]
+    single_transformer_blocks: list[FluxSingleTransformerBlockParameters]
+    time_embed_out: LinearParameters
+    norm_out: LayerNormParameters
+    proj_out: LinearParameters
 
     @classmethod
     def from_torch(
@@ -38,50 +38,50 @@ class TtFluxTransformer2DModelParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.MeshDevice,
-    ) -> TtFluxTransformer2DModelParameters:
+    ) -> FluxTransformer2DModelParameters:
         return cls(
-            x_embedder=TtLinearParameters.from_torch(substate(state, "x_embedder"), dtype=dtype, device=device),
-            time_text_embed=TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(
+            x_embedder=LinearParameters.from_torch(substate(state, "x_embedder"), dtype=dtype, device=device),
+            time_text_embed=CombinedTimestepTextProjEmbeddingsParameters.from_torch(
                 substate(state, "time_text_embed"), dtype=dtype, device=device
             ),
-            context_embedder=TtLinearParameters.from_torch(
+            context_embedder=LinearParameters.from_torch(
                 substate(state, "context_embedder"), dtype=dtype, device=device
             ),
             transformer_blocks=[
-                TtTransformerBlockParameters.from_torch(s, dtype=dtype, device=device)
+                TransformerBlockParameters.from_torch(s, dtype=dtype, device=device)
                 for s in indexed_substates(state, "transformer_blocks")
             ],
             single_transformer_blocks=[
-                TtFluxSingleTransformerBlockParameters.from_torch(
+                FluxSingleTransformerBlockParameters.from_torch(
                     s, dtype=dtype, device=device, linear_on_host=i > 20 and device.get_num_devices() == 1
                 )
                 for i, s in enumerate(indexed_substates(state, "single_transformer_blocks"))
             ],
-            time_embed_out=TtLinearParameters.from_torch(
+            time_embed_out=LinearParameters.from_torch(
                 substate(state, "norm_out.linear"), dtype=dtype, device=device, unsqueeze_bias=True
             ),
-            norm_out=TtLayerNormParameters.from_torch(substate(state, "norm_out.norm"), dtype=dtype, device=device),
-            proj_out=TtLinearParameters.from_torch(substate(state, "proj_out"), dtype=dtype, device=device),
+            norm_out=LayerNormParameters.from_torch(substate(state, "norm_out.norm"), dtype=dtype, device=device),
+            proj_out=LinearParameters.from_torch(substate(state, "proj_out"), dtype=dtype, device=device),
         )
 
 
-class TtFluxTransformer2DModel:
-    def __init__(self, parameters: TtFluxTransformer2DModelParameters, *, num_attention_heads: int) -> None:
+class FluxTransformer2DModel:
+    def __init__(self, parameters: FluxTransformer2DModelParameters, *, num_attention_heads: int) -> None:
         super().__init__()
 
-        self._x_embedder = TtLinear(parameters.x_embedder)
-        self._time_text_embed = TtCombinedTimestepTextProjEmbeddings(parameters.time_text_embed)
-        self._context_embedder = TtLinear(parameters.context_embedder)
+        self._x_embedder = Linear(parameters.x_embedder)
+        self._time_text_embed = CombinedTimestepTextProjEmbeddings(parameters.time_text_embed)
+        self._context_embedder = Linear(parameters.context_embedder)
         self._transformer_blocks = [
-            TtTransformerBlock(block, num_heads=num_attention_heads) for block in parameters.transformer_blocks
+            TransformerBlock(block, num_heads=num_attention_heads) for block in parameters.transformer_blocks
         ]
         self._single_transformer_blocks = [
-            TtFluxSingleTransformerBlock(block, num_heads=num_attention_heads)
+            FluxSingleTransformerBlock(block, num_heads=num_attention_heads)
             for block in parameters.single_transformer_blocks
         ]
-        self._time_embed_out = TtLinear(parameters.time_embed_out)
-        self._norm_out = TtLayerNorm(parameters.norm_out, eps=1e-6)
-        self._proj_out = TtLinear(parameters.proj_out)
+        self._time_embed_out = Linear(parameters.time_embed_out)
+        self._norm_out = LayerNorm(parameters.norm_out, eps=1e-6)
+        self._proj_out = Linear(parameters.proj_out)
 
     def forward(
         self,

@@ -10,15 +10,14 @@ import pytest
 import torch
 import ttnn
 
-from ..tt.timestep_embedding import (
-    TtCombinedTimestepTextProjEmbeddings,
-    TtCombinedTimestepTextProjEmbeddingsParameters,
-)
+from ..tt.timestep_embedding import CombinedTimestepTextProjEmbeddings, CombinedTimestepTextProjEmbeddingsParameters
 from ..tt.utils import assert_quality
 
 if TYPE_CHECKING:
-    from ..reference import FluxTransformer2DModel
-    from ..reference.timestep_embedding import CombinedTimestepTextProjEmbeddings
+    from ..reference import FluxTransformer2DModel as FluxTransformer2DModelReference
+    from ..reference.timestep_embedding import (
+        CombinedTimestepTextProjEmbeddings as CombinedTimestepTextProjEmbeddingsReference,
+    )
 
 
 @pytest.mark.parametrize(
@@ -31,20 +30,20 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
 @pytest.mark.usefixtures("use_program_cache")
 def test_timestep_embedding(
-    *, mesh_device: ttnn.MeshDevice, batch_size: int, parent_torch_model: FluxTransformer2DModel
+    *, mesh_device: ttnn.MeshDevice, batch_size: int, parent_torch_model: FluxTransformer2DModelReference
 ) -> None:
     torch.manual_seed(0)
 
-    torch_model: CombinedTimestepTextProjEmbeddings = parent_torch_model.time_text_embed.to(torch.float32)
+    torch_model: CombinedTimestepTextProjEmbeddingsReference = parent_torch_model.time_text_embed.to(torch.float32)
 
-    # torch_model = CombinedTimestepTextProjEmbeddings(embedding_dim=3072, pooled_projection_dim=768)
+    # torch_model = CombinedTimestepTextProjEmbeddingsReference(embedding_dim=3072, pooled_projection_dim=768)
     # torch_model.eval()
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = TtCombinedTimestepTextProjEmbeddingsParameters.from_torch(
+        parameters = CombinedTimestepTextProjEmbeddingsParameters.from_torch(
             torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
         )
-        tt_model = TtCombinedTimestepTextProjEmbeddings(parameters)
+        tt_model = CombinedTimestepTextProjEmbeddings(parameters)
 
     timestep = torch.randint(1000, (batch_size,))
     pooled_projection = torch.randn((batch_size, 768))

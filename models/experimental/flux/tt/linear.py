@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class TtLinearParameters:
+class LinearParameters:
     weight: ttnn.Tensor
     bias: ttnn.Tensor | None
     on_host: bool
@@ -31,7 +31,7 @@ class TtLinearParameters:
         device: ttnn.Device | ttnn.MeshDevice | None,
         on_host: bool = False,
         unsqueeze_bias: bool = False,
-    ) -> TtLinearParameters:
+    ) -> LinearParameters:
         if "bias" in state:
             bias = state["bias"].unsqueeze(0)
             if unsqueeze_bias:
@@ -66,8 +66,8 @@ class TtLinearParameters:
         return self.weight.shape[1]
 
 
-class TtLinear:
-    def __init__(self, parameters: TtLinearParameters) -> None:
+class Linear:
+    def __init__(self, parameters: LinearParameters) -> None:
         self._in_channels = parameters.in_channels
         self._weight = parameters.weight
         self._bias = parameters.bias

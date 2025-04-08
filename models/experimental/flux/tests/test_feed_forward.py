@@ -8,8 +8,8 @@ import pytest
 import torch
 import ttnn
 
-from ..reference.feed_forward import FeedForward
-from ..tt.feed_forward import TtFeedForward, TtFeedForwardParameters
+from ..reference.feed_forward import FeedForward as FeedForwardReference
+from ..tt.feed_forward import FeedForward, FeedForwardParameters
 from ..tt.utils import assert_quality
 
 
@@ -31,14 +31,14 @@ def test_feed_forward(
 ) -> None:
     torch.manual_seed(0)
 
-    torch_model = FeedForward(dim=input_dim, dim_out=output_dim)
+    torch_model = FeedForwardReference(dim=input_dim, dim_out=output_dim)
     torch_model.eval()
 
     with ttnn.distribute(ttnn.ShardTensorToMesh(mesh_device, dim=-1)):
-        parameters = TtFeedForwardParameters.from_torch(
+        parameters = FeedForwardParameters.from_torch(
             torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
         )
-    tt_model = TtFeedForward(parameters)
+    tt_model = FeedForward(parameters)
 
     torch_input_tensor = torch.randn((batch_size, input_dim))
 

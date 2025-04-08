@@ -10,24 +10,24 @@ from dataclasses import dataclass
 import torch
 import ttnn
 
-from .linear import TtLinear, TtLinearParameters
-from .normalization import TtRmsNorm, TtRmsNormParameters
+from .linear import Linear, LinearParameters
+from .normalization import RmsNorm, RmsNormParameters
 from .substate import has_substate, substate
 
 
 @dataclass
-class TtAttentionPartParameters:
-    qkv_proj: TtLinearParameters
-    norm_q: TtRmsNormParameters
-    norm_k: TtRmsNormParameters
+class AttentionPartParameters:
+    qkv_proj: LinearParameters
+    norm_q: RmsNormParameters
+    norm_k: RmsNormParameters
     gather: bool
-    out_proj: TtLinearParameters | None
+    out_proj: LinearParameters | None
 
 
 @dataclass
-class TtAttentionParameters:
-    spatial: TtAttentionPartParameters
-    prompt: TtAttentionPartParameters | None
+class AttentionParameters:
+    spatial: AttentionPartParameters
+    prompt: AttentionPartParameters | None
 
     @classmethod
     def from_torch(
@@ -36,17 +36,17 @@ class TtAttentionParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
-    ) -> TtAttentionParameters:
+    ) -> AttentionParameters:
         gather = device.get_num_devices() > 1
 
         with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
-            spatial_qkv_proj = TtLinearParameters.from_torch(
+            spatial_qkv_proj = LinearParameters.from_torch(
                 _merge_qkv_proj(substate(state, "to_q"), substate(state, "to_k"), substate(state, "to_v")),
                 dtype=dtype,
                 device=device,
             )
             prompt_qkv_proj = (
-                TtLinearParameters.from_torch(
+                LinearParameters.from_torch(
                     _merge_qkv_proj(
                         substate(state, "add_q_proj"), substate(state, "add_k_proj"), substate(state, "add_v_proj")
                     ),
@@ -58,28 +58,28 @@ class TtAttentionParameters:
             )
 
             spatial_out_proj = (
-                TtLinearParameters.from_torch(substate(state, "to_out.0"), dtype=dtype, device=device)
+                LinearParameters.from_torch(substate(state, "to_out.0"), dtype=dtype, device=device)
                 if has_substate(state, "to_out.0")
                 else None
             )
             prompt_out_proj = (
-                TtLinearParameters.from_torch(substate(state, "to_add_out"), dtype=dtype, device=device)
+                LinearParameters.from_torch(substate(state, "to_add_out"), dtype=dtype, device=device)
                 if prompt_qkv_proj
                 else None
             )
 
         return cls(
-            spatial=TtAttentionPartParameters(
+            spatial=AttentionPartParameters(
                 qkv_proj=spatial_qkv_proj,
-                norm_q=TtRmsNormParameters.from_torch(substate(state, "norm_q"), dtype=dtype, device=device),
-                norm_k=TtRmsNormParameters.from_torch(substate(state, "norm_k"), dtype=dtype, device=device),
+                norm_q=RmsNormParameters.from_torch(substate(state, "norm_q"), dtype=dtype, device=device),
+                norm_k=RmsNormParameters.from_torch(substate(state, "norm_k"), dtype=dtype, device=device),
                 out_proj=spatial_out_proj,
                 gather=gather,
             ),
-            prompt=TtAttentionPartParameters(
+            prompt=AttentionPartParameters(
                 qkv_proj=prompt_qkv_proj,
-                norm_q=TtRmsNormParameters.from_torch(substate(state, "norm_added_q"), dtype=dtype, device=device),
-                norm_k=TtRmsNormParameters.from_torch(substate(state, "norm_added_k"), dtype=dtype, device=device),
+                norm_q=RmsNormParameters.from_torch(substate(state, "norm_added_q"), dtype=dtype, device=device),
+                norm_k=RmsNormParameters.from_torch(substate(state, "norm_added_k"), dtype=dtype, device=device),
                 out_proj=prompt_out_proj,
                 gather=gather,
             )
@@ -88,16 +88,16 @@ class TtAttentionParameters:
         )
 
 
-class TtAttentionPart:
-    def __init__(self, parameters: TtAttentionPartParameters) -> None:
+class AttentionPart:
+    def __init__(self, parameters: AttentionPartParameters) -> None:
         super().__init__()
 
         eps = 1e-6
 
-        self._qkv_proj = TtLinear(parameters.qkv_proj)
-        self._out_proj = TtLinear(parameters.out_proj) if parameters.out_proj is not None else None
-        self._norm_q = TtRmsNorm(parameters.norm_q, eps=eps)
-        self._norm_k = TtRmsNorm(parameters.norm_k, eps=eps)
+        self._qkv_proj = Linear(parameters.qkv_proj)
+        self._out_proj = Linear(parameters.out_proj) if parameters.out_proj is not None else None
+        self._norm_q = RmsNorm(parameters.norm_q, eps=eps)
+        self._norm_k = RmsNorm(parameters.norm_k, eps=eps)
 
         self._gather = parameters.gather
 
@@ -172,14 +172,14 @@ class TtAttentionPart:
         # )
 
 
-class TtAttention:
-    def __init__(self, parameters: TtAttentionParameters, *, num_heads: int) -> None:
+class Attention:
+    def __init__(self, parameters: AttentionParameters, *, num_heads: int) -> None:
         super().__init__()
 
         self._num_heads = num_heads
 
-        self._spatial_attn = TtAttentionPart(parameters.spatial)
-        self._prompt_attn = TtAttentionPart(parameters.prompt) if parameters.prompt is not None else None
+        self._spatial_attn = AttentionPart(parameters.spatial)
+        self._prompt_attn = AttentionPart(parameters.prompt) if parameters.prompt is not None else None
 
     def forward(
         self,

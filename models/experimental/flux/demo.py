@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from .tt import TtFluxPipeline
+from .tt import FluxPipeline
 
 if TYPE_CHECKING:
     import ttnn
@@ -20,7 +20,7 @@ def test_flux(
     *,
     mesh_device: ttnn.MeshDevice,
 ) -> None:
-    pipeline = TtFluxPipeline(checkpoint="black-forest-labs/FLUX.1-schnell", device=mesh_device)
+    pipeline = FluxPipeline(checkpoint="black-forest-labs/FLUX.1-schnell", device=mesh_device)
 
     pipeline.prepare(width=1024, height=1024, prompt_count=1, num_images_per_prompt=1)
 

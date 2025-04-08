@@ -10,13 +10,13 @@ from dataclasses import dataclass
 import torch
 import ttnn
 
-from .linear import TtLinear, TtLinearParameters
+from .linear import Linear, LinearParameters
 from .substate import indexed_substates, substate
 from .utils import from_torch_fast
 
 
 @dataclass
-class TtT5Config:
+class T5Config:
     vocab_size: int
     d_model: int
     d_ff: int
@@ -29,10 +29,10 @@ class TtT5Config:
 
 
 @dataclass
-class TtT5EncoderParameters:
+class T5EncoderParameters:
     token_embedding: ttnn.Tensor
-    blocks: list[TtT5BlockParameters]
-    norm: TtT5LayerNorm
+    blocks: list[T5BlockParameters]
+    norm: T5LayerNorm
     attention_bias: torch.Tensor
     device: ttnn.Device | ttnn.MeshDevice
     gather: bool
@@ -44,7 +44,7 @@ class TtT5EncoderParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
-    ) -> TtT5EncoderParameters:
+    ) -> T5EncoderParameters:
         with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
             token_embedding = ttnn.from_torch(
                 state["encoder.embed_tokens.weight"], dtype=dtype, device=device, layout=ttnn.TILE_LAYOUT
@@ -53,10 +53,10 @@ class TtT5EncoderParameters:
         return cls(
             token_embedding=token_embedding,
             blocks=[
-                TtT5BlockParameters.from_torch(s, dtype=dtype, device=device)
+                T5BlockParameters.from_torch(s, dtype=dtype, device=device)
                 for s in indexed_substates(state, "encoder.block")
             ],
-            norm=TtT5LayerNormParameters.from_torch(
+            norm=T5LayerNormParameters.from_torch(
                 substate(state, "encoder.final_layer_norm"), dtype=dtype, device=device
             ),
             attention_bias=state["encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"],
@@ -65,10 +65,10 @@ class TtT5EncoderParameters:
         )
 
 
-class TtT5Encoder:
+class T5Encoder:
     def __init__(
         self,
-        parameters: TtT5EncoderParameters,
+        parameters: T5EncoderParameters,
         num_heads: int,
         relative_attention_num_buckets: int,
         relative_attention_max_distance: int,
@@ -76,9 +76,9 @@ class TtT5Encoder:
     ) -> None:
         self._token_embedding = parameters.token_embedding
         self._blocks = [
-            TtT5Block(p, num_heads=num_heads, layer_norm_epsilon=layer_norm_epsilon) for p in parameters.blocks
+            T5Block(p, num_heads=num_heads, layer_norm_epsilon=layer_norm_epsilon) for p in parameters.blocks
         ]
-        self._norm = TtT5LayerNorm(parameters.norm, eps=layer_norm_epsilon)
+        self._norm = T5LayerNorm(parameters.norm, eps=layer_norm_epsilon)
         self._attention_bias = parameters.attention_bias
 
         self._num_heads = num_heads
@@ -114,9 +114,9 @@ class TtT5Encoder:
 
 
 @dataclass
-class TtT5BlockParameters:
-    attention: TtT5LayerSelfAttentionParameters
-    ff: TtT5LayerFFParameters
+class T5BlockParameters:
+    attention: T5LayerSelfAttentionParameters
+    ff: T5LayerFFParameters
 
     @classmethod
     def from_torch(
@@ -125,21 +125,19 @@ class TtT5BlockParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
-    ) -> TtT5BlockParameters:
+    ) -> T5BlockParameters:
         return cls(
-            attention=TtT5LayerSelfAttentionParameters.from_torch(
-                substate(state, "layer.0"), dtype=dtype, device=device
-            ),
-            ff=TtT5LayerFFParameters.from_torch(substate(state, "layer.1"), dtype=dtype, device=device),
+            attention=T5LayerSelfAttentionParameters.from_torch(substate(state, "layer.0"), dtype=dtype, device=device),
+            ff=T5LayerFFParameters.from_torch(substate(state, "layer.1"), dtype=dtype, device=device),
         )
 
 
-class TtT5Block:
-    def __init__(self, parameters: TtT5BlockParameters, *, num_heads: int, layer_norm_epsilon: float) -> None:
-        self._attention = TtT5LayerSelfAttention(
+class T5Block:
+    def __init__(self, parameters: T5BlockParameters, *, num_heads: int, layer_norm_epsilon: float) -> None:
+        self._attention = T5LayerSelfAttention(
             parameters.attention, num_heads=num_heads, layer_norm_epsilon=layer_norm_epsilon
         )
-        self._ff = TtT5LayerFF(parameters.ff, layer_norm_epsilon=layer_norm_epsilon)
+        self._ff = T5LayerFF(parameters.ff, layer_norm_epsilon=layer_norm_epsilon)
 
     def forward(self, x: ttnn.Tensor, *, position_bias: ttnn.Tensor) -> ttnn.Tensor:
         x = self._attention.forward(x, position_bias=position_bias)
@@ -147,9 +145,9 @@ class TtT5Block:
 
 
 @dataclass
-class TtT5LayerSelfAttentionParameters:
-    attention: TtT5AttentionParameters
-    norm: TtT5LayerNormParameters
+class T5LayerSelfAttentionParameters:
+    attention: T5AttentionParameters
+    norm: T5LayerNormParameters
 
     @classmethod
     def from_torch(
@@ -158,17 +156,17 @@ class TtT5LayerSelfAttentionParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
-    ) -> TtT5LayerSelfAttentionParameters:
+    ) -> T5LayerSelfAttentionParameters:
         return cls(
-            attention=TtT5AttentionParameters.from_torch(substate(state, "SelfAttention"), dtype=dtype, device=device),
-            norm=TtT5LayerNormParameters.from_torch(substate(state, "layer_norm"), dtype=dtype, device=device),
+            attention=T5AttentionParameters.from_torch(substate(state, "SelfAttention"), dtype=dtype, device=device),
+            norm=T5LayerNormParameters.from_torch(substate(state, "layer_norm"), dtype=dtype, device=device),
         )
 
 
-class TtT5LayerSelfAttention:
-    def __init__(self, parameters: TtT5BlockParameters, *, num_heads: int, layer_norm_epsilon: float) -> None:
-        self._attention = TtT5Attention(parameters.attention, num_heads=num_heads)
-        self._norm = TtT5LayerNorm(parameters.norm, eps=layer_norm_epsilon)
+class T5LayerSelfAttention:
+    def __init__(self, parameters: T5BlockParameters, *, num_heads: int, layer_norm_epsilon: float) -> None:
+        self._attention = T5Attention(parameters.attention, num_heads=num_heads)
+        self._norm = T5LayerNorm(parameters.norm, eps=layer_norm_epsilon)
 
     def forward(self, x: ttnn.Tensor, *, position_bias: ttnn.Tensor) -> ttnn.Tensor:
         normed = self._norm.forward(x)
@@ -177,7 +175,7 @@ class TtT5LayerSelfAttention:
 
 
 @dataclass
-class TtT5AttentionParameters:
+class T5AttentionParameters:
     q_proj: ttnn.Tensor
     k_proj: ttnn.Tensor
     v_proj: ttnn.Tensor
@@ -191,25 +189,25 @@ class TtT5AttentionParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
-    ) -> TtT5AttentionParameters:
+    ) -> T5AttentionParameters:
         with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
             return cls(
-                q_proj=TtLinearParameters.from_torch(substate(state, "q"), dtype=dtype, device=device),
-                k_proj=TtLinearParameters.from_torch(substate(state, "k"), dtype=dtype, device=device),
-                v_proj=TtLinearParameters.from_torch(substate(state, "v"), dtype=dtype, device=device),
-                o_proj=TtLinearParameters.from_torch(substate(state, "o"), dtype=dtype, device=device),
+                q_proj=LinearParameters.from_torch(substate(state, "q"), dtype=dtype, device=device),
+                k_proj=LinearParameters.from_torch(substate(state, "k"), dtype=dtype, device=device),
+                v_proj=LinearParameters.from_torch(substate(state, "v"), dtype=dtype, device=device),
+                o_proj=LinearParameters.from_torch(substate(state, "o"), dtype=dtype, device=device),
                 gather=device.get_num_devices() > 1,
             )
 
 
-class TtT5Attention:
-    def __init__(self, parameters: TtT5AttentionParameters, *, num_heads: int) -> None:
+class T5Attention:
+    def __init__(self, parameters: T5AttentionParameters, *, num_heads: int) -> None:
         self._num_heads = num_heads
 
-        self._q_proj = TtLinear(parameters.q_proj)
-        self._k_proj = TtLinear(parameters.k_proj)
-        self._v_proj = TtLinear(parameters.v_proj)
-        self._o_proj = TtLinear(parameters.o_proj)
+        self._q_proj = Linear(parameters.q_proj)
+        self._k_proj = Linear(parameters.k_proj)
+        self._v_proj = Linear(parameters.v_proj)
+        self._o_proj = Linear(parameters.o_proj)
 
         self._gather = parameters.gather
 
@@ -243,9 +241,9 @@ class TtT5Attention:
 
 
 @dataclass
-class TtT5LayerFFParameters:
-    dense_gated_dense: TtT5DenseGatedActDenseParameters
-    norm: TtT5LayerNormParameters
+class T5LayerFFParameters:
+    dense_gated_dense: T5DenseGatedActDenseParameters
+    norm: T5LayerNormParameters
 
     @classmethod
     def from_torch(
@@ -254,19 +252,19 @@ class TtT5LayerFFParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
-    ) -> TtT5LayerFFParameters:
+    ) -> T5LayerFFParameters:
         return cls(
-            dense_gated_dense=TtT5DenseGatedActDenseParameters.from_torch(
+            dense_gated_dense=T5DenseGatedActDenseParameters.from_torch(
                 substate(state, "DenseReluDense"), dtype=dtype, device=device
             ),
-            norm=TtT5LayerNormParameters.from_torch(substate(state, "layer_norm"), dtype=dtype, device=device),
+            norm=T5LayerNormParameters.from_torch(substate(state, "layer_norm"), dtype=dtype, device=device),
         )
 
 
-class TtT5LayerFF:
-    def __init__(self, parameters: TtT5LayerFFParameters, *, layer_norm_epsilon: float) -> None:
-        self._dense_gated_dense = TtT5DenseGatedActDense(parameters.dense_gated_dense)
-        self._norm = TtT5LayerNorm(parameters.norm, eps=layer_norm_epsilon)
+class T5LayerFF:
+    def __init__(self, parameters: T5LayerFFParameters, *, layer_norm_epsilon: float) -> None:
+        self._dense_gated_dense = T5DenseGatedActDense(parameters.dense_gated_dense)
+        self._norm = T5LayerNorm(parameters.norm, eps=layer_norm_epsilon)
 
     def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
         fw = self._norm.forward(x)
@@ -275,10 +273,10 @@ class TtT5LayerFF:
 
 
 @dataclass
-class TtT5DenseGatedActDenseParameters:
-    wi0: TtLinearParameters
-    wi1: TtLinearParameters
-    wo: TtLinearParameters
+class T5DenseGatedActDenseParameters:
+    wi0: LinearParameters
+    wi1: LinearParameters
+    wo: LinearParameters
     gather: bool
 
     @classmethod
@@ -288,21 +286,21 @@ class TtT5DenseGatedActDenseParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
-    ) -> TtT5DenseGatedActDenseParameters:
+    ) -> T5DenseGatedActDenseParameters:
         with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
             return cls(
-                wi0=TtLinearParameters.from_torch(substate(state, "wi_0"), dtype=dtype, device=device),
-                wi1=TtLinearParameters.from_torch(substate(state, "wi_1"), dtype=dtype, device=device),
-                wo=TtLinearParameters.from_torch(substate(state, "wo"), dtype=dtype, device=device),
+                wi0=LinearParameters.from_torch(substate(state, "wi_0"), dtype=dtype, device=device),
+                wi1=LinearParameters.from_torch(substate(state, "wi_1"), dtype=dtype, device=device),
+                wo=LinearParameters.from_torch(substate(state, "wo"), dtype=dtype, device=device),
                 gather=device.get_num_devices() > 1,
             )
 
 
-class TtT5DenseGatedActDense:
-    def __init__(self, parameters: TtT5DenseGatedActDenseParameters) -> None:
-        self._wi0 = TtLinear(parameters.wi0)
-        self._wi1 = TtLinear(parameters.wi1)
-        self._wo = TtLinear(parameters.wo)
+class T5DenseGatedActDense:
+    def __init__(self, parameters: T5DenseGatedActDenseParameters) -> None:
+        self._wi0 = Linear(parameters.wi0)
+        self._wi1 = Linear(parameters.wi1)
+        self._wo = Linear(parameters.wo)
 
         self._gather = parameters.gather
 
@@ -321,7 +319,7 @@ class TtT5DenseGatedActDense:
 
 
 @dataclass
-class TtT5LayerNormParameters:
+class T5LayerNormParameters:
     weight: ttnn.Tensor
 
     @classmethod
@@ -331,14 +329,14 @@ class TtT5LayerNormParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
-    ) -> TtT5LayerNormParameters:
+    ) -> T5LayerNormParameters:
         return cls(
             weight=from_torch_fast(state["weight"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device),
         )
 
 
-class TtT5LayerNorm:
-    def __init__(self, parameters: TtT5LayerNormParameters, *, eps: float) -> None:
+class T5LayerNorm:
+    def __init__(self, parameters: T5LayerNormParameters, *, eps: float) -> None:
         self._weight = parameters.weight
         self._eps = eps
 

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import ttnn
 
-from .linear import TtLinear, TtLinearParameters
+from .linear import Linear, LinearParameters
 from .substate import substate
 
 if TYPE_CHECKING:
@@ -17,9 +17,9 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class TtFeedForwardParameters:
-    in_proj: TtLinearParameters
-    out_proj: TtLinearParameters
+class FeedForwardParameters:
+    in_proj: LinearParameters
+    out_proj: LinearParameters
 
     @classmethod
     def from_torch(
@@ -29,23 +29,23 @@ class TtFeedForwardParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice | None = None,
         linear_on_host: bool = False,
-    ) -> TtFeedForwardParameters:
+    ) -> FeedForwardParameters:
         return cls(
-            in_proj=TtLinearParameters.from_torch(
+            in_proj=LinearParameters.from_torch(
                 substate(state, "net.0.proj"), dtype=dtype, device=device, on_host=linear_on_host
             ),
-            out_proj=TtLinearParameters.from_torch(
+            out_proj=LinearParameters.from_torch(
                 substate(state, "net.2"), dtype=dtype, device=device, on_host=linear_on_host
             ),
         )
 
 
-class TtFeedForward:
-    def __init__(self, parameters: TtFeedForwardParameters) -> None:
+class FeedForward:
+    def __init__(self, parameters: FeedForwardParameters) -> None:
         super().__init__()
 
-        self.in_proj = TtLinear(parameters.in_proj)
-        self.out_proj = TtLinear(parameters.out_proj)
+        self.in_proj = Linear(parameters.in_proj)
+        self.out_proj = Linear(parameters.out_proj)
 
     def forward(self, x: ttnn.Tensor, *, gather: bool = False) -> ttnn.Tensor:
         x = self.in_proj.forward(x)

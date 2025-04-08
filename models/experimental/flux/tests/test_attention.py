@@ -10,12 +10,12 @@ import pytest
 import torch
 import ttnn
 
-from ..tt.attention import TtAttention, TtAttentionParameters
+from ..tt.attention import Attention, AttentionParameters
 from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
 if TYPE_CHECKING:
-    from ..reference import FluxTransformer2DModel
-    from ..reference.attention import Attention
+    from ..reference import FluxTransformer2DModel as FluxTransformer2DModelReference
+    from ..reference.attention import Attention as AttentionReference
 
 
 @pytest.mark.parametrize(
@@ -37,19 +37,17 @@ def test_attention(
     batch_size: int,
     spatial_sequence_length: int,
     prompt_sequence_length: int,
-    parent_torch_model: FluxTransformer2DModel,
+    parent_torch_model: FluxTransformer2DModelReference,
 ) -> None:
     separate_prompt = prompt_sequence_length != 0
 
     torch.manual_seed(0)
 
-    torch_model: Attention = parent_torch_model.transformer_blocks[block_index].attn.to(torch.float32)
+    torch_model: AttentionReference = parent_torch_model.transformer_blocks[block_index].attn.to(torch.float32)
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = TtAttentionParameters.from_torch(
-            torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
-        )
-    tt_model = TtAttention(parameters, num_heads=torch_model.num_heads)
+        parameters = AttentionParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b)
+    tt_model = Attention(parameters, num_heads=torch_model.num_heads)
 
     spatial = torch.randn((batch_size, spatial_sequence_length, 3072))
     prompt = torch.randn((batch_size, prompt_sequence_length, 3072)) if separate_prompt else None

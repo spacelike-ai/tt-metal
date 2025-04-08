@@ -10,12 +10,12 @@ import pytest
 import torch
 import ttnn
 
-from ..tt.single_transformer_block import TtFluxSingleTransformerBlock, TtFluxSingleTransformerBlockParameters
+from ..tt.single_transformer_block import FluxSingleTransformerBlock, FluxSingleTransformerBlockParameters
 from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
 if TYPE_CHECKING:
-    from ..reference import FluxTransformer2DModel
-    from ..reference.transformer_block import SingleTransformerBlock
+    from ..reference import FluxTransformer2DModel as FluxTransformer2DModelReference
+    from ..reference.transformer_block import SingleTransformerBlock as SingleTransformerBlockReference
 
 
 @pytest.mark.parametrize(
@@ -35,17 +35,19 @@ def test_single_transformer_block(
     block_index: int,
     batch_size: int,
     sequence_length: int,
-    parent_torch_model: FluxTransformer2DModel,
+    parent_torch_model: FluxTransformer2DModelReference,
 ) -> None:
     torch.manual_seed(0)
 
-    torch_model: SingleTransformerBlock = parent_torch_model.single_transformer_blocks[block_index].to(torch.float32)
+    torch_model: SingleTransformerBlockReference = parent_torch_model.single_transformer_blocks[block_index].to(
+        torch.float32
+    )
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = TtFluxSingleTransformerBlockParameters.from_torch(
+        parameters = FluxSingleTransformerBlockParameters.from_torch(
             torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
         )
-    tt_model = TtFluxSingleTransformerBlock(parameters, num_heads=torch_model.num_heads)
+    tt_model = FluxSingleTransformerBlock(parameters, num_heads=torch_model.num_heads)
 
     embedding_dim = 3072
 

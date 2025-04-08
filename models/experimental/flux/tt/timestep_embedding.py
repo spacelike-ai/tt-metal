@@ -10,14 +10,14 @@ from dataclasses import dataclass
 import torch
 import ttnn
 
-from .linear import TtLinear, TtLinearParameters
+from .linear import Linear, LinearParameters
 from .substate import substate
 
 
 @dataclass
-class TtEmbeddingParameters:
-    linear_1: TtLinearParameters
-    linear_2: TtLinearParameters
+class EmbeddingParameters:
+    linear_1: LinearParameters
+    linear_2: LinearParameters
 
     @classmethod
     def from_torch(
@@ -26,17 +26,17 @@ class TtEmbeddingParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
-    ) -> TtEmbeddingParameters:
+    ) -> EmbeddingParameters:
         return cls(
-            linear_1=TtLinearParameters.from_torch(substate(state, "linear_1"), dtype=dtype, device=device),
-            linear_2=TtLinearParameters.from_torch(substate(state, "linear_2"), dtype=dtype, device=device),
+            linear_1=LinearParameters.from_torch(substate(state, "linear_1"), dtype=dtype, device=device),
+            linear_2=LinearParameters.from_torch(substate(state, "linear_2"), dtype=dtype, device=device),
         )
 
 
 @dataclass
-class TtCombinedTimestepTextProjEmbeddingsParameters:
-    timestep_embedder: TtEmbeddingParameters
-    text_embedder: TtEmbeddingParameters
+class CombinedTimestepTextProjEmbeddingsParameters:
+    timestep_embedder: EmbeddingParameters
+    text_embedder: EmbeddingParameters
     device: ttnn.Device | ttnn.MeshDevice | None
 
     @classmethod
@@ -46,20 +46,18 @@ class TtCombinedTimestepTextProjEmbeddingsParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice | None,
-    ) -> TtCombinedTimestepTextProjEmbeddingsParameters:
+    ) -> CombinedTimestepTextProjEmbeddingsParameters:
         return cls(
-            timestep_embedder=TtEmbeddingParameters.from_torch(
+            timestep_embedder=EmbeddingParameters.from_torch(
                 substate(state, "timestep_embedder"), dtype=dtype, device=device
             ),
-            text_embedder=TtEmbeddingParameters.from_torch(
-                substate(state, "text_embedder"), dtype=dtype, device=device
-            ),
+            text_embedder=EmbeddingParameters.from_torch(substate(state, "text_embedder"), dtype=dtype, device=device),
             device=device,
         )
 
 
-class TtCombinedTimestepTextProjEmbeddings:
-    def __init__(self, parameters: TtCombinedTimestepTextProjEmbeddingsParameters) -> None:
+class CombinedTimestepTextProjEmbeddings:
+    def __init__(self, parameters: CombinedTimestepTextProjEmbeddingsParameters) -> None:
         super().__init__()
 
         device = parameters.device
@@ -108,11 +106,11 @@ class TtCombinedTimestepTextProjEmbeddings:
 
 
 class _TimestepEmbedding:
-    def __init__(self, parameters: TtEmbeddingParameters) -> None:
+    def __init__(self, parameters: EmbeddingParameters) -> None:
         super().__init__()
 
-        self._linear_1 = TtLinear(parameters.linear_1)
-        self._linear_2 = TtLinear(parameters.linear_2)
+        self._linear_1 = Linear(parameters.linear_1)
+        self._linear_2 = Linear(parameters.linear_2)
 
     def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
         x = self._linear_1.forward(x)

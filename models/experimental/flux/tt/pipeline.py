@@ -18,30 +18,30 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchE
 from loguru import logger
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
 
-from ..reference.transformer import FluxTransformer2DModel
-from .t5_encoder import TtT5Encoder, TtT5EncoderParameters
-from .transformer import TtFluxTransformer2DModel, TtFluxTransformer2DModelParameters
+from ..reference.transformer import FluxTransformer2DModel as FluxTransformer2DModelReference
+from .t5_encoder import T5Encoder, T5EncoderParameters
+from .transformer import FluxTransformer2DModel, FluxTransformer2DModelParameters
 
 
-class TtFluxPipeline:
+class FluxPipeline:
     def __init__(self, *, checkpoint: str, device: ttnn.MeshDevice, use_torch_encoder: bool = True) -> None:
         self._device = device
         self._device_count = device.get_num_devices()
 
         logger.info("loading transformer...")
 
-        torch_transformer = FluxTransformer2DModel.from_pretrained(
+        torch_transformer = FluxTransformer2DModelReference.from_pretrained(
             checkpoint, subfolder="transformer", torch_dtype=torch.bfloat16
         )
-        assert isinstance(torch_transformer, FluxTransformer2DModel)
+        assert isinstance(torch_transformer, FluxTransformer2DModelReference)
 
         logger.info("creating TT-NN transformer...")
 
         with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)):
-            parameters = TtFluxTransformer2DModelParameters.from_torch(
+            parameters = FluxTransformer2DModelParameters.from_torch(
                 torch_transformer.state_dict(), device=device, dtype=ttnn.bfloat8_b
             )
-            self._tt_transformer = TtFluxTransformer2DModel(
+            self._tt_transformer = FluxTransformer2DModel(
                 parameters, num_attention_heads=torch_transformer.config.num_attention_heads
             )
 
@@ -80,10 +80,10 @@ class TtFluxPipeline:
         else:
             logger.info("creating TT-NN text encoder...")
             with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)):
-                parameters = TtT5EncoderParameters.from_torch(
+                parameters = T5EncoderParameters.from_torch(
                     torch_text_encoder_2.state_dict(), device=device, dtype=ttnn.bfloat8_b
                 )
-            self._text_encoder_2 = TtT5Encoder(
+            self._text_encoder_2 = T5Encoder(
                 parameters,
                 num_heads=torch_text_encoder_2.config.num_heads,
                 relative_attention_num_buckets=torch_text_encoder_2.config.relative_attention_num_buckets,
@@ -441,7 +441,7 @@ def _get_t5_prompt_embeds(
     num_images_per_prompt: int,
     max_sequence_length: int,
     tokenizer: T5TokenizerFast,
-    text_encoder: T5EncoderModel | TtT5Encoder,
+    text_encoder: T5EncoderModel | T5Encoder,
 ) -> torch.Tensor:
     prompt_count = len(prompt)
 
@@ -458,7 +458,7 @@ def _get_t5_prompt_embeds(
     if untruncated_ids.shape[-1] >= text_input_ids.shape[-1]:
         logger.warning("T5 input text was truncated")
 
-    if isinstance(text_encoder, TtT5Encoder):
+    if isinstance(text_encoder, T5Encoder):
         with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)):
             tt_text_input_ids = ttnn.from_torch(
                 text_input_ids, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16

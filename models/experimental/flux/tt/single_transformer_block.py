@@ -9,9 +9,9 @@ from typing import TYPE_CHECKING
 
 import ttnn
 
-from .attention import TtAttention, TtAttentionParameters
-from .linear import TtLinear, TtLinearParameters
-from .normalization import TtLayerNorm, TtLayerNormParameters
+from .attention import Attention, AttentionParameters
+from .linear import Linear, LinearParameters
+from .normalization import LayerNorm, LayerNormParameters
 from .substate import substate
 from .transformer_block import chunk_time
 
@@ -20,12 +20,12 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class TtFluxSingleTransformerBlockParameters:
-    attn: TtAttentionParameters
-    norm: TtLayerNormParameters
-    time_embed: TtLinearParameters
-    proj_mlp: TtLinearParameters
-    proj_out: TtLinearParameters
+class FluxSingleTransformerBlockParameters:
+    attn: AttentionParameters
+    norm: LayerNormParameters
+    time_embed: LinearParameters
+    proj_mlp: LinearParameters
+    proj_out: LinearParameters
     gather: bool
 
     @classmethod
@@ -36,19 +36,19 @@ class TtFluxSingleTransformerBlockParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.MeshDevice,
         linear_on_host: bool = False,
-    ) -> TtFluxSingleTransformerBlockParameters:
+    ) -> FluxSingleTransformerBlockParameters:
         with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
-            proj_mlp = TtLinearParameters.from_torch(
+            proj_mlp = LinearParameters.from_torch(
                 substate(state, "proj_mlp"), dtype=dtype, device=device, on_host=linear_on_host
             )
-            proj_out = TtLinearParameters.from_torch(
+            proj_out = LinearParameters.from_torch(
                 substate(state, "proj_out"), dtype=dtype, device=device, on_host=linear_on_host
             )
 
         return cls(
-            attn=TtAttentionParameters.from_torch(substate(state, "attn"), dtype=dtype, device=device),
-            norm=TtLayerNormParameters.from_torch(substate(state, "norm"), dtype=dtype, device=device),
-            time_embed=TtLinearParameters.from_torch(
+            attn=AttentionParameters.from_torch(substate(state, "attn"), dtype=dtype, device=device),
+            norm=LayerNormParameters.from_torch(substate(state, "norm"), dtype=dtype, device=device),
+            time_embed=LinearParameters.from_torch(
                 substate(state, "norm.linear"), dtype=dtype, device=device, unsqueeze_bias=True
             ),
             proj_mlp=proj_mlp,
@@ -57,19 +57,19 @@ class TtFluxSingleTransformerBlockParameters:
         )
 
 
-class TtFluxSingleTransformerBlock:
+class FluxSingleTransformerBlock:
     def __init__(
         self,
-        parameters: TtFluxSingleTransformerBlockParameters,
+        parameters: FluxSingleTransformerBlockParameters,
         *,
         num_heads: int,
     ) -> None:
-        self._attn = TtAttention(parameters.attn, num_heads=num_heads)
-        self._norm = TtLayerNorm(parameters.norm, eps=1e-6)
-        self._time_embed = TtLinear(parameters.time_embed)
+        self._attn = Attention(parameters.attn, num_heads=num_heads)
+        self._norm = LayerNorm(parameters.norm, eps=1e-6)
+        self._time_embed = Linear(parameters.time_embed)
 
-        self._proj_mlp = TtLinear(parameters.proj_mlp)
-        self._proj_out = TtLinear(parameters.proj_out)
+        self._proj_mlp = Linear(parameters.proj_mlp)
+        self._proj_out = Linear(parameters.proj_out)
 
         self._gather = parameters.gather
 

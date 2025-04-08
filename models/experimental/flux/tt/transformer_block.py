@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING
 
 import ttnn
 
-from .attention import TtAttention, TtAttentionParameters
-from .feed_forward import TtFeedForward, TtFeedForwardParameters
-from .linear import TtLinear, TtLinearParameters
-from .normalization import TtLayerNorm, TtLayerNormParameters
+from .attention import Attention, AttentionParameters
+from .feed_forward import FeedForward, FeedForwardParameters
+from .linear import Linear, LinearParameters
+from .normalization import LayerNorm, LayerNormParameters
 from .substate import has_substate, substate
 
 if TYPE_CHECKING:
@@ -20,16 +20,16 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class TtTransformerBlockParameters:
-    dual_attn: TtAttentionParameters
-    spatial_attn: TtAttentionParameters | None
-    prompt_time_embed: TtLinearParameters
-    spatial_time_embed: TtLinearParameters
-    prompt_norm_1: TtLayerNormParameters
-    spatial_norm_1: TtLayerNormParameters
-    spatial_norm_2: TtLayerNormParameters
-    prompt_ff: TtFeedForwardParameters | None
-    spatial_ff: TtFeedForwardParameters
+class TransformerBlockParameters:
+    dual_attn: AttentionParameters
+    spatial_attn: AttentionParameters | None
+    prompt_time_embed: LinearParameters
+    spatial_time_embed: LinearParameters
+    prompt_norm_1: LayerNormParameters
+    spatial_norm_1: LayerNormParameters
+    spatial_norm_2: LayerNormParameters
+    prompt_ff: FeedForwardParameters | None
+    spatial_ff: FeedForwardParameters
     gather: bool
 
     @classmethod
@@ -40,13 +40,13 @@ class TtTransformerBlockParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.MeshDevice,
         linear_on_host: bool = False,
-    ) -> TtTransformerBlockParameters:
+    ) -> TransformerBlockParameters:
         with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
-            spatial_ff = TtFeedForwardParameters.from_torch(
+            spatial_ff = FeedForwardParameters.from_torch(
                 substate(state, "ff"), dtype=dtype, device=device, linear_on_host=linear_on_host
             )
             prompt_ff = (
-                TtFeedForwardParameters.from_torch(
+                FeedForwardParameters.from_torch(
                     substate(state, "ff_context"), dtype=dtype, device=device, linear_on_host=linear_on_host
                 )
                 if has_substate(state, "ff_context")
@@ -54,23 +54,23 @@ class TtTransformerBlockParameters:
             )
 
         return cls(
-            dual_attn=TtAttentionParameters.from_torch(substate(state, "attn"), dtype=dtype, device=device),
-            spatial_attn=TtAttentionParameters.from_torch(substate(state, "attn2"), dtype=dtype, device=device)
+            dual_attn=AttentionParameters.from_torch(substate(state, "attn"), dtype=dtype, device=device),
+            spatial_attn=AttentionParameters.from_torch(substate(state, "attn2"), dtype=dtype, device=device)
             if has_substate(state, "attn2")
             else None,
-            spatial_norm_1=TtLayerNormParameters.from_torch(substate(state, "norm1.norm"), dtype=dtype, device=device),
-            spatial_norm_2=TtLayerNormParameters.from_torch(substate(state, "norm2"), dtype=dtype, device=device),
-            prompt_norm_1=TtLayerNormParameters.from_torch(
+            spatial_norm_1=LayerNormParameters.from_torch(substate(state, "norm1.norm"), dtype=dtype, device=device),
+            spatial_norm_2=LayerNormParameters.from_torch(substate(state, "norm2"), dtype=dtype, device=device),
+            prompt_norm_1=LayerNormParameters.from_torch(
                 substate(state, "norm1_context.norm"), dtype=dtype, device=device
             ),
-            spatial_time_embed=TtLinearParameters.from_torch(
+            spatial_time_embed=LinearParameters.from_torch(
                 substate(state, "norm1.linear"),
                 dtype=dtype,
                 device=device,
                 unsqueeze_bias=True,
                 on_host=linear_on_host,
             ),
-            prompt_time_embed=TtLinearParameters.from_torch(
+            prompt_time_embed=LinearParameters.from_torch(
                 substate(state, "norm1_context.linear"),
                 dtype=dtype,
                 device=device,
@@ -83,30 +83,30 @@ class TtTransformerBlockParameters:
         )
 
 
-class TtTransformerBlock:
+class TransformerBlock:
     def __init__(
         self,
-        parameters: TtTransformerBlockParameters,
+        parameters: TransformerBlockParameters,
         *,
         num_heads: int,
     ) -> None:
         eps = 1e-6
 
-        self._dual_attn = TtAttention(parameters.dual_attn, num_heads=num_heads)
+        self._dual_attn = Attention(parameters.dual_attn, num_heads=num_heads)
         self._spatial_attn = (
-            TtAttention(parameters.spatial_attn, num_heads=num_heads) if parameters.spatial_attn is not None else None
+            Attention(parameters.spatial_attn, num_heads=num_heads) if parameters.spatial_attn is not None else None
         )
 
-        self._spatial_norm_1 = TtLayerNorm(parameters.spatial_norm_1, eps=eps)
-        self._spatial_norm_2 = TtLayerNorm(parameters.spatial_norm_2, eps=eps)
-        self._prompt_norm_1 = TtLayerNorm(parameters.prompt_norm_1, eps=eps)
-        self._prompt_norm_2 = TtLayerNorm(TtLayerNormParameters(), eps=eps)
+        self._spatial_norm_1 = LayerNorm(parameters.spatial_norm_1, eps=eps)
+        self._spatial_norm_2 = LayerNorm(parameters.spatial_norm_2, eps=eps)
+        self._prompt_norm_1 = LayerNorm(parameters.prompt_norm_1, eps=eps)
+        self._prompt_norm_2 = LayerNorm(LayerNormParameters(), eps=eps)
 
-        self._spatial_ff = TtFeedForward(parameters.spatial_ff)
-        self._prompt_ff = TtFeedForward(parameters.prompt_ff) if parameters.prompt_ff is not None else None
+        self._spatial_ff = FeedForward(parameters.spatial_ff)
+        self._prompt_ff = FeedForward(parameters.prompt_ff) if parameters.prompt_ff is not None else None
 
-        self._spatial_time_embed = TtLinear(parameters.spatial_time_embed)
-        self._prompt_time_embed = TtLinear(parameters.prompt_time_embed)
+        self._spatial_time_embed = Linear(parameters.spatial_time_embed)
+        self._prompt_time_embed = Linear(parameters.prompt_time_embed)
 
         self._context_pre_only = self._prompt_ff is None
 

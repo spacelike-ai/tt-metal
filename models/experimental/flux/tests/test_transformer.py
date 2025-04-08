@@ -9,8 +9,8 @@ import torch
 import ttnn
 from loguru import logger
 
-from ..reference.transformer import FluxTransformer2DModel
-from ..tt.transformer import TtFluxTransformer2DModel, TtFluxTransformer2DModelParameters
+from ..reference.transformer import FluxTransformer2DModel as FluxTransformer2DModelReference
+from ..tt.transformer import FluxTransformer2DModel, FluxTransformer2DModelParameters
 from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
 
@@ -46,7 +46,9 @@ def test_transformer(  # noqa: PLR0915
     torch.manual_seed(0)
 
     logger.info("loading model...")
-    torch_model = FluxTransformer2DModel.from_pretrained("black-forest-labs/FLUX.1-schnell", subfolder="transformer")
+    torch_model = FluxTransformer2DModelReference.from_pretrained(
+        "black-forest-labs/FLUX.1-schnell", subfolder="transformer"
+    )
     torch_model.eval()
 
     spatial = torch.randn([batch_size, spatial_sequence_length, 64])
@@ -69,17 +71,17 @@ def test_transformer(  # noqa: PLR0915
     del torch_model
 
     logger.info("loading model...")
-    torch_model_bfloat16 = FluxTransformer2DModel.from_pretrained(
+    torch_model_bfloat16 = FluxTransformer2DModelReference.from_pretrained(
         "black-forest-labs/FLUX.1-schnell", subfolder="transformer", torch_dtype=torch.bfloat16
     )
     torch_model_bfloat16.eval()
 
     logger.info("creating TT-NN model...")
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = TtFluxTransformer2DModelParameters.from_torch(
+        parameters = FluxTransformer2DModelParameters.from_torch(
             torch_model_bfloat16.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
         )
-        tt_model = TtFluxTransformer2DModel(
+        tt_model = FluxTransformer2DModel(
             parameters, num_attention_heads=torch_model_bfloat16.config.num_attention_heads
         )
 

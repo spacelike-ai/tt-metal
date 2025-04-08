@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class TtRmsNormParameters:
+class RmsNormParameters:
     weight: ttnn.Tensor
 
     @classmethod
@@ -26,14 +26,14 @@ class TtRmsNormParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice | None = None,
-    ) -> TtRmsNormParameters:
+    ) -> RmsNormParameters:
         return cls(
             weight=from_torch_fast(state["weight"].unsqueeze(0), layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
         )
 
 
-class TtRmsNorm:
-    def __init__(self, parameters: TtRmsNormParameters, *, eps: float) -> None:
+class RmsNorm:
+    def __init__(self, parameters: RmsNormParameters, *, eps: float) -> None:
         super().__init__()
 
         self._eps = eps
@@ -44,7 +44,7 @@ class TtRmsNorm:
 
 
 @dataclass
-class TtLayerNormParameters:
+class LayerNormParameters:
     weight: ttnn.Tensor | None = None
     bias: ttnn.Tensor | None = None
 
@@ -55,7 +55,7 @@ class TtLayerNormParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice | None = None,
-    ) -> TtLayerNormParameters:
+    ) -> LayerNormParameters:
         return cls(
             weight=from_torch_fast(state["weight"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device)
             if "weight" in state
@@ -66,8 +66,8 @@ class TtLayerNormParameters:
         )
 
 
-class TtLayerNorm:
-    def __init__(self, parameters: TtLayerNormParameters, *, eps: float) -> None:
+class LayerNorm:
+    def __init__(self, parameters: LayerNormParameters, *, eps: float) -> None:
         super().__init__()
 
         self._eps = eps

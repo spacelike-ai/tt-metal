@@ -8,7 +8,7 @@ import pytest
 import torch
 import ttnn
 
-from ..tt.conv2d import TtConv2d, TtConv2dParameters
+from ..tt.conv2d import Conv2d, Conv2dParameters
 from ..tt.utils import assert_quality
 
 
@@ -55,8 +55,8 @@ def test_conv2d(
     torch_model.eval()
 
     with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = TtConv2dParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat16)
-    tt_model = TtConv2d(parameters, stride=stride)
+        parameters = Conv2dParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat16)
+    tt_model = Conv2d(parameters, stride=stride)
 
     torch_input_tensor = torch.randn((batch_size, in_channels, height, width))
 
