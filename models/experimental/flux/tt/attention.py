@@ -12,6 +12,7 @@ import ttnn
 
 from .linear import Linear, LinearParameters
 from .normalization import RmsNorm, RmsNormParameters
+from .optimizations import AttentionOptimization, AttentionPartOptimization
 from .substate import has_substate, substate
 
 
@@ -89,10 +90,11 @@ class AttentionParameters:
 
 
 class AttentionPart:
-    def __init__(self, parameters: AttentionPartParameters) -> None:
+    def __init__(self, parameters: AttentionPartParameters, optimization: AttentionPartOptimization) -> None:
         super().__init__()
 
         eps = 1e-6
+        self._opt = optimization
 
         self._qkv_proj = Linear(parameters.qkv_proj)
         self._out_proj = Linear(parameters.out_proj) if parameters.out_proj is not None else None
@@ -102,58 +104,21 @@ class AttentionPart:
         self._gather = parameters.gather
 
     def qkv(self, x: ttnn.Tensor, *, num_heads: int) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
-        _batch_size, sequence_length, _embedding_dim = x.shape
+        x = self._opt.prepare_qkv_projection(x)
 
-        # # Input sharding
-        # if sequence_length > 1024:
-        #     # sharding leads to worse PCC, so disable it until further investigation
-        #     mm_a_x = 8
-        #     mm_a_y = 8
-        #     mm_a_x_memory_config = ttnn.L1_MEMORY_CONFIG
-        # elif sequence_length >= 512:
-        #     mm_a_y = 8
-        #     mm_a_x = 8
-        #     mm_a_x_strategy = ttnn.ShardStrategy.BLOCK
-        #     mm_a_x_memory_config = ttnn.L1_BLOCK_SHARDED_MEMORY_CONFIG
-        #     x = ttnn.to_memory_config(
-        #         x,
-        #         memory_config=ttnn.create_sharded_memory_config(
-        #             x.shape,
-        #             core_grid=ttnn.CoreGrid(y=mm_a_y, x=mm_a_x),
-        #             strategy=mm_a_x_strategy,
-        #             orientation=ttnn.ShardOrientation.ROW_MAJOR,
-        #         ),
-        #     )
-        # else:
-        #     mm_a_x = 8
-        #     mm_a_y = 6
-        #     mm_a_x_memory_config = ttnn.L1_MEMORY_CONFIG
-
-        qkv = self._qkv_proj.forward(
-            x,
-            # memory_config=mm_a_x_memory_config,
-            # core_grid=ttnn.CoreGrid(y=mm_a_y, x=mm_a_x),
-            # dtype=ttnn.bfloat8_b,
-        )
-        del x
-
+        x = self._qkv_proj.forward(x, **self._opt.qkv_projection_settings(x.device()))
         if self._gather:
-            qkv = ttnn.all_gather(qkv, dim=-1)
+            x = ttnn.all_gather(x, dim=-1)
 
-        # qkv = ttnn.reallocate(qkv)
-        # qkv = ttnn.to_memory_config(qkv, ttnn.L1_MEMORY_CONFIG)
+        x = self._opt.prepare_split(x)
 
-        q, k, v = ttnn.transformer.split_query_key_value_and_split_heads(qkv, num_heads=num_heads, transpose_key=False)
-        del qkv
+        q, k, v = ttnn.transformer.split_query_key_value_and_split_heads(x, num_heads=num_heads, transpose_key=False)
+        del x
 
         q = self._norm_q.forward(q)
         k = self._norm_k.forward(k)
 
-        # q = ttnn.to_memory_config(q, ttnn.DRAM_MEMORY_CONFIG)
-        # k = ttnn.to_memory_config(k, ttnn.DRAM_MEMORY_CONFIG)
-        # v = ttnn.to_memory_config(v, ttnn.DRAM_MEMORY_CONFIG)
-
-        return q, k, v
+        return self._opt.postprocess_split(q, k, v)
 
     def out_proj(self, x: ttnn.Tensor) -> ttnn.Tensor:
         if self._out_proj is None:
@@ -163,13 +128,7 @@ class AttentionPart:
         if self._gather:
             x = ttnn.all_gather(x, dim=-1)
 
-        return x
-
-        # return ttnn.to_memory_config(
-        #     result,
-        #     memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        #     dtype=ttnn.bfloat16,
-        # )
+        return self._opt.postprocess_out_projection(x)
 
 
 class Attention:
@@ -177,9 +136,14 @@ class Attention:
         super().__init__()
 
         self._num_heads = num_heads
+        self._opt = AttentionOptimization()
 
-        self._spatial_attn = AttentionPart(parameters.spatial)
-        self._prompt_attn = AttentionPart(parameters.prompt) if parameters.prompt is not None else None
+        self._spatial_attn = AttentionPart(parameters.spatial, optimization=self._opt.spatial_part())
+        self._prompt_attn = (
+            AttentionPart(parameters.prompt, optimization=self._opt.prompt_part())
+            if parameters.prompt is not None
+            else None
+        )
 
     def forward(
         self,
@@ -196,19 +160,6 @@ class Attention:
 
         q, k, v = self._spatial_attn.qkv(spatial, num_heads=self._num_heads)
 
-        program_config = ttnn.SDPAProgramConfig(
-            compute_with_storage_grid_size=device.compute_with_storage_grid_size(),
-            q_chunk_size=256,
-            k_chunk_size=512,
-            exp_approx_mode=True,
-        )
-
-        compute_kernel_config = ttnn.WormholeComputeKernelConfig(
-            math_fidelity=ttnn.MathFidelity.HiFi2,
-            math_approx_mode=False,
-            fp32_dest_acc_en=True,
-        )
-
         if prompt is None:
             if image_rotary_emb is not None:
                 q = _apply_rotary_emb(q, image_rotary_emb)
@@ -216,12 +167,7 @@ class Attention:
 
             # operands must be in DRAM
             attn = ttnn.transformer.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                is_causal=False,
-                program_config=program_config,
-                compute_kernel_config=compute_kernel_config,
+                q, k, v, is_causal=False, **self._opt.sdpa_settings(device=device)
             )
             del q, k, v
 
@@ -244,12 +190,7 @@ class Attention:
             k = _apply_rotary_emb(k, image_rotary_emb)
 
         attn = ttnn.transformer.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            is_causal=False,
-            program_config=program_config,
-            compute_kernel_config=compute_kernel_config,
+            q, k, v, is_causal=False, **self._opt.sdpa_settings(device=device)
         )
         del q, k, v
 
@@ -270,15 +211,7 @@ class Attention:
         #     k2 = _apply_rotary_emb(k2, emb)
         #
         # prompt, spatial = ttnn.transformer.joint_scaled_dot_product_attention(
-        #     q2,
-        #     k2,
-        #     v2,
-        #     q,
-        #     k,
-        #     v,
-        #     joint_strategy="rear",
-        #     program_config=program_config,
-        #     compute_kernel_config=compute_kernel_config,
+        #     q2, k2, v2, q, k, v, joint_strategy="rear", **self._opt.sdpa_settings(device=device)
         # )
         #
         # spatial = ttnn.transformer.concatenate_heads(spatial)
