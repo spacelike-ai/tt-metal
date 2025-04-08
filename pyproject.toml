@@ -56,7 +56,7 @@ dev = [
     "fsspec==2023.9.2",
     "ftfy==6.1.1",
     "gitpython==3.1.41",
-    "huggingface-hub==0.25.2",
+    "huggingface-hub[cli]==0.25.2",
     "ipython==8.12.3",
     "jiwer==3.0.5",
     "jsbeautifier==1.14.7",
