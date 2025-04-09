@@ -25,7 +25,7 @@ class EmbeddingParameters:
         state: dict[str, ttnn.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device,
+        device: ttnn.MeshDevice,
     ) -> EmbeddingParameters:
         return cls(
             linear_1=LinearParameters.from_torch(substate(state, "linear_1"), dtype=dtype, device=device),
@@ -37,7 +37,7 @@ class EmbeddingParameters:
 class CombinedTimestepTextProjEmbeddingsParameters:
     timestep_embedder: EmbeddingParameters
     text_embedder: EmbeddingParameters
-    device: ttnn.Device | ttnn.MeshDevice | None
+    device: ttnn.MeshDevice
 
     @classmethod
     def from_torch(
@@ -45,7 +45,7 @@ class CombinedTimestepTextProjEmbeddingsParameters:
         state: dict[str, ttnn.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device | ttnn.MeshDevice | None,
+        device: ttnn.MeshDevice,
     ) -> CombinedTimestepTextProjEmbeddingsParameters:
         return cls(
             timestep_embedder=EmbeddingParameters.from_torch(
@@ -92,7 +92,7 @@ class CombinedTimestepTextProjEmbeddings:
         return time_embed + text_embed
 
     @staticmethod
-    def _create_time_proj_factor(*, num_channels: int, device: ttnn.Device) -> ttnn.Tensor:
+    def _create_time_proj_factor(*, num_channels: int, device: ttnn.MeshDevice) -> ttnn.Tensor:
         assert num_channels % 2 == 0
         half_dim = num_channels // 2
 
@@ -102,7 +102,7 @@ class CombinedTimestepTextProjEmbeddings:
         exponent = exponent / half_dim
         factor = torch.exp(exponent).unsqueeze(0)
 
-        return ttnn.from_torch(factor, device=device)
+        return ttnn.from_torch(factor, device=device, mesh_mapper=ttnn.ReplicateTensorToMesh(device))
 
 
 class _TimestepEmbedding:

@@ -37,22 +37,26 @@ class FluxSingleTransformerBlockParameters:
         device: ttnn.MeshDevice,
         linear_on_host: bool = False,
     ) -> FluxSingleTransformerBlockParameters:
-        with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
-            proj_mlp = LinearParameters.from_torch(
-                substate(state, "proj_mlp"), dtype=dtype, device=device, on_host=linear_on_host
-            )
-            proj_out = LinearParameters.from_torch(
-                substate(state, "proj_out"), dtype=dtype, device=device, on_host=linear_on_host
-            )
-
         return cls(
             attn=AttentionParameters.from_torch(substate(state, "attn"), dtype=dtype, device=device),
             norm=LayerNormParameters.from_torch(substate(state, "norm"), dtype=dtype, device=device),
             time_embed=LinearParameters.from_torch(
                 substate(state, "norm.linear"), dtype=dtype, device=device, unsqueeze_bias=True
             ),
-            proj_mlp=proj_mlp,
-            proj_out=proj_out,
+            proj_mlp=LinearParameters.from_torch(
+                substate(state, "proj_mlp"),
+                dtype=dtype,
+                device=device,
+                on_host=linear_on_host,
+                mesh_mapper=ttnn.ShardTensorToMesh(device, -1),
+            ),
+            proj_out=LinearParameters.from_torch(
+                substate(state, "proj_out"),
+                dtype=dtype,
+                device=device,
+                on_host=linear_on_host,
+                mesh_mapper=ttnn.ShardTensorToMesh(device, -1),
+            ),
             gather=device.get_num_devices() > 1,
         )
 

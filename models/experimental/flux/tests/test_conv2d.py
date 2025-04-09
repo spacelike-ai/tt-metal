@@ -54,27 +54,31 @@ def test_conv2d(
     )
     torch_model.eval()
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = Conv2dParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat16)
+    parameters = Conv2dParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat16)
     tt_model = Conv2d(parameters, stride=stride)
 
     torch_input_tensor = torch.randn((batch_size, in_channels, height, width))
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        tt_input_tensor = ttnn.from_torch(
-            torch_input_tensor.permute([0, 2, 3, 1]),  # BCYX -> BYXC
-            device=mesh_device,
-            layout=ttnn.TILE_LAYOUT,
-            dtype=ttnn.bfloat8_b,
-        )
+    tt_input_tensor = ttnn.from_torch(
+        torch_input_tensor.permute([0, 2, 3, 1]),  # BCYX -> BYXC
+        device=mesh_device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn.bfloat8_b,
+    )
 
     with torch.no_grad():
         torch_output = torch_model(torch_input_tensor)
 
     tt_output, tt_output_shape = tt_model.forward_without_reshape(tt_input_tensor)
 
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
-        shape = [-1, *tt_output_shape[1:]]
-        tt_output_torch = ttnn.to_torch(tt_output).reshape(shape)[:batch_size].permute([0, 3, 1, 2])
+    shape = [-1, *tt_output_shape[1:]]
+    tt_output_torch = (
+        ttnn.to_torch(
+            tt_output,
+            mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=0),
+        )
+        .reshape(shape)[:batch_size]
+        .permute([0, 3, 1, 2])
+    )
 
     assert_quality(torch_output, tt_output_torch, pcc=0.999818)

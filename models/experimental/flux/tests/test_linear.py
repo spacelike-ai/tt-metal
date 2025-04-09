@@ -32,21 +32,31 @@ def test_linear(
     torch_model = torch.nn.Linear(input_dim, output_dim)
     torch_model.eval()
 
-    with ttnn.distribute(ttnn.ShardTensorToMesh(mesh_device, dim=-1)):
-        parameters = LinearParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b)
+    parameters = LinearParameters.from_torch(
+        torch_model.state_dict(),
+        device=mesh_device,
+        dtype=ttnn.bfloat8_b,
+        mesh_mapper=ttnn.ShardTensorToMesh(mesh_device, dim=-1),
+    )
     tt_model = Linear(parameters)
 
     torch_input_tensor = torch.randn((batch_size, input_dim))
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        tt_input_tensor = ttnn.from_torch(
-            torch_input_tensor, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b
-        )
+    tt_input_tensor = ttnn.from_torch(
+        torch_input_tensor,
+        device=mesh_device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn.bfloat8_b,
+    )
 
     with torch.no_grad():
         torch_output = torch_model(torch_input_tensor)
 
     tt_output = tt_model.forward(tt_input_tensor)
 
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=-1)):
-        assert_quality(torch_output, tt_output, pcc=0.99976)
+    assert_quality(
+        torch_output,
+        tt_output,
+        pcc=0.99976,
+        mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=-1),
+    )

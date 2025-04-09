@@ -30,23 +30,23 @@ def test_layer_norm(
 
     torch_model = torch.nn.LayerNorm(input_shape[-1:], eps=1.0)
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = LayerNormParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b)
+    parameters = LayerNormParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b)
     tt_model = LayerNorm(parameters, eps=torch_model.eps)
 
     torch_input_tensor = torch.randn(input_shape)
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        tt_input_tensor = ttnn.from_torch(
-            torch_input_tensor, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b
-        )
+    tt_input_tensor = ttnn.from_torch(
+        torch_input_tensor, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b
+    )
 
     with torch.no_grad():
         torch_output = torch_model(torch_input_tensor)
 
     tt_output = tt_model.forward(tt_input_tensor)
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
-        tt_output_torch = ttnn.to_torch(tt_output)[: input_shape[0]]
+    tt_output_torch = ttnn.to_torch(
+        tt_output,
+        mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=0),
+    )[: input_shape[0]]
 
     assert_quality(torch_output, tt_output_torch, pcc=0.99990)
 
@@ -69,22 +69,22 @@ def test_rms_norm(
     torch_model = RmsNormReference(dim=input_shape[-1], eps=1.0)
     torch.nn.init.normal_(torch_model.weight)
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = RmsNormParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b)
+    parameters = RmsNormParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b)
 
     tt_model = RmsNorm(parameters, eps=torch_model.eps)
 
     torch_input_tensor = torch.randn(input_shape)
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        tt_input_tensor = ttnn.from_torch(
-            torch_input_tensor, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b
-        )
+    tt_input_tensor = ttnn.from_torch(
+        torch_input_tensor, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b
+    )
 
     torch_output = torch_model(torch_input_tensor)
 
     tt_output = tt_model.forward(tt_input_tensor)
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
-        tt_output_torch = ttnn.to_torch(tt_output)[: input_shape[0]]
+    tt_output_torch = ttnn.to_torch(
+        tt_output,
+        mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=0),
+    )[: input_shape[0]]
 
     assert_quality(torch_output, tt_output_torch, pcc=0.99985)

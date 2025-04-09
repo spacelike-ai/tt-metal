@@ -31,6 +31,7 @@ class LinearParameters:
         device: ttnn.Device | ttnn.MeshDevice | None,
         on_host: bool = False,
         unsqueeze_bias: bool = False,
+        mesh_mapper: ttnn.TensorToMesh | None = None,
     ) -> LinearParameters:
         if "bias" in state:
             bias = state["bias"].unsqueeze(0)
@@ -49,8 +50,16 @@ class LinearParameters:
                 dtype=dtype,
                 device=device,
                 to_host=on_host,
+                mesh_mapper=mesh_mapper,
             ),
-            bias=from_torch_fast(bias, layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device, to_host=on_host)
+            bias=from_torch_fast(
+                bias,
+                layout=ttnn.TILE_LAYOUT,
+                dtype=dtype,
+                device=device,
+                to_host=on_host,
+                mesh_mapper=mesh_mapper,
+            )
             if bias is not None
             else None,
             on_host=on_host,

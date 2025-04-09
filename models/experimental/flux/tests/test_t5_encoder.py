@@ -44,8 +44,7 @@ def test_t5_encoder(*, mesh_device: ttnn.MeshDevice) -> None:
     torch_model.eval()
 
     start_time = time.time()
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = T5EncoderParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b)
+    parameters = T5EncoderParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b)
     tt_model = T5Encoder(
         parameters,
         num_heads=hf_model.config.num_heads,
@@ -58,8 +57,7 @@ def test_t5_encoder(*, mesh_device: ttnn.MeshDevice) -> None:
     torch.manual_seed(0)
     tokens = torch.randint(hf_model.config.vocab_size, [batch_size, 256])
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        tt_tokens_host = ttnn.from_torch(tokens, layout=ttnn.TILE_LAYOUT)
+    tt_tokens_host = ttnn.from_torch(tokens, layout=ttnn.TILE_LAYOUT)
 
     start_time = time.time()
     with torch.no_grad():
@@ -69,22 +67,22 @@ def test_t5_encoder(*, mesh_device: ttnn.MeshDevice) -> None:
     tt_tokens = tt_tokens_host.to(mesh_device)
 
     logger.info("compiling...")
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        tt_model.forward(tt_tokens)
+    tt_model.forward(tt_tokens)
 
     logger.info("executing...")
     ttnn.synchronize_device(mesh_device)
     start_time = time.time()
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        tt_output = tt_model.forward(tt_tokens)
+    tt_output = tt_model.forward(tt_tokens)
 
     ttnn.synchronize_device(mesh_device)
     logger.info(f"TT-NN runtime: {time.time() - start_time}")
     logger.info("done...")
 
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
-        tt_output_torch = ttnn.to_torch(tt_output)[:batch_size]
+    tt_output_torch = ttnn.to_torch(
+        tt_output,
+        mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=0),
+    )[:batch_size]
 
     assert output.shape == tt_output_torch.shape
     assert_quality(output, tt_output_torch, pcc=0.944, mse=0.00307)

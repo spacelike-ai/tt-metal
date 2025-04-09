@@ -42,10 +42,9 @@ def test_transformer_block(
 
     torch_model: TransformerBlockReference = parent_torch_model.transformer_blocks[block_index].to(torch.float32)
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = TransformerBlockParameters.from_torch(
-            torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
-        )
+    parameters = TransformerBlockParameters.from_torch(
+        torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
+    )
     tt_model = TransformerBlock(parameters, num_heads=torch_model.num_heads)
 
     embedding_dim = 3072
@@ -56,12 +55,12 @@ def test_transformer_block(
     imagerot1 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128], dtype=torch.float32)
     imagerot2 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128], dtype=torch.float32)
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-        tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
-        tt_time_host = ttnn.from_torch(time.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-        tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
-        tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
+    rm = ttnn.ReplicateTensorToMesh(mesh_device)
+    tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=rm)
+    tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=rm)
+    tt_time_host = ttnn.from_torch(time.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=rm)
+    tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=rm)
+    tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=rm)
 
     with torch.no_grad():
         spatial_output, prompt_output = torch_model(
@@ -109,9 +108,18 @@ def test_transformer_block(
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
         tt_spatial_output, tt_prompt_output = tt_model.forward(**model_args)
 
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
-        tt_spatial_output_torch = ttnn.to_torch(tt_spatial_output)[:batch_size]
-        tt_prompt_output_torch = ttnn.to_torch(tt_prompt_output)[:batch_size] if tt_prompt_output is not None else None
+    tt_spatial_output_torch = ttnn.to_torch(
+        tt_spatial_output,
+        mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=0),
+    )[:batch_size]
+    tt_prompt_output_torch = (
+        ttnn.to_torch(
+            tt_prompt_output,
+            mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=0),
+        )[:batch_size]
+        if tt_prompt_output is not None
+        else None
+    )
 
     assert (prompt_output is None) == (tt_prompt_output is None)
 

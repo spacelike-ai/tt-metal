@@ -45,13 +45,14 @@ class T5EncoderParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
     ) -> T5EncoderParameters:
-        with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
-            token_embedding = ttnn.from_torch(
-                state["encoder.embed_tokens.weight"], dtype=dtype, device=device, layout=ttnn.TILE_LAYOUT
-            )
-
         return cls(
-            token_embedding=token_embedding,
+            token_embedding=ttnn.from_torch(
+                state["encoder.embed_tokens.weight"],
+                dtype=dtype,
+                device=device,
+                layout=ttnn.TILE_LAYOUT,
+                mesh_mapper=ttnn.ShardTensorToMesh(device, dim=-1),
+            ),
             blocks=[
                 T5BlockParameters.from_torch(s, dtype=dtype, device=device)
                 for s in indexed_substates(state, "encoder.block")
@@ -190,14 +191,15 @@ class T5AttentionParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
     ) -> T5AttentionParameters:
-        with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
-            return cls(
-                q_proj=LinearParameters.from_torch(substate(state, "q"), dtype=dtype, device=device),
-                k_proj=LinearParameters.from_torch(substate(state, "k"), dtype=dtype, device=device),
-                v_proj=LinearParameters.from_torch(substate(state, "v"), dtype=dtype, device=device),
-                o_proj=LinearParameters.from_torch(substate(state, "o"), dtype=dtype, device=device),
-                gather=device.get_num_devices() > 1,
-            )
+        mm = ttnn.ShardTensorToMesh(device, dim=-1)
+
+        return cls(
+            q_proj=LinearParameters.from_torch(substate(state, "q"), dtype=dtype, device=device, mesh_mapper=mm),
+            k_proj=LinearParameters.from_torch(substate(state, "k"), dtype=dtype, device=device, mesh_mapper=mm),
+            v_proj=LinearParameters.from_torch(substate(state, "v"), dtype=dtype, device=device, mesh_mapper=mm),
+            o_proj=LinearParameters.from_torch(substate(state, "o"), dtype=dtype, device=device, mesh_mapper=mm),
+            gather=device.get_num_devices() > 1,
+        )
 
 
 class T5Attention:
@@ -287,13 +289,14 @@ class T5DenseGatedActDenseParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
     ) -> T5DenseGatedActDenseParameters:
-        with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
-            return cls(
-                wi0=LinearParameters.from_torch(substate(state, "wi_0"), dtype=dtype, device=device),
-                wi1=LinearParameters.from_torch(substate(state, "wi_1"), dtype=dtype, device=device),
-                wo=LinearParameters.from_torch(substate(state, "wo"), dtype=dtype, device=device),
-                gather=device.get_num_devices() > 1,
-            )
+        mm = ttnn.ShardTensorToMesh(device, dim=-1)
+
+        return cls(
+            wi0=LinearParameters.from_torch(substate(state, "wi_0"), dtype=dtype, device=device, mesh_mapper=mm),
+            wi1=LinearParameters.from_torch(substate(state, "wi_1"), dtype=dtype, device=device, mesh_mapper=mm),
+            wo=LinearParameters.from_torch(substate(state, "wo"), dtype=dtype, device=device, mesh_mapper=mm),
+            gather=device.get_num_devices() > 1,
+        )
 
 
 class T5DenseGatedActDense:

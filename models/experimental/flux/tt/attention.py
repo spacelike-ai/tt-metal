@@ -40,48 +40,53 @@ class AttentionParameters:
     ) -> AttentionParameters:
         gather = device.get_num_devices() > 1
 
-        with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
-            spatial_qkv_proj = LinearParameters.from_torch(
-                _merge_qkv_proj(substate(state, "to_q"), substate(state, "to_k"), substate(state, "to_v")),
-                dtype=dtype,
-                device=device,
-            )
-            prompt_qkv_proj = (
-                LinearParameters.from_torch(
-                    _merge_qkv_proj(
-                        substate(state, "add_q_proj"), substate(state, "add_k_proj"), substate(state, "add_v_proj")
-                    ),
-                    dtype=dtype,
-                    device=device,
-                )
-                if has_substate(state, "add_q_proj")
-                else None
-            )
-
-            spatial_out_proj = (
-                LinearParameters.from_torch(substate(state, "to_out.0"), dtype=dtype, device=device)
-                if has_substate(state, "to_out.0")
-                else None
-            )
-            prompt_out_proj = (
-                LinearParameters.from_torch(substate(state, "to_add_out"), dtype=dtype, device=device)
-                if prompt_qkv_proj
-                else None
-            )
-
         return cls(
             spatial=AttentionPartParameters(
-                qkv_proj=spatial_qkv_proj,
+                qkv_proj=LinearParameters.from_torch(
+                    _merge_qkv_proj(substate(state, "to_q"), substate(state, "to_k"), substate(state, "to_v")),
+                    dtype=dtype,
+                    device=device,
+                    mesh_mapper=ttnn.ShardTensorToMesh(device, -1),
+                ),
                 norm_q=RmsNormParameters.from_torch(substate(state, "norm_q"), dtype=dtype, device=device),
                 norm_k=RmsNormParameters.from_torch(substate(state, "norm_k"), dtype=dtype, device=device),
-                out_proj=spatial_out_proj,
+                out_proj=(
+                    LinearParameters.from_torch(
+                        substate(state, "to_out.0"),
+                        dtype=dtype,
+                        device=device,
+                        mesh_mapper=ttnn.ShardTensorToMesh(device, -1),
+                    )
+                    if has_substate(state, "to_out.0")
+                    else None
+                ),
                 gather=gather,
             ),
             prompt=AttentionPartParameters(
-                qkv_proj=prompt_qkv_proj,
+                qkv_proj=(
+                    LinearParameters.from_torch(
+                        _merge_qkv_proj(
+                            substate(state, "add_q_proj"), substate(state, "add_k_proj"), substate(state, "add_v_proj")
+                        ),
+                        dtype=dtype,
+                        device=device,
+                        mesh_mapper=ttnn.ShardTensorToMesh(device, -1),
+                    )
+                    if has_substate(state, "add_q_proj")
+                    else None
+                ),
                 norm_q=RmsNormParameters.from_torch(substate(state, "norm_added_q"), dtype=dtype, device=device),
                 norm_k=RmsNormParameters.from_torch(substate(state, "norm_added_k"), dtype=dtype, device=device),
-                out_proj=prompt_out_proj,
+                out_proj=(
+                    LinearParameters.from_torch(
+                        substate(state, "to_add_out"),
+                        dtype=dtype,
+                        device=device,
+                        mesh_mapper=ttnn.ShardTensorToMesh(device, -1),
+                    )
+                    if has_substate(state, "add_q_proj")
+                    else None
+                ),
                 gather=gather,
             )
             if has_substate(state, "add_q_proj")

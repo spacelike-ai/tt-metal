@@ -37,13 +37,14 @@ class FluxPipeline:
 
         logger.info("creating TT-NN transformer...")
 
-        with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)):
-            parameters = FluxTransformer2DModelParameters.from_torch(
-                torch_transformer.state_dict(), device=device, dtype=ttnn.bfloat8_b
-            )
-            self._tt_transformer = FluxTransformer2DModel(
-                parameters, num_attention_heads=torch_transformer.config.num_attention_heads
-            )
+        parameters = FluxTransformer2DModelParameters.from_torch(
+            torch_transformer.state_dict(),
+            device=device,
+            dtype=ttnn.bfloat8_b,
+        )
+        self._tt_transformer = FluxTransformer2DModel(
+            parameters, num_attention_heads=torch_transformer.config.num_attention_heads
+        )
 
         self._num_channels_latents = torch_transformer.in_channels // 4
         self._pos_embed = torch_transformer.pos_embed
@@ -79,10 +80,11 @@ class FluxPipeline:
             self._text_encoder_2 = torch_text_encoder_2
         else:
             logger.info("creating TT-NN text encoder...")
-            with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)):
-                parameters = T5EncoderParameters.from_torch(
-                    torch_text_encoder_2.state_dict(), device=device, dtype=ttnn.bfloat8_b
-                )
+            parameters = T5EncoderParameters.from_torch(
+                torch_text_encoder_2.state_dict(),
+                device=device,
+                dtype=ttnn.bfloat8_b,
+            )
             self._text_encoder_2 = T5Encoder(
                 parameters,
                 num_heads=torch_text_encoder_2.config.num_heads,
@@ -123,13 +125,20 @@ class FluxPipeline:
             self._num_channels_latents * 4,
         )
 
-        with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)):
-            tt_prompt_embeds = ttnn.from_torch(
-                prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b
-            )
-            tt_pooled_prompt_embeds = ttnn.from_torch(
-                pooled_prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
-            )
+        tt_prompt_embeds = ttnn.from_torch(
+            prompt_embeds,
+            device=self._device,
+            layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat8_b,
+            mesh_mapper=ttnn.ReplicateTensorToMesh(self._device),
+        )
+        tt_pooled_prompt_embeds = ttnn.from_torch(
+            pooled_prompt_embeds,
+            device=self._device,
+            layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat16,
+            mesh_mapper=ttnn.ReplicateTensorToMesh(self._device),
+        )
         tt_timestep = ttnn.allocate_tensor_on_device([1, 1], ttnn.float32, ttnn.ROW_MAJOR_LAYOUT, self._device)
         tt_sigma_difference = ttnn.allocate_tensor_on_device([1, 1], ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
         tt_latents = ttnn.allocate_tensor_on_device(latents_shape, ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
@@ -247,14 +256,15 @@ class FluxPipeline:
         ids = torch.cat((text_ids, image_ids), dim=0)
         image_rotary_emb = self._pos_embed(ids)
 
-        with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)):
-            tt_prompt_embeds = ttnn.from_torch(prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
-            tt_pooled_prompt_embeds = ttnn.from_torch(
-                pooled_prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
-            )
-            tt_initial_latents = ttnn.from_torch(latents, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-            tt_imagerot1 = ttnn.from_torch(image_rotary_emb[0], layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
-            tt_imagerot2 = ttnn.from_torch(image_rotary_emb[1], layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
+        mm = ttnn.ReplicateTensorToMesh(self._device)
+
+        tt_prompt_embeds = ttnn.from_torch(prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=mm)
+        tt_pooled_prompt_embeds = ttnn.from_torch(
+            pooled_prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=mm
+        )
+        tt_initial_latents = ttnn.from_torch(latents, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=mm)
+        tt_imagerot1 = ttnn.from_torch(image_rotary_emb[0], layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=mm)
+        tt_imagerot2 = ttnn.from_torch(image_rotary_emb[1], layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=mm)
 
         logger.info("denoising...")
         ttnn.synchronize_device(self._device)
@@ -269,22 +279,18 @@ class FluxPipeline:
         for i, t in enumerate(tqdm.tqdm(timesteps)):
             sigma_difference = self._scheduler.sigmas[i + 1] - self._scheduler.sigmas[i]
 
-            with ttnn.distribute(ttnn.ReplicateTensorToMesh(self._device)):
-                # ttnn.full does not support replication for use with mesh device
-                # tt_timestep = ttnn.full([1, 1], fill_value=t, dtype=ttnn.float32)
-                # tt_sigma_difference = ttnn.full(
-                #     [1, 1], fill_value=sigma_difference, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
-                # )
-
-                tt_timestep = ttnn.from_torch(
-                    torch.full([1, 1], fill_value=t),
-                    dtype=ttnn.float32,
-                )
-                tt_sigma_difference = ttnn.from_torch(
-                    torch.full([1, 1], fill_value=sigma_difference),
-                    layout=ttnn.TILE_LAYOUT,
-                    dtype=ttnn.bfloat16,
-                )
+            # ttnn.full does not support replication for use with mesh device
+            # tt_timestep = ttnn.full([1, 1], fill_value=t, dtype=ttnn.float32)
+            # tt_sigma_difference = ttnn.full(
+            #     [1, 1], fill_value=sigma_difference, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+            # )
+            tt_timestep = ttnn.from_torch(torch.full([1, 1], fill_value=t), dtype=ttnn.float32, mesh_mapper=mm)
+            tt_sigma_difference = ttnn.from_torch(
+                torch.full([1, 1], fill_value=sigma_difference),
+                layout=ttnn.TILE_LAYOUT,
+                dtype=ttnn.bfloat16,
+                mesh_mapper=mm,
+            )
 
             ttnn.copy_host_to_device_tensor(tt_timestep, self._trace.timestep_input)
             ttnn.copy_host_to_device_tensor(tt_sigma_difference, self._trace.sigma_difference_input)
@@ -306,9 +312,10 @@ class FluxPipeline:
 
         image_decoding_start_time = time.time()
 
-        with ttnn.distribute(ttnn.ConcatMeshToTensor(self._device, dim=0)):
-            size = self._trace.spatial_input_output.shape[0]
-            latents = ttnn.to_torch(self._trace.spatial_input_output)[:size].to(torch.float32)
+        size = self._trace.spatial_input_output.shape[0]
+        latents = ttnn.to_torch(
+            self._trace.spatial_input_output, mesh_composer=ttnn.ConcatMeshToTensor(self._device, dim=0)
+        )[:size].to(torch.float32)
         latents = _unpack_latents(latents, height, width, self._vae_scale_factor)
         latents = latents / self._vae_scaling_factor + self._vae_shift_factor
 
@@ -459,13 +466,17 @@ def _get_t5_prompt_embeds(
         logger.warning("T5 input text was truncated")
 
     if isinstance(text_encoder, T5Encoder):
-        with ttnn.distribute(ttnn.ReplicateTensorToMesh(device)):
-            tt_text_input_ids = ttnn.from_torch(
-                text_input_ids, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
-            )
-            tt_prompt_embeds = text_encoder.forward(tt_text_input_ids)
-        with ttnn.distribute(ttnn.ConcatMeshToTensor(device, dim=0)):
-            prompt_embeds = ttnn.to_torch(tt_prompt_embeds)[: text_input_ids.shape[0]]
+        tt_text_input_ids = ttnn.from_torch(
+            text_input_ids,
+            device=device,
+            layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat16,
+            mm=ttnn.ReplicateTensorToMesh(device),
+        )
+        tt_prompt_embeds = text_encoder.forward(tt_text_input_ids)
+        prompt_embeds = ttnn.to_torch(tt_prompt_embeds, mesh_composer=ttnn.ConcatMeshToTensor(device, dim=0))[
+            : text_input_ids.shape[0]
+        ]
     else:
         prompt_embeds = text_encoder.forward(text_input_ids)[0]
 

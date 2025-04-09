@@ -43,10 +43,9 @@ def test_single_transformer_block(
         torch.float32
     )
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = FluxSingleTransformerBlockParameters.from_torch(
-            torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
-        )
+    parameters = FluxSingleTransformerBlockParameters.from_torch(
+        torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
+    )
     tt_model = FluxSingleTransformerBlock(parameters, num_heads=torch_model.num_heads)
 
     embedding_dim = 3072
@@ -56,11 +55,11 @@ def test_single_transformer_block(
     imagerot1 = torch.randn([sequence_length, 128], dtype=torch.float32)
     imagerot2 = torch.randn([sequence_length, 128], dtype=torch.float32)
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        tt_combined_host = ttnn.from_torch(combined, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-        tt_time_host = ttnn.from_torch(time.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-        tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
-        tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
+    rm = ttnn.ReplicateTensorToMesh(mesh_device)
+    tt_combined_host = ttnn.from_torch(combined, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=rm)
+    tt_time_host = ttnn.from_torch(time.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=rm)
+    tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=rm)
+    tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=rm)
 
     with torch.no_grad():
         combined_output = torch_model(combined=combined, time_embed=time, image_rotary_emb=(imagerot1, imagerot2))
@@ -102,7 +101,9 @@ def test_single_transformer_block(
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
         tt_combined_output = tt_model.forward(**model_args)
 
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
-        tt_combined_output_torch = ttnn.to_torch(tt_combined_output)[:batch_size]
+    tt_combined_output_torch = ttnn.to_torch(
+        tt_combined_output,
+        mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=0),
+    )[:batch_size]
 
     assert_quality(combined_output, tt_combined_output_torch, pcc=0.99943, mse=2000)

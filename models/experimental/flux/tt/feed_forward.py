@@ -32,10 +32,18 @@ class FeedForwardParameters:
     ) -> FeedForwardParameters:
         return cls(
             in_proj=LinearParameters.from_torch(
-                substate(state, "net.0.proj"), dtype=dtype, device=device, on_host=linear_on_host
+                substate(state, "net.0.proj"),
+                dtype=dtype,
+                device=device,
+                on_host=linear_on_host,
+                mesh_mapper=ttnn.ShardTensorToMesh(device, -1),
             ),
             out_proj=LinearParameters.from_torch(
-                substate(state, "net.2"), dtype=dtype, device=device, on_host=linear_on_host
+                substate(state, "net.2"),
+                dtype=dtype,
+                device=device,
+                on_host=linear_on_host,
+                mesh_mapper=ttnn.ShardTensorToMesh(device, -1),
             ),
         )
 

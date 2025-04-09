@@ -39,28 +39,37 @@ def test_timestep_embedding(
     # torch_model = CombinedTimestepTextProjEmbeddingsReference(embedding_dim=3072, pooled_projection_dim=768)
     # torch_model.eval()
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = CombinedTimestepTextProjEmbeddingsParameters.from_torch(
-            torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
-        )
-        tt_model = CombinedTimestepTextProjEmbeddings(parameters)
+    parameters = CombinedTimestepTextProjEmbeddingsParameters.from_torch(
+        torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
+    )
+    tt_model = CombinedTimestepTextProjEmbeddings(parameters)
 
     timestep = torch.randint(1000, (batch_size,))
     pooled_projection = torch.randn((batch_size, 768))
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        tt_timestep = ttnn.from_torch(
-            timestep.unsqueeze(1), device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32
-        )
-        tt_pooled_projection = ttnn.from_torch(
-            pooled_projection, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b
-        )
+    rm = ttnn.ReplicateTensorToMesh(mesh_device)
+    tt_timestep = ttnn.from_torch(
+        timestep.unsqueeze(1),
+        device=mesh_device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn.float32,
+        mesh_mapper=rm,
+    )
+    tt_pooled_projection = ttnn.from_torch(
+        pooled_projection,
+        device=mesh_device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn.bfloat8_b,
+        mesh_mapper=rm,
+    )
 
     with torch.no_grad():
         torch_output = torch_model(timestep, pooled_projection)
 
     tt_output = tt_model.forward(timestep=tt_timestep, pooled_projection=tt_pooled_projection)
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
-        tt_output_torch = ttnn.to_torch(tt_output)[:batch_size]
+    tt_output_torch = ttnn.to_torch(
+        tt_output,
+        mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=0),
+    )[:batch_size]
 
     assert_quality(torch_output, tt_output_torch, pcc=0.99983)

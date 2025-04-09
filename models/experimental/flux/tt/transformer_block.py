@@ -41,18 +41,6 @@ class TransformerBlockParameters:
         device: ttnn.MeshDevice,
         linear_on_host: bool = False,
     ) -> TransformerBlockParameters:
-        with ttnn.distribute(ttnn.ShardTensorToMesh(device, dim=-1)):
-            spatial_ff = FeedForwardParameters.from_torch(
-                substate(state, "ff"), dtype=dtype, device=device, linear_on_host=linear_on_host
-            )
-            prompt_ff = (
-                FeedForwardParameters.from_torch(
-                    substate(state, "ff_context"), dtype=dtype, device=device, linear_on_host=linear_on_host
-                )
-                if has_substate(state, "ff_context")
-                else None
-            )
-
         return cls(
             dual_attn=AttentionParameters.from_torch(substate(state, "attn"), dtype=dtype, device=device),
             spatial_attn=AttentionParameters.from_torch(substate(state, "attn2"), dtype=dtype, device=device)
@@ -77,8 +65,22 @@ class TransformerBlockParameters:
                 unsqueeze_bias=True,
                 on_host=linear_on_host,
             ),
-            spatial_ff=spatial_ff,
-            prompt_ff=prompt_ff,
+            spatial_ff=FeedForwardParameters.from_torch(
+                substate(state, "ff"),
+                dtype=dtype,
+                device=device,
+                linear_on_host=linear_on_host,
+            ),
+            prompt_ff=(
+                FeedForwardParameters.from_torch(
+                    substate(state, "ff_context"),
+                    dtype=dtype,
+                    device=device,
+                    linear_on_host=linear_on_host,
+                )
+                if has_substate(state, "ff_context")
+                else None
+            ),
             gather=device.get_num_devices() > 1,
         )
 

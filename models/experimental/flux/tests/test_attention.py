@@ -11,7 +11,7 @@ import torch
 import ttnn
 
 from ..tt.attention import Attention, AttentionParameters
-from ..tt.utils import allocate_tensor_on_device_like, assert_quality
+from ..tt.utils import allocate_tensor_on_device_like, assert_quality, from_torch_fast
 
 if TYPE_CHECKING:
     from ..reference import FluxTransformer2DModel as FluxTransformer2DModelReference
@@ -45,8 +45,11 @@ def test_attention(
 
     torch_model: AttentionReference = parent_torch_model.transformer_blocks[block_index].attn.to(torch.float32)
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        parameters = AttentionParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b)
+    parameters = AttentionParameters.from_torch(
+        torch_model.state_dict(),
+        device=mesh_device,
+        dtype=ttnn.bfloat8_b,
+    )
     tt_model = Attention(parameters, num_heads=torch_model.num_heads)
 
     spatial = torch.randn((batch_size, spatial_sequence_length, 3072))
@@ -54,13 +57,15 @@ def test_attention(
     imagerot1 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
     imagerot2 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
 
-    with ttnn.distribute(ttnn.ReplicateTensorToMesh(mesh_device)):
-        tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
-        tt_prompt_host = (
-            ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b) if separate_prompt else None
-        )
-        tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
-        tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32)
+    rm = ttnn.ReplicateTensorToMesh(mesh_device)
+    tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=rm)
+    tt_prompt_host = (
+        ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=rm)
+        if separate_prompt
+        else None
+    )
+    tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=rm)
+    tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=rm)
 
     with torch.no_grad():
         spatial_output, prompt_output = torch_model(
@@ -106,9 +111,18 @@ def test_attention(
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
         tt_spatial_output, tt_prompt_output = tt_model.forward(**model_args)
 
-    with ttnn.distribute(ttnn.ConcatMeshToTensor(mesh_device, dim=0)):
-        tt_spatial_output_torch = ttnn.to_torch(tt_spatial_output)[:batch_size]
-        tt_prompt_output_torch = ttnn.to_torch(tt_prompt_output)[:batch_size] if separate_prompt else None
+    tt_spatial_output_torch = ttnn.to_torch(
+        tt_spatial_output,
+        mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=0),
+    )[:batch_size]
+    tt_prompt_output_torch = (
+        ttnn.to_torch(
+            tt_prompt_output,
+            mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=0),
+        )[:batch_size]
+        if separate_prompt
+        else None
+    )
 
     assert_quality(spatial_output, tt_spatial_output_torch, pcc=0.9939, mse=0.0003)
 
