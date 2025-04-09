@@ -471,7 +471,7 @@ def _get_t5_prompt_embeds(
             device=device,
             layout=ttnn.TILE_LAYOUT,
             dtype=ttnn.bfloat16,
-            mm=ttnn.ReplicateTensorToMesh(device),
+            mesh_mapper=ttnn.ReplicateTensorToMesh(device),
         )
         tt_prompt_embeds = text_encoder.forward(tt_text_input_ids)
         prompt_embeds = ttnn.to_torch(tt_prompt_embeds, mesh_composer=ttnn.ConcatMeshToTensor(device, dim=0))[
