@@ -48,14 +48,14 @@ class FluxSingleTransformerBlockParameters:
                 dtype=dtype,
                 device=device,
                 on_host=linear_on_host,
-                mesh_mapper=ttnn.ShardTensorToMesh(device, -1),
+                mesh_sharding_dim=1,
             ),
             proj_out=LinearParameters.from_torch(
                 substate(state, "proj_out"),
                 dtype=dtype,
                 device=device,
                 on_host=linear_on_host,
-                mesh_mapper=ttnn.ShardTensorToMesh(device, -1),
+                mesh_sharding_dim=1,
             ),
             gather=device.get_num_devices() > 1,
         )

@@ -46,7 +46,7 @@ class AttentionParameters:
                     _merge_qkv_proj(substate(state, "to_q"), substate(state, "to_k"), substate(state, "to_v")),
                     dtype=dtype,
                     device=device,
-                    mesh_mapper=ttnn.ShardTensorToMesh(device, -1),
+                    mesh_sharding_dim=1,
                 ),
                 norm_q=RmsNormParameters.from_torch(substate(state, "norm_q"), dtype=dtype, device=device),
                 norm_k=RmsNormParameters.from_torch(substate(state, "norm_k"), dtype=dtype, device=device),
@@ -55,7 +55,7 @@ class AttentionParameters:
                         substate(state, "to_out.0"),
                         dtype=dtype,
                         device=device,
-                        mesh_mapper=ttnn.ShardTensorToMesh(device, -1),
+                        mesh_sharding_dim=1,
                     )
                     if has_substate(state, "to_out.0")
                     else None
@@ -70,7 +70,7 @@ class AttentionParameters:
                         ),
                         dtype=dtype,
                         device=device,
-                        mesh_mapper=ttnn.ShardTensorToMesh(device, -1),
+                        mesh_sharding_dim=1,
                     )
                     if has_substate(state, "add_q_proj")
                     else None
@@ -82,7 +82,7 @@ class AttentionParameters:
                         substate(state, "to_add_out"),
                         dtype=dtype,
                         device=device,
-                        mesh_mapper=ttnn.ShardTensorToMesh(device, -1),
+                        mesh_sharding_dim=1,
                     )
                     if has_substate(state, "add_q_proj")
                     else None

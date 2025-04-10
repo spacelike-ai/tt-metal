@@ -36,14 +36,14 @@ class FeedForwardParameters:
                 dtype=dtype,
                 device=device,
                 on_host=linear_on_host,
-                mesh_mapper=ttnn.ShardTensorToMesh(device, -1),
+                mesh_sharding_dim=1,
             ),
             out_proj=LinearParameters.from_torch(
                 substate(state, "net.2"),
                 dtype=dtype,
                 device=device,
                 on_host=linear_on_host,
-                mesh_mapper=ttnn.ShardTensorToMesh(device, -1),
+                mesh_sharding_dim=1,
             ),
         )
 

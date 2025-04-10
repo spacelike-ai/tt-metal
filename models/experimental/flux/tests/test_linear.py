@@ -18,6 +18,8 @@ from ..tt.utils import assert_quality
         (32, 1536, 2048),
     ],
 )
+@pytest.mark.parametrize("mesh_sharding_dim", [0, 1, None])
+@pytest.mark.parametrize("on_host", [False, True])
 @pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
 @pytest.mark.usefixtures("use_program_cache")
 def test_linear(
@@ -26,6 +28,8 @@ def test_linear(
     batch_size: int,
     input_dim: int,
     output_dim: int,
+    mesh_sharding_dim: int | None,
+    on_host: bool,
 ) -> None:
     torch.manual_seed(0)
 
@@ -36,7 +40,8 @@ def test_linear(
         torch_model.state_dict(),
         device=mesh_device,
         dtype=ttnn.bfloat8_b,
-        mesh_mapper=ttnn.ShardTensorToMesh(mesh_device, dim=-1),
+        mesh_sharding_dim=mesh_sharding_dim,
+        on_host=on_host,
     )
     tt_model = Linear(parameters)
 
@@ -47,16 +52,24 @@ def test_linear(
         device=mesh_device,
         layout=ttnn.TILE_LAYOUT,
         dtype=ttnn.bfloat8_b,
+        mesh_mapper=ttnn.ShardTensorToMesh(mesh_device, -1)
+        if mesh_sharding_dim == 0
+        else ttnn.ReplicateTensorToMesh(mesh_device),
     )
 
     with torch.no_grad():
         torch_output = torch_model(torch_input_tensor)
 
     tt_output = tt_model.forward(tt_input_tensor)
-
-    assert_quality(
-        torch_output,
+    tt_output_torch = ttnn.to_torch(
         tt_output,
-        pcc=0.99976,
         mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=-1),
     )
+
+    if mesh_sharding_dim is None:
+        tt_output_torch = tt_output_torch[..., :output_dim]
+    elif mesh_sharding_dim == 0:
+        *dims, _ = torch_output.shape
+        tt_output_torch = tt_output_torch.reshape([*dims, mesh_device.get_num_devices(), output_dim]).sum(dim=-2)
+
+    assert_quality(torch_output, tt_output_torch, pcc=0.99976)

@@ -20,7 +20,7 @@ class LinearParameters:
     weight: ttnn.Tensor
     bias: ttnn.Tensor | None
     on_host: bool
-    device: ttnn.Device | ttnn.MeshDevice | None
+    device: ttnn.MeshDevice
 
     @classmethod
     def from_torch(
@@ -28,13 +28,19 @@ class LinearParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device | ttnn.MeshDevice | None,
+        device: ttnn.MeshDevice,
         on_host: bool = False,
         unsqueeze_bias: bool = False,
-        mesh_mapper: ttnn.TensorToMesh | None = None,
+        mesh_sharding_dim: int | None = None,
     ) -> LinearParameters:
+        weight = state["weight"]
+        assert len(weight.shape) == 2, "weight should be a rank two tensor"
+
         if "bias" in state:
-            bias = state["bias"].unsqueeze(0)
+            bias = state["bias"]
+            assert len(bias.shape) == 1, "bias should be a rank one tensor"
+
+            bias = bias.unsqueeze(0)
             if unsqueeze_bias:
                 # TODO: Remove this workaround for issue https://github.com/tenstorrent/tt-metal/issues/16599
                 bias = bias.unsqueeze(0)
@@ -43,14 +49,25 @@ class LinearParameters:
 
         on_host = on_host or device is None
 
+        if mesh_sharding_dim is None:
+            weight_mm = bias_mm = ttnn.ReplicateTensorToMesh(device)
+        elif mesh_sharding_dim in [1, -1]:
+            weight_mm = bias_mm = ttnn.ShardTensorToMesh(device, 1)
+        elif mesh_sharding_dim in [0, -2]:
+            weight_mm = ttnn.ShardTensorToMesh(device, 0)
+            bias_mm = _ShardBias(device)
+        else:
+            msg = "mesh_sharding_dim must be in the range from -2 to 1, or None"
+            raise ValueError(msg)
+
         return cls(
             weight=from_torch_fast(
-                state["weight"].transpose(0, 1),
+                weight.transpose(0, 1),
                 layout=ttnn.TILE_LAYOUT,
                 dtype=dtype,
                 device=device,
                 to_host=on_host,
-                mesh_mapper=mesh_mapper,
+                mesh_mapper=weight_mm,
             ),
             bias=from_torch_fast(
                 bias,
@@ -58,7 +75,7 @@ class LinearParameters:
                 dtype=dtype,
                 device=device,
                 to_host=on_host,
-                mesh_mapper=mesh_mapper,
+                mesh_mapper=bias_mm,
             )
             if bias is not None
             else None,
@@ -113,3 +130,29 @@ class Linear:
             output_tile=output_tile,
             dtype=dtype,
         )
+
+
+class _ShardBias(ttnn.TensorToMesh):
+    """
+    This mesh mapper is intended for sharding the bias of a linear operation on the first dimension.
+    A single device receive the bias as is, while the other ones receive zero tensors of the same
+    shape so that the bias is not added multiple times after gathering.
+
+    The otherwise problematic behavior of adding the bias mutiple times is currently not observed
+    with a bias of type bfloat8_b or bfloat4_b, since ttnn.from_torch pads to such tensors to the
+    tile size before sharding, which has the same effect if the number devices is not too big.
+    """
+
+    def __init__(self, mesh_device: ttnn.MeshDevice) -> None:
+        super().__init__(mesh_device)
+
+    def map(self, tensor: torch.Tensor) -> dict[int, ttnn.Tensor]:
+        import torch
+
+        return [tensor] + [torch.zeros_like(tensor)] * (self.mesh_device.get_num_devices() - 1)
+
+    def config(self) -> dict[str, str]:
+        return {
+            "strategy": "shard",
+            "shard_dim": "0",
+        }

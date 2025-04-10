@@ -191,13 +191,11 @@ class T5AttentionParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
     ) -> T5AttentionParameters:
-        mm = ttnn.ShardTensorToMesh(device, dim=-1)
-
         return cls(
-            q_proj=LinearParameters.from_torch(substate(state, "q"), dtype=dtype, device=device, mesh_mapper=mm),
-            k_proj=LinearParameters.from_torch(substate(state, "k"), dtype=dtype, device=device, mesh_mapper=mm),
-            v_proj=LinearParameters.from_torch(substate(state, "v"), dtype=dtype, device=device, mesh_mapper=mm),
-            o_proj=LinearParameters.from_torch(substate(state, "o"), dtype=dtype, device=device, mesh_mapper=mm),
+            q_proj=LinearParameters.from_torch(substate(state, "q"), dtype=dtype, device=device, mesh_sharding_dim=1),
+            k_proj=LinearParameters.from_torch(substate(state, "k"), dtype=dtype, device=device, mesh_sharding_dim=1),
+            v_proj=LinearParameters.from_torch(substate(state, "v"), dtype=dtype, device=device, mesh_sharding_dim=1),
+            o_proj=LinearParameters.from_torch(substate(state, "o"), dtype=dtype, device=device, mesh_sharding_dim=1),
             gather=device.get_num_devices() > 1,
         )
 
@@ -289,12 +287,10 @@ class T5DenseGatedActDenseParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device | ttnn.MeshDevice,
     ) -> T5DenseGatedActDenseParameters:
-        mm = ttnn.ShardTensorToMesh(device, dim=-1)
-
         return cls(
-            wi0=LinearParameters.from_torch(substate(state, "wi_0"), dtype=dtype, device=device, mesh_mapper=mm),
-            wi1=LinearParameters.from_torch(substate(state, "wi_1"), dtype=dtype, device=device, mesh_mapper=mm),
-            wo=LinearParameters.from_torch(substate(state, "wo"), dtype=dtype, device=device, mesh_mapper=mm),
+            wi0=LinearParameters.from_torch(substate(state, "wi_0"), dtype=dtype, device=device, mesh_sharding_dim=1),
+            wi1=LinearParameters.from_torch(substate(state, "wi_1"), dtype=dtype, device=device, mesh_sharding_dim=1),
+            wo=LinearParameters.from_torch(substate(state, "wo"), dtype=dtype, device=device, mesh_sharding_dim=1),
             gather=device.get_num_devices() > 1,
         )
 
