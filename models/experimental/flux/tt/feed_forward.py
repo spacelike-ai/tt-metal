@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import ttnn
 
+from . import utils
 from .linear import Linear, LinearParameters
 from .substate import substate
 
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 class FeedForwardParameters:
     in_proj: LinearParameters
     out_proj: LinearParameters
+    device_count: int
 
     @classmethod
     def from_torch(
@@ -27,7 +29,7 @@ class FeedForwardParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device | ttnn.MeshDevice | None = None,
+        device: ttnn.MeshDevice,
         linear_on_host: bool = False,
     ) -> FeedForwardParameters:
         return cls(
@@ -43,8 +45,9 @@ class FeedForwardParameters:
                 dtype=dtype,
                 device=device,
                 on_host=linear_on_host,
-                mesh_sharding_dim=1,
+                mesh_sharding_dim=0,
             ),
+            device_count=device.get_num_devices(),
         )
 
 
@@ -52,21 +55,20 @@ class FeedForward:
     def __init__(self, parameters: FeedForwardParameters) -> None:
         super().__init__()
 
+        self._device_count = parameters.device_count
         self.in_proj = Linear(parameters.in_proj)
         self.out_proj = Linear(parameters.out_proj)
 
-    def forward(self, x: ttnn.Tensor, *, gather: bool = False) -> ttnn.Tensor:
+    def forward(self, x: ttnn.Tensor, *, gather: bool = True) -> ttnn.Tensor:
         x = self.in_proj.forward(x)
         # Turning on fast_and_approximate_mode leads to big changes in the generated image.
         # The image quality might still be okay.
         x = ttnn.gelu(x, fast_and_approximate_mode=False)
-
-        if gather:
-            x = ttnn.all_gather(x, dim=-1)
-
         x = self.out_proj.forward(x)
 
-        if gather:
-            x = ttnn.all_gather(x, dim=-1)
+        if self._device_count > 1:
+            x = utils.reduce_scatter(x, dim=-1, math_op=ttnn.ReduceType.Sum)
+            if gather:
+                x = ttnn.all_gather(x, dim=-1)
 
         return x

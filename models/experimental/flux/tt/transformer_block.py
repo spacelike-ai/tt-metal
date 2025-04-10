@@ -162,7 +162,7 @@ class TransformerBlock:
         self, inp: ttnn.Tensor, *, gate: ttnn.Tensor, scale: ttnn.Tensor, shift: ttnn.Tensor
     ) -> ttnn.Tensor:
         scaled = inp * (1 + scale) + shift
-        return gate * self._spatial_ff.forward(scaled, gather=self._gather)
+        return gate * self._spatial_ff.forward(scaled)
 
     def _prompt_ff_block(
         self, inp: ttnn.Tensor, *, gate: ttnn.Tensor, scale: ttnn.Tensor, shift: ttnn.Tensor
@@ -170,7 +170,7 @@ class TransformerBlock:
         assert self._prompt_ff is not None
 
         scaled = inp * (1 + scale) + shift
-        return gate * self._prompt_ff.forward(scaled, gather=self._gather)
+        return gate * self._prompt_ff.forward(scaled)
 
     def forward(  # noqa: PLR0915
         self,

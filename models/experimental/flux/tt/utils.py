@@ -88,3 +88,35 @@ def assert_quality(
         assert pcc_calculated >= pcc, f"PCC={pcc_calculated:.6f} >= {pcc:.6f}"
     if mse is not None:
         assert mse_calculated <= mse, f"MSE={mse_calculated:.6f} <= {mse:.6f}"
+
+
+def reduce_scatter(
+    x: ttnn.Tensor,
+    dim: int,
+    math_op: ttnn.ReduceType,
+    *,
+    num_links: int = 1,
+    memory_config: ttnn.MemoryConfig | None = None,
+) -> ttnn.Tensor:
+    if memory_config is None:
+        memory_config = x.memory_config()
+
+    # ttnn.reduce_scatter currently supports rank 4 tensors only
+    rank = len(x.shape)
+    if rank < 4:
+        shape = [1] * (4 - rank) + list(x.shape)
+        x = ttnn.reshape(x, shape)
+
+    x = ttnn.reduce_scatter(
+        x,
+        dim=dim,
+        math_op=math_op,
+        num_links=num_links,
+        memory_config=memory_config,
+    )
+
+    if rank < 4:
+        shape = list(x.shape)[4 - rank :]
+        x = ttnn.reshape(x, shape)
+
+    return x
