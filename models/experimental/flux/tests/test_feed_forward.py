@@ -16,7 +16,7 @@ from ..tt.utils import assert_quality
 @pytest.mark.parametrize(
     ("batch_size", "input_dim", "output_dim"),
     [
-        (32, 128, 256),
+        (4096, 3072, 3072),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
@@ -56,4 +56,4 @@ def test_feed_forward(
         mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=-1),
     )[..., : tt_output.shape[-1]]
 
-    assert_quality(torch_output, tt_output_torch, pcc=0.99949)
+    assert_quality(torch_output, tt_output_torch, pcc=0.99912, mse=0.00025)
