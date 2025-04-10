@@ -52,9 +52,9 @@ class LinearParameters:
         if mesh_sharding_dim is None:
             weight_mm = bias_mm = ttnn.ReplicateTensorToMesh(device)
         elif mesh_sharding_dim in [1, -1]:
-            weight_mm = bias_mm = ttnn.ShardTensorToMesh(device, 1)
+            weight_mm = bias_mm = ttnn.ShardTensorToMesh(device, -1)
         elif mesh_sharding_dim in [0, -2]:
-            weight_mm = ttnn.ShardTensorToMesh(device, 0)
+            weight_mm = ttnn.ShardTensorToMesh(device, -2)
             bias_mm = _ShardBias(device)
         else:
             msg = "mesh_sharding_dim must be in the range from -2 to 1, or None"
