@@ -18,8 +18,8 @@ from ..tt.utils import assert_quality
         (32, 1536, 2048),
     ],
 )
-@pytest.mark.parametrize("mesh_sharding_dim", [0, 1, None])
-@pytest.mark.parametrize("on_host", [False, True])
+@pytest.mark.parametrize("mesh_sharding_dim", [0, 1, None], ids=["in_sharding", "out_sharding", "no_sharding"])
+@pytest.mark.parametrize("on_host", [False, True], ids=["host", "device"])
 @pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
 @pytest.mark.usefixtures("use_program_cache")
 def test_linear(
@@ -68,8 +68,5 @@ def test_linear(
 
     if mesh_sharding_dim is None:
         tt_output_torch = tt_output_torch[..., :output_dim]
-    elif mesh_sharding_dim == 0:
-        *dims, _ = torch_output.shape
-        tt_output_torch = tt_output_torch.reshape([*dims, mesh_device.get_num_devices(), output_dim]).sum(dim=-2)
 
     assert_quality(torch_output, tt_output_torch, pcc=0.99976)

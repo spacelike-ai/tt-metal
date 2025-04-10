@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 
 import ttnn
 
-from . import utils
 from .linear import Linear, LinearParameters
 from .substate import substate
 
@@ -66,9 +65,7 @@ class FeedForward:
         x = ttnn.gelu(x, fast_and_approximate_mode=False)
         x = self.out_proj.forward(x)
 
-        if self._device_count > 1:
-            x = utils.reduce_scatter(x, dim=-1, math_op=ttnn.ReduceType.Sum)
-            if gather:
-                x = ttnn.all_gather(x, dim=-1)
+        if gather and self._device_count > 1:
+            x = ttnn.all_gather(x, dim=-1)
 
         return x

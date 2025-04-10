@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import ttnn
 
+from . import utils
 from .utils import from_torch_fast
 
 if TYPE_CHECKING:
@@ -21,6 +22,7 @@ class LinearParameters:
     bias: ttnn.Tensor | None
     on_host: bool
     device: ttnn.MeshDevice
+    reduce_scatter: bool
 
     @classmethod
     def from_torch(
@@ -51,11 +53,14 @@ class LinearParameters:
 
         if mesh_sharding_dim is None:
             weight_mm = bias_mm = ttnn.ReplicateTensorToMesh(device)
+            output_sharding = False
         elif mesh_sharding_dim in [1, -1]:
             weight_mm = bias_mm = ttnn.ShardTensorToMesh(device, -1)
+            output_sharding = False
         elif mesh_sharding_dim in [0, -2]:
             weight_mm = ttnn.ShardTensorToMesh(device, -2)
             bias_mm = _ShardBias(device)
+            output_sharding = True
         else:
             msg = "mesh_sharding_dim must be in the range from -2 to 1, or None"
             raise ValueError(msg)
@@ -81,6 +86,7 @@ class LinearParameters:
             else None,
             on_host=on_host,
             device=device,
+            reduce_scatter=output_sharding and device.get_num_devices() > 1,
         )
 
     @property
@@ -94,6 +100,7 @@ class LinearParameters:
 
 class Linear:
     def __init__(self, parameters: LinearParameters) -> None:
+        self._reduce_scatter = parameters.reduce_scatter
         self._in_channels = parameters.in_channels
         self._weight = parameters.weight
         self._bias = parameters.bias
@@ -120,7 +127,7 @@ class Linear:
             weight = self._weight
             bias = self._bias
 
-        return ttnn.linear(
+        x = ttnn.linear(
             x,
             weight,
             bias=bias,
@@ -130,6 +137,11 @@ class Linear:
             output_tile=output_tile,
             dtype=dtype,
         )
+
+        if self._reduce_scatter:
+            x = utils.reduce_scatter(x, dim=-1, math_op=ttnn.ReduceType.Sum)
+
+        return x
 
 
 class _ShardBias(ttnn.TensorToMesh):
