@@ -11,7 +11,7 @@ import torch
 import ttnn
 
 from ..tt.attention import Attention, AttentionParameters
-from ..tt.utils import allocate_tensor_on_device_like, assert_quality, from_torch_fast
+from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
 if TYPE_CHECKING:
     from ..reference import FluxTransformer2DModel as FluxTransformer2DModelReference
@@ -57,15 +57,17 @@ def test_attention(
     imagerot1 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
     imagerot2 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
 
-    rm = ttnn.ReplicateTensorToMesh(mesh_device)
-    tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=rm)
+    sharded = ttnn.ShardTensorToMesh(mesh_device, dim=-1)
+    unsharded = ttnn.ReplicateTensorToMesh(mesh_device)
+
+    tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=sharded)
     tt_prompt_host = (
-        ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=rm)
+        ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=sharded)
         if separate_prompt
         else None
     )
-    tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=rm)
-    tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=rm)
+    tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded)
+    tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded)
 
     with torch.no_grad():
         spatial_output, prompt_output = torch_model(
@@ -113,13 +115,13 @@ def test_attention(
 
     tt_spatial_output_torch = ttnn.to_torch(
         tt_spatial_output,
-        mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=0),
-    )[:batch_size]
+        mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=-1),
+    )
     tt_prompt_output_torch = (
         ttnn.to_torch(
             tt_prompt_output,
-            mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=0),
-        )[:batch_size]
+            mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=-1),
+        )
         if separate_prompt
         else None
     )

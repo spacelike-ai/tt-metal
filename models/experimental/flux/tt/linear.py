@@ -34,6 +34,7 @@ class LinearParameters:
         on_host: bool = False,
         unsqueeze_bias: bool = False,
         mesh_sharding_dim: int | None = None,
+        chunks: int | None = None,
     ) -> LinearParameters:
         weight = state["weight"]
         assert len(weight.shape) == 2, "weight should be a rank two tensor"
@@ -41,13 +42,19 @@ class LinearParameters:
         if "bias" in state:
             bias = state["bias"]
             assert len(bias.shape) == 1, "bias should be a rank one tensor"
-
-            bias = bias.unsqueeze(0)
-            if unsqueeze_bias:
-                # TODO: Remove this workaround for issue https://github.com/tenstorrent/tt-metal/issues/16599
-                bias = bias.unsqueeze(0)
         else:
             bias = None
+
+        if chunks is not None:
+            nd = device.get_num_devices()
+            _, in_dim = weight.shape
+
+            weight = weight.reshape([chunks, nd, -1, in_dim]).permute([1, 0, 2, 3]).reshape([-1, in_dim])
+            bias = bias.reshape([chunks, nd, -1]).permute([1, 0, 2]).reshape([-1]) if bias is not None else None
+
+        if unsqueeze_bias:
+            # TODO: Remove this workaround for issue https://github.com/tenstorrent/tt-metal/issues/16599
+            bias = bias.unsqueeze(0)
 
         on_host = on_host or device is None
 
@@ -75,7 +82,7 @@ class LinearParameters:
                 mesh_mapper=weight_mm,
             ),
             bias=from_torch_fast(
-                bias,
+                bias.unsqueeze(0),
                 layout=ttnn.TILE_LAYOUT,
                 dtype=dtype,
                 device=device,

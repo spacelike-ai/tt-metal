@@ -21,7 +21,7 @@ class AttentionPartParameters:
     qkv_proj: LinearParameters
     norm_q: RmsNormParameters
     norm_k: RmsNormParameters
-    gather: bool
+    device_count: int
     out_proj: LinearParameters | None
 
 
@@ -38,15 +38,14 @@ class AttentionParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
     ) -> AttentionParameters:
-        gather = device.get_num_devices() > 1
-
         return cls(
             spatial=AttentionPartParameters(
                 qkv_proj=LinearParameters.from_torch(
                     _merge_qkv_proj(substate(state, "to_q"), substate(state, "to_k"), substate(state, "to_v")),
                     dtype=dtype,
                     device=device,
-                    mesh_sharding_dim=1,
+                    mesh_sharding_dim=0,
+                    chunks=3,
                 ),
                 norm_q=RmsNormParameters.from_torch(substate(state, "norm_q"), dtype=dtype, device=device),
                 norm_k=RmsNormParameters.from_torch(substate(state, "norm_k"), dtype=dtype, device=device),
@@ -55,12 +54,12 @@ class AttentionParameters:
                         substate(state, "to_out.0"),
                         dtype=dtype,
                         device=device,
-                        mesh_sharding_dim=1,
+                        mesh_sharding_dim=0,
                     )
                     if has_substate(state, "to_out.0")
                     else None
                 ),
-                gather=gather,
+                device_count=device.get_num_devices(),
             ),
             prompt=AttentionPartParameters(
                 qkv_proj=(
@@ -70,7 +69,8 @@ class AttentionParameters:
                         ),
                         dtype=dtype,
                         device=device,
-                        mesh_sharding_dim=1,
+                        mesh_sharding_dim=0,
+                        chunks=3,
                     )
                     if has_substate(state, "add_q_proj")
                     else None
@@ -82,12 +82,12 @@ class AttentionParameters:
                         substate(state, "to_add_out"),
                         dtype=dtype,
                         device=device,
-                        mesh_sharding_dim=1,
+                        mesh_sharding_dim=0,
                     )
                     if has_substate(state, "add_q_proj")
                     else None
                 ),
-                gather=gather,
+                device_count=device.get_num_devices(),
             )
             if has_substate(state, "add_q_proj")
             else None,
@@ -106,18 +106,20 @@ class AttentionPart:
         self._norm_q = RmsNorm(parameters.norm_q, eps=eps)
         self._norm_k = RmsNorm(parameters.norm_k, eps=eps)
 
-        self._gather = parameters.gather
+        self._device_count = parameters.device_count
 
     def qkv(self, x: ttnn.Tensor, *, num_heads: int) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
         x = self._opt.prepare_qkv_projection(x)
 
         x = self._qkv_proj.forward(x, **self._opt.qkv_projection_settings(x.device()))
-        if self._gather:
-            x = ttnn.all_gather(x, dim=-1)
 
         x = self._opt.prepare_split(x)
 
-        q, k, v = ttnn.transformer.split_query_key_value_and_split_heads(x, num_heads=num_heads, transpose_key=False)
+        q, k, v = ttnn.transformer.split_query_key_value_and_split_heads(
+            x,
+            num_heads=num_heads // self._device_count,
+            transpose_key=False,
+        )
         del x
 
         q = self._norm_q.forward(q)
@@ -130,9 +132,6 @@ class AttentionPart:
             return x
 
         x = self._out_proj.forward(x)
-        if self._gather:
-            x = ttnn.all_gather(x, dim=-1)
-
         return self._opt.postprocess_out_projection(x)
 
 
@@ -234,8 +233,8 @@ def _merge_qkv_proj(
     v_state: dict[str, torch.Tensor | None],
 ) -> dict[str, torch.Tensor]:
     return {
-        "weight": torch.cat([q_state["weight"], k_state["weight"], v_state["weight"]]) if "weight" in q_state else None,
-        "bias": torch.cat([q_state["bias"], k_state["bias"], v_state["bias"]]) if "bias" in q_state else None,
+        "weight": torch.cat([q_state["weight"], k_state["weight"], v_state["weight"]]),
+        "bias": torch.cat([q_state["bias"], k_state["bias"], v_state["bias"]]),
     }
 
 

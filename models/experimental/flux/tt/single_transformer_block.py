@@ -5,8 +5,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
+import torch
 import ttnn
 
 from .attention import Attention, AttentionParameters
@@ -14,9 +14,6 @@ from .linear import Linear, LinearParameters
 from .normalization import LayerNorm, LayerNormParameters
 from .substate import substate
 from .transformer_block import chunk_time
-
-if TYPE_CHECKING:
-    import torch
 
 
 @dataclass
@@ -26,7 +23,6 @@ class FluxSingleTransformerBlockParameters:
     time_embed: LinearParameters
     proj_mlp: LinearParameters
     proj_out: LinearParameters
-    gather: bool
 
     @classmethod
     def from_torch(
@@ -37,27 +33,42 @@ class FluxSingleTransformerBlockParameters:
         device: ttnn.MeshDevice,
         linear_on_host: bool = False,
     ) -> FluxSingleTransformerBlockParameters:
+        embedding_dim = state["norm.linear.weight"].shape[1]
+
         return cls(
             attn=AttentionParameters.from_torch(substate(state, "attn"), dtype=dtype, device=device),
-            norm=LayerNormParameters.from_torch(substate(state, "norm"), dtype=dtype, device=device),
+            norm=LayerNormParameters.from_torch(
+                substate(state, "norm"),
+                dtype=dtype,
+                device=device,
+                weight_shape=[],
+            ),
             time_embed=LinearParameters.from_torch(
-                substate(state, "norm.linear"), dtype=dtype, device=device, unsqueeze_bias=True
+                substate(state, "norm.linear"),
+                dtype=dtype,
+                device=device,
+                unsqueeze_bias=True,
+                mesh_sharding_dim=1,
+                chunks=3,
             ),
             proj_mlp=LinearParameters.from_torch(
                 substate(state, "proj_mlp"),
                 dtype=dtype,
                 device=device,
                 on_host=linear_on_host,
-                mesh_sharding_dim=1,
+                mesh_sharding_dim=0,
             ),
             proj_out=LinearParameters.from_torch(
-                substate(state, "proj_out"),
+                _re_fuse_proj_out_parameters(
+                    substate(state, "proj_out"),
+                    embedding_dim=embedding_dim,
+                    device_count=device.get_num_devices(),
+                ),
                 dtype=dtype,
                 device=device,
                 on_host=linear_on_host,
-                mesh_sharding_dim=1,
+                mesh_sharding_dim=0,
             ),
-            gather=device.get_num_devices() > 1,
         )
 
 
@@ -75,8 +86,6 @@ class FluxSingleTransformerBlock:
         self._proj_mlp = Linear(parameters.proj_mlp)
         self._proj_out = Linear(parameters.proj_out)
 
-        self._gather = parameters.gather
-
     def forward(
         self,
         *,
@@ -92,20 +101,47 @@ class FluxSingleTransformerBlock:
 
         mlp_combined = self._proj_mlp.forward(norm_combined)
         ttnn.gelu(mlp_combined, output_tensor=mlp_combined, fast_and_approximate_mode=False)
-        if self._gather:
-            mlp_combined = ttnn.all_gather(mlp_combined, dim=-1)
-        attn, _ = self._attn.forward(spatial=norm_combined, image_rotary_emb=image_rotary_emb)
-        # TODO: PCC of attn seems a bit low
 
+        # TODO: PCC of attn seems a bit low
+        attn, _ = self._attn.forward(spatial=norm_combined, image_rotary_emb=image_rotary_emb)
         del norm_combined
 
-        additional = ttnn.concat([attn, mlp_combined], dim=2)
-        proj_out = self._proj_out.forward(additional)
-        if self._gather:
-            proj_out = ttnn.all_gather(proj_out, dim=-1)
-        additional = gate_msa * proj_out
+        additional = ttnn.concat([attn, mlp_combined], dim=-1)
+        additional = self._proj_out.forward(additional)
+        additional = gate_msa * additional
 
         combined += additional
 
         return combined
         # return ttnn.clamp(combined, -65504, 65504)  # TODO: clamp gives worse PCC
+
+
+def _re_fuse_proj_out_parameters(
+    state: dict[str, torch.Tensor],
+    *,
+    embedding_dim: int,
+    device_count: int,
+) -> dict[str, torch.Tensor]:
+    """
+    The out-projection layer gets as inputs fused activations coming from the attention network and
+    the MLP. In order to get the correct behavior on a mesh device, its weights must be re-fused to
+    take into account mesh sharding.
+    """
+    if device_count == 1:
+        return state
+
+    w = state["weight"]
+    _, in_dim = w.shape
+
+    in_dim1 = embedding_dim
+    in_dim2 = in_dim - in_dim1
+
+    # unfuse
+    w1, w2 = w.split([in_dim1, in_dim2], dim=-1)
+
+    # re-fuse
+    w1 = w1.reshape([-1, device_count, in_dim1 // device_count])
+    w2 = w2.reshape([-1, device_count, in_dim2 // device_count])
+    w = torch.cat([w1, w2], dim=-1).reshape([-1, in_dim])
+
+    return {"weight": w, "bias": state["bias"]}

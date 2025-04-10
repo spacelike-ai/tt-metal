@@ -29,6 +29,7 @@ class FeedForwardParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.MeshDevice,
         linear_on_host: bool = False,
+        mesh_sharded_input: bool = False,
     ) -> FeedForwardParameters:
         return cls(
             in_proj=LinearParameters.from_torch(
@@ -36,7 +37,7 @@ class FeedForwardParameters:
                 dtype=dtype,
                 device=device,
                 on_host=linear_on_host,
-                mesh_sharding_dim=1,
+                mesh_sharding_dim=0 if mesh_sharded_input else 1,
             ),
             out_proj=LinearParameters.from_torch(
                 substate(state, "net.2"),

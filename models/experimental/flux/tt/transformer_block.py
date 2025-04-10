@@ -26,6 +26,7 @@ class TransformerBlockParameters:
     prompt_time_embed: LinearParameters
     spatial_time_embed: LinearParameters
     prompt_norm_1: LayerNormParameters
+    prompt_norm_2: LayerNormParameters
     spatial_norm_1: LayerNormParameters
     spatial_norm_2: LayerNormParameters
     prompt_ff: FeedForwardParameters | None
@@ -41,46 +42,56 @@ class TransformerBlockParameters:
         device: ttnn.MeshDevice,
         linear_on_host: bool = False,
     ) -> TransformerBlockParameters:
+        embedding_dim = state["norm1.linear.weight"].shape[1]
+
+        def norm(state: dict[str, torch.Tensor]) -> LayerNormParameters:
+            return LayerNormParameters.from_torch(
+                state,
+                dtype=dtype,
+                device=device,
+                mesh_sharded=True,
+                weight_shape=[embedding_dim],
+            )
+
+        def linear(state: dict[str, torch.Tensor], chunks: int) -> LinearParameters:
+            return LinearParameters.from_torch(
+                state,
+                dtype=dtype,
+                device=device,
+                unsqueeze_bias=True,
+                on_host=linear_on_host,
+                mesh_sharding_dim=1,
+                chunks=chunks,
+            )
+
+        def ff(state: dict[str, torch.Tensor]) -> FeedForwardParameters:
+            return FeedForwardParameters.from_torch(
+                state,
+                dtype=dtype,
+                device=device,
+                linear_on_host=linear_on_host,
+                mesh_sharded_input=True,
+            )
+
         return cls(
             dual_attn=AttentionParameters.from_torch(substate(state, "attn"), dtype=dtype, device=device),
             spatial_attn=AttentionParameters.from_torch(substate(state, "attn2"), dtype=dtype, device=device)
             if has_substate(state, "attn2")
             else None,
-            spatial_norm_1=LayerNormParameters.from_torch(substate(state, "norm1.norm"), dtype=dtype, device=device),
-            spatial_norm_2=LayerNormParameters.from_torch(substate(state, "norm2"), dtype=dtype, device=device),
-            prompt_norm_1=LayerNormParameters.from_torch(
-                substate(state, "norm1_context.norm"), dtype=dtype, device=device
-            ),
-            spatial_time_embed=LinearParameters.from_torch(
+            spatial_norm_1=norm(substate(state, "norm1.norm")),
+            spatial_norm_2=norm(substate(state, "norm2")),
+            prompt_norm_1=norm(substate(state, "norm1_context.norm")),
+            prompt_norm_2=norm({}),
+            spatial_time_embed=linear(
                 substate(state, "norm1.linear"),
-                dtype=dtype,
-                device=device,
-                unsqueeze_bias=True,
-                on_host=linear_on_host,
+                chunks=9 if has_substate(state, "attn2") else 6,
             ),
-            prompt_time_embed=LinearParameters.from_torch(
+            prompt_time_embed=linear(
                 substate(state, "norm1_context.linear"),
-                dtype=dtype,
-                device=device,
-                unsqueeze_bias=True,
-                on_host=linear_on_host,
+                chunks=6 if has_substate(state, "ff_context") else 2,
             ),
-            spatial_ff=FeedForwardParameters.from_torch(
-                substate(state, "ff"),
-                dtype=dtype,
-                device=device,
-                linear_on_host=linear_on_host,
-            ),
-            prompt_ff=(
-                FeedForwardParameters.from_torch(
-                    substate(state, "ff_context"),
-                    dtype=dtype,
-                    device=device,
-                    linear_on_host=linear_on_host,
-                )
-                if has_substate(state, "ff_context")
-                else None
-            ),
+            spatial_ff=ff(substate(state, "ff")),
+            prompt_ff=ff(substate(state, "ff_context")) if has_substate(state, "ff_context") else None,
             gather=device.get_num_devices() > 1,
         )
 
@@ -102,7 +113,7 @@ class TransformerBlock:
         self._spatial_norm_1 = LayerNorm(parameters.spatial_norm_1, eps=eps)
         self._spatial_norm_2 = LayerNorm(parameters.spatial_norm_2, eps=eps)
         self._prompt_norm_1 = LayerNorm(parameters.prompt_norm_1, eps=eps)
-        self._prompt_norm_2 = LayerNorm(LayerNormParameters(), eps=eps)
+        self._prompt_norm_2 = LayerNorm(parameters.prompt_norm_2, eps=eps)
 
         self._spatial_ff = FeedForward(parameters.spatial_ff)
         self._prompt_ff = FeedForward(parameters.prompt_ff) if parameters.prompt_ff is not None else None
@@ -314,5 +325,5 @@ class TransformerBlock:
 
 
 def chunk_time(t: ttnn.Tensor, count: int) -> list[ttnn.Tensor]:
-    size = t.shape[2] // count
+    size = t.shape[-1] // count
     return [t[:, :, i * size : (i + 1) * size] for i in range(count)]

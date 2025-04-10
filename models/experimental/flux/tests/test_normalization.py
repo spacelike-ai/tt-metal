@@ -16,27 +16,39 @@ from ..tt.utils import assert_quality
 @pytest.mark.parametrize(
     "input_shape",
     [
-        [2, 24, 4096, 64],
+        [1, 4096, 3072],
     ],
 )
 @pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
+@pytest.mark.parametrize("affine", [True, False], ids=["affine", "noaffine"])
 @pytest.mark.usefixtures("use_program_cache")
 def test_layer_norm(
     *,
     mesh_device: ttnn.MeshDevice,
     input_shape: list[int],
+    affine: bool,
 ) -> None:
     torch.manual_seed(0)
 
-    torch_model = torch.nn.LayerNorm(input_shape[-1:], eps=1.0)
+    torch_model = torch.nn.LayerNorm(input_shape[-1:], eps=1.0, elementwise_affine=affine)
 
-    parameters = LayerNormParameters.from_torch(torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b)
+    parameters = LayerNormParameters.from_torch(
+        torch_model.state_dict(),
+        device=mesh_device,
+        dtype=ttnn.bfloat8_b,
+        mesh_sharded=mesh_device.get_num_devices() > 1,
+        weight_shape=input_shape[-1:],
+    )
     tt_model = LayerNorm(parameters, eps=torch_model.eps)
 
     torch_input_tensor = torch.randn(input_shape)
 
     tt_input_tensor = ttnn.from_torch(
-        torch_input_tensor, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b
+        torch_input_tensor,
+        device=mesh_device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn.bfloat8_b,
+        mesh_mapper=ttnn.ShardTensorToMesh(mesh_device, dim=-1),
     )
 
     with torch.no_grad():
@@ -45,8 +57,8 @@ def test_layer_norm(
     tt_output = tt_model.forward(tt_input_tensor)
     tt_output_torch = ttnn.to_torch(
         tt_output,
-        mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=0),
-    )[: input_shape[0]]
+        mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=-1),
+    )[..., : input_shape[-1]]
 
     assert_quality(torch_output, tt_output_torch, pcc=0.99990)
 
