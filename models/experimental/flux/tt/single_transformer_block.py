@@ -41,7 +41,8 @@ class FluxSingleTransformerBlockParameters:
                 substate(state, "norm"),
                 dtype=dtype,
                 device=device,
-                weight_shape=[],
+                mesh_sharded=True,
+                weight_shape=[embedding_dim],
             ),
             time_embed=LinearParameters.from_torch(
                 substate(state, "norm.linear"),
