@@ -152,8 +152,10 @@ class FluxTransformer:
         spatial = combined[:, prompt_sequence_length:]
         del combined
 
+        spatial = self._norm_out.forward(spatial)
+
         spatial_time = self._time_embed_out.forward(ttnn.silu(time_embed))
         [scale, shift] = chunk_time(spatial_time, 2)
-        spatial = self._norm_out.forward(spatial) * (1 + scale) + shift
+        spatial = spatial * (1 + scale) + shift
 
         return self._proj_out.forward(spatial)

@@ -117,9 +117,11 @@ class FluxTransformer(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
         spatial = combined[:, prompt_embed.shape[1] :]
 
+        spatial = self.norm_out.norm(spatial)
+
         spatial_time = self.norm_out.linear(torch.nn.functional.silu(time_embed.unsqueeze(1)))
         scale, shift = torch.chunk(spatial_time, 2, dim=-1)
-        spatial = self.norm_out.norm(spatial) * (1 + scale) + shift
+        spatial = spatial * (1 + scale) + shift
 
         return self.proj_out(spatial)
 
