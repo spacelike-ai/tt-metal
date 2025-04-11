@@ -14,7 +14,7 @@ from ..tt.attention import Attention, AttentionParameters
 from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
 if TYPE_CHECKING:
-    from ..reference import FluxTransformer2DModel as FluxTransformer2DModelReference
+    from ..reference import FluxTransformer as FluxTransformerReference
     from ..reference.attention import Attention as AttentionReference
 
 
@@ -37,7 +37,7 @@ def test_attention(
     batch_size: int,
     spatial_sequence_length: int,
     prompt_sequence_length: int,
-    parent_torch_model: FluxTransformer2DModelReference,
+    parent_torch_model: FluxTransformerReference,
 ) -> None:
     separate_prompt = prompt_sequence_length != 0
 

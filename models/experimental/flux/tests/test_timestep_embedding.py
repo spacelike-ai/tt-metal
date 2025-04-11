@@ -14,7 +14,7 @@ from ..tt.timestep_embedding import CombinedTimestepTextProjEmbeddings, Combined
 from ..tt.utils import assert_quality
 
 if TYPE_CHECKING:
-    from ..reference import FluxTransformer2DModel as FluxTransformer2DModelReference
+    from ..reference import FluxTransformer as FluxTransformerReference
     from ..reference.timestep_embedding import (
         CombinedTimestepTextProjEmbeddings as CombinedTimestepTextProjEmbeddingsReference,
     )
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
 @pytest.mark.usefixtures("use_program_cache")
 def test_timestep_embedding(
-    *, mesh_device: ttnn.MeshDevice, batch_size: int, parent_torch_model: FluxTransformer2DModelReference
+    *, mesh_device: ttnn.MeshDevice, batch_size: int, parent_torch_model: FluxTransformerReference
 ) -> None:
     torch.manual_seed(0)
 

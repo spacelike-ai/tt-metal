@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class FluxTransformer2DModelParameters:
+class FluxTransformerParameters:
     x_embedder: LinearParameters
     time_text_embed: CombinedTimestepTextProjEmbeddingsParameters
     context_embedder: LinearParameters
@@ -38,7 +38,7 @@ class FluxTransformer2DModelParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.MeshDevice,
-    ) -> FluxTransformer2DModelParameters:
+    ) -> FluxTransformerParameters:
         return cls(
             x_embedder=LinearParameters.from_torch(substate(state, "x_embedder"), dtype=dtype, device=device),
             time_text_embed=CombinedTimestepTextProjEmbeddingsParameters.from_torch(
@@ -65,8 +65,8 @@ class FluxTransformer2DModelParameters:
         )
 
 
-class FluxTransformer2DModel:
-    def __init__(self, parameters: FluxTransformer2DModelParameters, *, num_attention_heads: int) -> None:
+class FluxTransformer:
+    def __init__(self, parameters: FluxTransformerParameters, *, num_attention_heads: int) -> None:
         super().__init__()
 
         self._x_embedder = Linear(parameters.x_embedder)

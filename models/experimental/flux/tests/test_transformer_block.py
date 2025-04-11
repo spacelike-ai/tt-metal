@@ -14,7 +14,7 @@ from ..tt.transformer_block import TransformerBlock, TransformerBlockParameters
 from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
 if TYPE_CHECKING:
-    from ..reference import FluxTransformer2DModel
+    from ..reference import FluxTransformer
     from ..reference.transformer_block import TransformerBlock as TransformerBlockReference
 
 
@@ -36,7 +36,7 @@ def test_transformer_block(
     batch_size: int,
     spatial_sequence_length: int,
     prompt_sequence_length: int,
-    parent_torch_model: FluxTransformer2DModel,
+    parent_torch_model: FluxTransformer,
 ) -> None:
     torch.manual_seed(0)
 

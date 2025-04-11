@@ -18,9 +18,9 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchE
 from loguru import logger
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
 
-from ..reference.transformer import FluxTransformer2DModel as FluxTransformer2DModelReference
+from ..reference.transformer import FluxTransformer as FluxTransformeReference
 from .t5_encoder import T5Encoder, T5EncoderParameters
-from .transformer import FluxTransformer2DModel, FluxTransformer2DModelParameters
+from .transformer import FluxTransformer, FluxTransformerParameters
 
 
 class FluxPipeline:
@@ -30,19 +30,19 @@ class FluxPipeline:
 
         logger.info("loading transformer...")
 
-        torch_transformer = FluxTransformer2DModelReference.from_pretrained(
+        torch_transformer = FluxTransformeReference.from_pretrained(
             checkpoint, subfolder="transformer", torch_dtype=torch.bfloat16
         )
-        assert isinstance(torch_transformer, FluxTransformer2DModelReference)
+        assert isinstance(torch_transformer, FluxTransformeReference)
 
         logger.info("creating TT-NN transformer...")
 
-        parameters = FluxTransformer2DModelParameters.from_torch(
+        parameters = FluxTransformerParameters.from_torch(
             torch_transformer.state_dict(),
             device=device,
             dtype=ttnn.bfloat8_b,
         )
-        self._tt_transformer = FluxTransformer2DModel(
+        self._tt_transformer = FluxTransformer(
             parameters, num_attention_heads=torch_transformer.config.num_attention_heads
         )
 

@@ -2,6 +2,6 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-from .transformer import FluxTransformer2DModel
+from .transformer import FluxTransformer
 
-__all__ = ["FluxTransformer2DModel"]
+__all__ = ["FluxTransformer"]

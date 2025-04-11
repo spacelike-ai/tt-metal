@@ -14,7 +14,7 @@ from ..tt.single_transformer_block import FluxSingleTransformerBlock, FluxSingle
 from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
 if TYPE_CHECKING:
-    from ..reference import FluxTransformer2DModel as FluxTransformer2DModelReference
+    from ..reference import FluxTransformer as FluxTransformerReference
     from ..reference.transformer_block import SingleTransformerBlock as SingleTransformerBlockReference
 
 
@@ -35,7 +35,7 @@ def test_single_transformer_block(
     block_index: int,
     batch_size: int,
     sequence_length: int,
-    parent_torch_model: FluxTransformer2DModelReference,
+    parent_torch_model: FluxTransformerReference,
 ) -> None:
     torch.manual_seed(0)
 

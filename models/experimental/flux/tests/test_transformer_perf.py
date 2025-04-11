@@ -10,8 +10,8 @@ import ttnn
 from loguru import logger
 from tqdm import tqdm
 
-from ..reference.transformer import FluxTransformer2DModel as FluxTransformer2DModelReference
-from ..tt.transformer import FluxTransformer2DModel, FluxTransformer2DModelParameters
+from ..reference.transformer import FluxTransformer as FluxTransformerReference
+from ..tt.transformer import FluxTransformer, FluxTransformerParameters
 from ..tt.utils import allocate_tensor_on_device_like
 
 
@@ -54,16 +54,16 @@ def test_transformer(  # noqa: PLR0915
     imagerot2 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
 
     logger.info("loading model...")
-    torch_model_bfloat16 = FluxTransformer2DModelReference.from_pretrained(
+    torch_model_bfloat16 = FluxTransformerReference.from_pretrained(
         "black-forest-labs/FLUX.1-schnell", subfolder="transformer", torch_dtype=torch.bfloat16
     )
     torch_model_bfloat16.eval()
 
     logger.info("creating TT-NN model...")
-    parameters = FluxTransformer2DModelParameters.from_torch(
+    parameters = FluxTransformerParameters.from_torch(
         torch_model_bfloat16.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
     )
-    tt_model = FluxTransformer2DModel(parameters, num_attention_heads=torch_model_bfloat16.config.num_attention_heads)
+    tt_model = FluxTransformer(parameters, num_attention_heads=torch_model_bfloat16.config.num_attention_heads)
 
     rm = ttnn.ReplicateTensorToMesh(mesh_device)
     tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=rm)

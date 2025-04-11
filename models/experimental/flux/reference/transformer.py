@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/models/transformers/transformer_flux.py
-class FluxTransformer2DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
+class FluxTransformer(ModelMixin, ConfigMixin, FromOriginalModelMixin):
     @register_to_config
     def __init__(
         self,
