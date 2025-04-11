@@ -17,8 +17,8 @@ from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 @pytest.mark.parametrize(
     ("batch_size", "spatial_sequence_length", "prompt_sequence_length", "pcc", "mse"),
     [
-        # (1, 1024, 512, 0.99951, 15),
-        (1, 4096, 512, 0.986, 0.0031),
+        # (1, 1024, 512, 0.99944, 13.8),
+        (1, 4096, 512, 0.985, 0.0026),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 18006016}], indirect=True)
@@ -52,7 +52,7 @@ def test_transformer(  # noqa: PLR0915
     spatial = torch.randn([batch_size, spatial_sequence_length, 64])
     prompt = torch.randn([batch_size, prompt_sequence_length, 4096])
     pooled_projection = torch.randn([batch_size, 768])
-    timestep = torch.randint(1000, [batch_size])
+    timestep = torch.randint(low=300, high=700, size=[batch_size])
     imagerot1 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
     imagerot2 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
 

@@ -36,7 +36,7 @@ def test_layer_norm(
         torch_model.state_dict(),
         device=mesh_device,
         dtype=ttnn.bfloat8_b,
-        mesh_sharded=mesh_device.get_num_devices() > 1,
+        mesh_sharded=True,
         weight_shape=input_shape[-1:],
     )
     tt_model = LayerNorm(parameters, eps=torch_model.eps)
