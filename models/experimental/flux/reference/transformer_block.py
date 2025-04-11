@@ -41,8 +41,6 @@ class FluxSingleTransformerBlock(torch.nn.Module):
         time_embed: torch.Tensor,
         image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        residual = combined
-
         emb = self.norm.linear(torch.nn.functional.silu(time_embed))
         shift_msa, scale_msa, gate_msa = emb.chunk(3, dim=1)
         norm_combined = self.norm.norm(combined) * (1 + scale_msa[:, None]) + shift_msa[:, None]
@@ -50,10 +48,11 @@ class FluxSingleTransformerBlock(torch.nn.Module):
         mlp_combined = self.act_mlp(self.proj_mlp(norm_combined))
         attn_output, _ = self.attn(spatial=norm_combined, image_rotary_emb=image_rotary_emb)
 
-        combined = torch.cat([attn_output, mlp_combined], dim=2)
+        additional = torch.cat([attn_output, mlp_combined], dim=2)
         gate_msa = gate_msa.unsqueeze(1)
-        combined = gate_msa * self.proj_out(combined)
-        combined = residual + combined
+        additional = gate_msa * self.proj_out(additional)
+
+        combined += additional
         if combined.dtype == torch.float16:
             combined = combined.clip(-65504, 65504)
 
