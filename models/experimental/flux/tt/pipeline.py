@@ -122,7 +122,7 @@ class FluxPipeline:
         latents_shape = (
             prompt_count * num_images_per_prompt,
             spatial_sequence_length,
-            self._num_channels_latents * 4,
+            self._num_channels_latents * 4 // self._device.get_num_devices(),
         )
 
         tt_prompt_embeds = ttnn.from_torch(
@@ -130,7 +130,7 @@ class FluxPipeline:
             device=self._device,
             layout=ttnn.TILE_LAYOUT,
             dtype=ttnn.bfloat8_b,
-            mesh_mapper=ttnn.ReplicateTensorToMesh(self._device),
+            mesh_mapper=ttnn.ShardTensorToMesh(self._device, dim=-1),
         )
         tt_pooled_prompt_embeds = ttnn.from_torch(
             pooled_prompt_embeds,
@@ -256,15 +256,22 @@ class FluxPipeline:
         ids = torch.cat((text_ids, image_ids), dim=0)
         image_rotary_emb = self._pos_embed(ids)
 
-        mm = ttnn.ReplicateTensorToMesh(self._device)
+        sharded = ttnn.ShardTensorToMesh(self._device, dim=-1)
+        unsharded = ttnn.ReplicateTensorToMesh(self._device)
 
-        tt_prompt_embeds = ttnn.from_torch(prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=mm)
-        tt_pooled_prompt_embeds = ttnn.from_torch(
-            pooled_prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=mm
+        tt_prompt_embeds = ttnn.from_torch(
+            prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=sharded
         )
-        tt_initial_latents = ttnn.from_torch(latents, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=mm)
-        tt_imagerot1 = ttnn.from_torch(image_rotary_emb[0], layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=mm)
-        tt_imagerot2 = ttnn.from_torch(image_rotary_emb[1], layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=mm)
+        tt_initial_latents = ttnn.from_torch(latents, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=sharded)
+        tt_pooled_prompt_embeds = ttnn.from_torch(
+            pooled_prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=unsharded
+        )
+        tt_imagerot1 = ttnn.from_torch(
+            image_rotary_emb[0], layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded
+        )
+        tt_imagerot2 = ttnn.from_torch(
+            image_rotary_emb[1], layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded
+        )
 
         logger.info("denoising...")
         ttnn.synchronize_device(self._device)
@@ -284,12 +291,16 @@ class FluxPipeline:
             # tt_sigma_difference = ttnn.full(
             #     [1, 1], fill_value=sigma_difference, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
             # )
-            tt_timestep = ttnn.from_torch(torch.full([1, 1], fill_value=t), dtype=ttnn.float32, mesh_mapper=mm)
+            tt_timestep = ttnn.from_torch(
+                torch.full([1, 1], fill_value=t),
+                dtype=ttnn.float32,
+                mesh_mapper=unsharded,
+            )
             tt_sigma_difference = ttnn.from_torch(
                 torch.full([1, 1], fill_value=sigma_difference),
                 layout=ttnn.TILE_LAYOUT,
                 dtype=ttnn.bfloat16,
-                mesh_mapper=mm,
+                mesh_mapper=unsharded,
             )
 
             ttnn.copy_host_to_device_tensor(tt_timestep, self._trace.timestep_input)
@@ -312,10 +323,9 @@ class FluxPipeline:
 
         image_decoding_start_time = time.time()
 
-        size = self._trace.spatial_input_output.shape[0]
         latents = ttnn.to_torch(
-            self._trace.spatial_input_output, mesh_composer=ttnn.ConcatMeshToTensor(self._device, dim=0)
-        )[:size].to(torch.float32)
+            self._trace.spatial_input_output, mesh_composer=ttnn.ConcatMeshToTensor(self._device, dim=-1)
+        ).to(torch.float32)
         latents = _unpack_latents(latents, height, width, self._vae_scale_factor)
         latents = latents / self._vae_scaling_factor + self._vae_shift_factor
 

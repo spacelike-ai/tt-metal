@@ -39,13 +39,23 @@ class FluxTransformerParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.MeshDevice,
     ) -> FluxTransformerParameters:
+        embedding_dim = state["x_embedder.weight"].shape[0]
+
         return cls(
-            x_embedder=LinearParameters.from_torch(substate(state, "x_embedder"), dtype=dtype, device=device),
+            x_embedder=LinearParameters.from_torch(
+                substate(state, "x_embedder"),
+                dtype=dtype,
+                device=device,
+                mesh_sharding_dim=0,
+            ),
             time_text_embed=CombinedTimestepTextProjEmbeddingsParameters.from_torch(
                 substate(state, "time_text_embed"), dtype=dtype, device=device
             ),
             context_embedder=LinearParameters.from_torch(
-                substate(state, "context_embedder"), dtype=dtype, device=device
+                substate(state, "context_embedder"),
+                dtype=dtype,
+                device=device,
+                mesh_sharding_dim=0,
             ),
             transformer_blocks=[
                 TransformerBlockParameters.from_torch(s, dtype=dtype, device=device)
@@ -58,10 +68,23 @@ class FluxTransformerParameters:
                 for i, s in enumerate(indexed_substates(state, "single_transformer_blocks"))
             ],
             time_embed_out=LinearParameters.from_torch(
-                substate(state, "norm_out.linear"), dtype=dtype, device=device, unsqueeze_bias=True
+                substate(state, "norm_out.linear"),
+                dtype=dtype,
+                device=device,
+                unsqueeze_bias=True,
+                mesh_sharding_dim=1,
+                chunks=2,
             ),
-            norm_out=LayerNormParameters.from_torch(substate(state, "norm_out.norm"), dtype=dtype, device=device),
-            proj_out=LinearParameters.from_torch(substate(state, "proj_out"), dtype=dtype, device=device),
+            norm_out=LayerNormParameters.from_torch(
+                substate(state, "norm_out.norm"),
+                dtype=dtype,
+                device=device,
+                mesh_sharded=True,
+                weight_shape=[embedding_dim],
+            ),
+            proj_out=LinearParameters.from_torch(
+                substate(state, "proj_out"), dtype=dtype, device=device, mesh_sharding_dim=0
+            ),
         )
 
 
@@ -92,7 +115,6 @@ class FluxTransformer:
         timestep: ttnn.Tensor,
         image_rotary_emb: tuple[ttnn.Tensor, ttnn.Tensor],
     ) -> ttnn.Tensor:
-        height, width = list(spatial.shape)[-2:]
         prompt_sequence_length = prompt.shape[1]
 
         spatial = self._x_embedder.forward(spatial)

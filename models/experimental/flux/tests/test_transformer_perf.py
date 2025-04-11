@@ -65,17 +65,19 @@ def test_transformer(  # noqa: PLR0915
     )
     tt_model = FluxTransformer(parameters, num_attention_heads=torch_model_bfloat16.config.num_attention_heads)
 
-    rm = ttnn.ReplicateTensorToMesh(mesh_device)
-    tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=rm)
-    tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=rm)
+    sharded = ttnn.ShardTensorToMesh(mesh_device, dim=-1)
+    unsharded = ttnn.ReplicateTensorToMesh(mesh_device)
+
+    tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=sharded)
+    tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=sharded)
     tt_pooled_projection_host = ttnn.from_torch(
-        pooled_projection, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=rm
+        pooled_projection, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=unsharded
     )
     tt_timestep_host = ttnn.from_torch(
-        timestep.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=rm
+        timestep.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded
     )
-    tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=rm)
-    tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=rm)
+    tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded)
+    tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded)
 
     tt_spatial = allocate_tensor_on_device_like(tt_spatial_host, device=mesh_device)
     tt_prompt = allocate_tensor_on_device_like(tt_prompt_host, device=mesh_device)
