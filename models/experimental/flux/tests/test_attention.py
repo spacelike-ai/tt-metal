@@ -19,14 +19,14 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.parametrize(
-    ("block_index", "batch_size", "spatial_sequence_length", "prompt_sequence_length"),
+    ("block_index", "spatial_sequence_length", "prompt_sequence_length"),
     [
-        (0, 1, 4096, 512),
-        (0, 1, 4096 + 512, 0),
+        (0, 4096, 512),
+        (0, 4096 + 512, 0),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"trace_region_size": 517120}], indirect=True)
-@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
+@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2), (2, 2)], indirect=True)
 @pytest.mark.usefixtures("use_program_cache")
 @pytest.mark.parametrize("use_tracing", [False])  # Tracing currently causes a mesh device to hang.
 def test_attention(
@@ -34,12 +34,12 @@ def test_attention(
     mesh_device: ttnn.MeshDevice,
     use_tracing: bool,
     block_index: int,
-    batch_size: int,
     spatial_sequence_length: int,
     prompt_sequence_length: int,
     parent_torch_model: FluxTransformerReference,
 ) -> None:
     separate_prompt = prompt_sequence_length != 0
+    batch_size, _ = mesh_device.shape
 
     torch.manual_seed(0)
 
@@ -57,7 +57,7 @@ def test_attention(
     imagerot1 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
     imagerot2 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
 
-    sharded = ttnn.ShardTensorToMesh(mesh_device, dim=-1)
+    sharded = ttnn.ShardTensor2dMesh(mesh_device, tuple(mesh_device.shape), (0, -1))
     unsharded = ttnn.ReplicateTensorToMesh(mesh_device)
 
     tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=sharded)
@@ -113,20 +113,8 @@ def test_attention(
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
         tt_spatial_output, tt_prompt_output = tt_model.forward(**model_args)
 
-    tt_spatial_output_torch = ttnn.to_torch(
-        tt_spatial_output,
-        mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=-1),
-    )
-    tt_prompt_output_torch = (
-        ttnn.to_torch(
-            tt_prompt_output,
-            mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=-1),
-        )
-        if separate_prompt
-        else None
-    )
+    composer = ttnn.ConcatMesh2dToTensor(mesh_device, tuple(mesh_device.shape), (0, -1))
 
-    assert_quality(spatial_output, tt_spatial_output_torch, pcc=0.9939, mse=0.0003)
-
+    assert_quality(spatial_output, tt_spatial_output, pcc=0.9939, mse=0.0003, mesh_composer=composer)
     if separate_prompt:
-        assert_quality(prompt_output, tt_prompt_output_torch, pcc=0.9939, mse=0.02)
+        assert_quality(prompt_output, tt_prompt_output, pcc=0.9939, mse=0.02, mesh_composer=composer)

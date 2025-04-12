@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import torch
 import ttnn
 
+from . import utils
 from .utils import from_torch_fast
 
 
@@ -42,9 +43,10 @@ class RmsNorm:
 
 @dataclass
 class LayerNormParameters:
+    device: ttnn.MeshDevice
     weight: ttnn.Tensor | None = None
     bias: ttnn.Tensor | None = None
-    mesh_sharded: bool = False
+    distributed: bool = False
 
     @classmethod
     def from_torch(
@@ -53,15 +55,16 @@ class LayerNormParameters:
         *,
         dtype: ttnn.DataType | None = None,
         device: ttnn.MeshDevice,
-        mesh_sharded: bool = False,
+        distributed: bool = True,
         weight_shape: list[int] | None = None,
     ) -> LayerNormParameters:
-        mesh_sharded = mesh_sharded and device.get_num_devices() > 1
+        _, mesh_width = device.shape
+        distributed = distributed and mesh_width > 1
 
         weight = state.get("weight")
         bias = state.get("bias")
 
-        if mesh_sharded:
+        if distributed:
             # ttnn.layer_norm_post_all_gather currently requires weight and bias
             if weight is None:
                 assert weight_shape is not None, "weight_shape is required when weight is missing"
@@ -69,12 +72,13 @@ class LayerNormParameters:
             if bias is None:
                 bias = torch.zeros_like(weight)
 
-            weight = weight.reshape([-1, 32 * device.get_num_devices()])
-            bias = bias.reshape([-1, 32 * device.get_num_devices()])
+            _, mesh_width = device.shape
+            weight = weight.reshape([-1, 32 * mesh_width])
+            bias = bias.reshape([-1, 32 * mesh_width])
 
-        mesh_mapper = ttnn.ShardTensorToMesh(device, dim=-1) if mesh_sharded else None
-        layout = ttnn.ROW_MAJOR_LAYOUT if mesh_sharded else ttnn.TILE_LAYOUT
-        if mesh_sharded and dtype != ttnn.float32:
+        mesh_mapper = ttnn.ShardTensor2dMesh(device, tuple(device.shape), (None, -1)) if distributed else None
+        layout = ttnn.ROW_MAJOR_LAYOUT if distributed else ttnn.TILE_LAYOUT
+        if distributed and dtype != ttnn.float32:
             dtype = ttnn.bfloat16
 
         return cls(
@@ -96,7 +100,8 @@ class LayerNormParameters:
             )
             if bias is not None
             else None,
-            mesh_sharded=mesh_sharded,
+            distributed=distributed,
+            device=device,
         )
 
 
@@ -105,9 +110,10 @@ class LayerNorm:
         super().__init__()
 
         self._eps = eps
-        self._mesh_sharded = parameters.mesh_sharded
+        self._distributed = parameters.distributed
         self._weight = parameters.weight
         self._bias = parameters.bias
+        self._device = parameters.device
 
     def forward(
         self,
@@ -116,7 +122,7 @@ class LayerNorm:
         program_config: ttnn.ProgramConfig | None = None,
         compute_kernel_config: ttnn.DeviceComputeKernelConfig | None = None,
     ) -> ttnn.Tensor:
-        if not self._mesh_sharded:
+        if not self._distributed:
             return ttnn.layer_norm(
                 x,
                 weight=self._weight,
@@ -137,7 +143,16 @@ class LayerNorm:
             compute_kernel_config=compute_kernel_config,
             dtype=ttnn.bfloat16,
         )
-        stats = ttnn.all_gather(stats, dim=-1, memory_config=memory_config)
+
+        _, mesh_width = self._device.shape
+        stats = utils.all_gather(
+            stats,
+            dim=-1,
+            cluster_axis=1 if mesh_width != 1 else None,
+            mesh_device=self._device,
+            # all_gather currently requires linear topology when specifying a cluster axis
+            topology=ttnn.Topology.Linear if mesh_width != 1 else ttnn.Topology.Ring,
+        )
 
         x = ttnn.layer_norm_post_all_gather(
             x,

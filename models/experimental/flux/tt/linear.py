@@ -5,15 +5,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
+import torch
 import ttnn
 
 from . import utils
 from .utils import from_torch_fast
-
-if TYPE_CHECKING:
-    import torch
 
 
 @dataclass
@@ -36,6 +33,8 @@ class LinearParameters:
         mesh_sharding_dim: int | None = None,
         chunks: int | None = None,
     ) -> LinearParameters:
+        _, mesh_width = device.shape
+
         weight = state["weight"]
         assert len(weight.shape) == 2, "weight should be a rank two tensor"
 
@@ -46,11 +45,11 @@ class LinearParameters:
             bias = None
 
         if chunks is not None:
-            nd = device.get_num_devices()
             _, in_dim = weight.shape
 
-            weight = weight.reshape([chunks, nd, -1, in_dim]).permute([1, 0, 2, 3]).reshape([-1, in_dim])
-            bias = bias.reshape([chunks, nd, -1]).permute([1, 0, 2]).reshape([-1]) if bias is not None else None
+            n = mesh_width
+            weight = weight.reshape([chunks, n, -1, in_dim]).permute([1, 0, 2, 3]).reshape([-1, in_dim])
+            bias = bias.reshape([chunks, n, -1]).permute([1, 0, 2]).reshape([-1]) if bias is not None else None
 
         if unsqueeze_bias:
             # TODO: Remove this workaround for issue https://github.com/tenstorrent/tt-metal/issues/16599
@@ -62,10 +61,10 @@ class LinearParameters:
             weight_mm = bias_mm = ttnn.ReplicateTensorToMesh(device)
             output_sharding = False
         elif mesh_sharding_dim in [1, -1]:
-            weight_mm = bias_mm = ttnn.ShardTensorToMesh(device, -1)
+            weight_mm = bias_mm = ttnn.ShardTensor2dMesh(device, tuple(device.shape), (None, -1))
             output_sharding = False
         elif mesh_sharding_dim in [0, -2]:
-            weight_mm = ttnn.ShardTensorToMesh(device, -2)
+            weight_mm = ttnn.ShardTensor2dMesh(device, tuple(device.shape), (None, -2))
             bias_mm = _ShardBias(device)
             output_sharding = True
         else:
@@ -93,7 +92,7 @@ class LinearParameters:
             else None,
             on_host=on_host,
             device=device,
-            reduce_scatter=output_sharding and device.get_num_devices() > 1,
+            reduce_scatter=output_sharding and mesh_width > 1,
         )
 
     @property
@@ -146,7 +145,16 @@ class Linear:
         )
 
         if self._reduce_scatter:
-            x = utils.reduce_scatter(x, dim=-1, math_op=ttnn.ReduceType.Sum)
+            _, mesh_width = self._device.shape
+            x = utils.reduce_scatter(
+                x,
+                dim=-1,
+                math_op=ttnn.ReduceType.Sum,
+                cluster_axis=1 if mesh_width != 1 else None,
+                mesh_device=self._device,
+                # reduce_scatter currently requires linear topology when specifying a cluster axis
+                topology=ttnn.Topology.Linear if mesh_width != 1 else ttnn.Topology.Ring,
+            )
 
         return x
 
@@ -166,12 +174,16 @@ class _ShardBias(ttnn.TensorToMesh):
         super().__init__(mesh_device)
 
     def map(self, tensor: torch.Tensor) -> dict[int, ttnn.Tensor]:
-        import torch
+        mesh_height, mesh_width = self.mesh_device.shape
 
-        return [tensor] + [torch.zeros_like(tensor)] * (self.mesh_device.get_num_devices() - 1)
+        zeros = torch.zeros_like(tensor)
+        return ([tensor] + [zeros] * (mesh_width - 1)) * mesh_height
 
     def config(self) -> dict[str, str]:
+        mesh_height, mesh_width = self.mesh_device.shape
+
         return {
-            "strategy": "shard",
-            "shard_dim": "0",
+            "strategy": "shard_2d",
+            "mesh_shape_y": str(mesh_height),
+            "mesh_shape_x": str(mesh_width),
         }

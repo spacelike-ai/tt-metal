@@ -19,13 +19,13 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.parametrize(
-    ("block_index", "batch_size", "sequence_length"),
+    ("block_index", "sequence_length"),
     [
-        (0, 1, 4096 + 512),
+        (0, 4096 + 512),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"trace_region_size": 716800}], indirect=True)
-@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
+@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2), (2, 2)], indirect=True)
 @pytest.mark.usefixtures("use_program_cache")
 @pytest.mark.parametrize("use_tracing", [False])  # Tracing currently causes a mesh device to hang.
 def test_single_transformer_block(
@@ -33,10 +33,11 @@ def test_single_transformer_block(
     mesh_device: ttnn.MeshDevice,
     use_tracing: bool,
     block_index: int,
-    batch_size: int,
     sequence_length: int,
     parent_torch_model: FluxTransformerReference,
 ) -> None:
+    batch_size, _ = mesh_device.shape
+
     torch.manual_seed(0)
 
     torch_model: SingleTransformerBlockReference = parent_torch_model.single_transformer_blocks[block_index].to(
@@ -55,12 +56,13 @@ def test_single_transformer_block(
     imagerot1 = torch.randn([sequence_length, 128], dtype=torch.float32)
     imagerot2 = torch.randn([sequence_length, 128], dtype=torch.float32)
 
-    sharded = ttnn.ShardTensorToMesh(mesh_device, dim=-1)
+    sharded = ttnn.ShardTensor2dMesh(mesh_device, tuple(mesh_device.shape), (0, -1))
+    batch_sharded = ttnn.ShardTensor2dMesh(mesh_device, tuple(mesh_device.shape), (0, None))
     unsharded = ttnn.ReplicateTensorToMesh(mesh_device)
 
     tt_combined_host = ttnn.from_torch(combined, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=sharded)
     tt_time_host = ttnn.from_torch(
-        time.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=unsharded
+        time.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=batch_sharded
     )
     tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded)
     tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded)
@@ -105,9 +107,5 @@ def test_single_transformer_block(
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
         tt_combined_output = tt_model.forward(**model_args)
 
-    tt_combined_output_torch = ttnn.to_torch(
-        tt_combined_output,
-        mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=-1),
-    )
-
-    assert_quality(combined_output, tt_combined_output_torch, pcc=0.99943, mse=2000)
+    composer = ttnn.ConcatMesh2dToTensor(mesh_device, tuple(mesh_device.shape), (0, -1))
+    assert_quality(combined_output, tt_combined_output, pcc=0.99943, mse=2000, mesh_composer=composer)

@@ -16,10 +16,10 @@ from ..tt.utils import allocate_tensor_on_device_like
 
 
 @pytest.mark.parametrize(
-    ("batch_size", "spatial_sequence_length", "prompt_sequence_length"),
+    ("spatial_sequence_length", "prompt_sequence_length"),
     [
-        # (1, 1024, 512),
-        (1, 4096, 512),
+        # (1024, 512),
+        (4096, 512),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 18006016}], indirect=True)
@@ -31,6 +31,7 @@ from ..tt.utils import allocate_tensor_on_device_like
         ((1, 1), False),
         # Tracing on multiple devices currently causes hangs.
         ((1, 2), False),
+        ((2, 2), False),
     ],
     indirect=["mesh_device"],
 )
@@ -38,10 +39,11 @@ def test_transformer(  # noqa: PLR0915
     *,
     mesh_device: ttnn.MeshDevice,
     use_tracing: bool,
-    batch_size: int,
     prompt_sequence_length: int,
     spatial_sequence_length: int,
 ) -> None:
+    batch_size, _ = mesh_device.shape
+
     torch.manual_seed(0)
 
     iterations = 10
@@ -65,16 +67,17 @@ def test_transformer(  # noqa: PLR0915
     )
     tt_model = FluxTransformer(parameters, num_attention_heads=torch_model_bfloat16.config.num_attention_heads)
 
-    sharded = ttnn.ShardTensorToMesh(mesh_device, dim=-1)
+    sharded = ttnn.ShardTensor2dMesh(mesh_device, tuple(mesh_device.shape), (0, -1))
+    batch_sharded = ttnn.ShardTensor2dMesh(mesh_device, tuple(mesh_device.shape), (0, None))
     unsharded = ttnn.ReplicateTensorToMesh(mesh_device)
 
     tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=sharded)
     tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=sharded)
     tt_pooled_projection_host = ttnn.from_torch(
-        pooled_projection, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=unsharded
+        pooled_projection, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=batch_sharded
     )
     tt_timestep_host = ttnn.from_torch(
-        timestep.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded
+        timestep.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=batch_sharded
     )
     tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded)
     tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded)

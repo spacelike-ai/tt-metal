@@ -31,7 +31,6 @@ class TransformerBlockParameters:
     spatial_norm_2: LayerNormParameters
     prompt_ff: FeedForwardParameters | None
     spatial_ff: FeedForwardParameters
-    gather: bool
 
     @classmethod
     def from_torch(
@@ -42,6 +41,7 @@ class TransformerBlockParameters:
         device: ttnn.MeshDevice,
         linear_on_host: bool = False,
     ) -> TransformerBlockParameters:
+        _, mesh_width = device.shape
         embedding_dim = state["norm1.linear.weight"].shape[1]
 
         def norm(state: dict[str, torch.Tensor]) -> LayerNormParameters:
@@ -49,7 +49,6 @@ class TransformerBlockParameters:
                 state,
                 dtype=dtype,
                 device=device,
-                mesh_sharded=True,
                 weight_shape=[embedding_dim],
             )
 
@@ -92,7 +91,6 @@ class TransformerBlockParameters:
             ),
             spatial_ff=ff(substate(state, "ff")),
             prompt_ff=ff(substate(state, "ff_context")) if has_substate(state, "ff_context") else None,
-            gather=device.get_num_devices() > 1,
         )
 
 
@@ -122,8 +120,6 @@ class TransformerBlock:
         self._prompt_time_embed = Linear(parameters.prompt_time_embed)
 
         self._context_pre_only = self._prompt_ff is None
-
-        self._gather = parameters.gather
 
     def _spatial_attn_block(
         self,

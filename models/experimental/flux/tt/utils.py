@@ -90,30 +90,80 @@ def assert_quality(
         assert mse_calculated <= mse, f"MSE = {mse_calculated:.6f} <= {mse:.6f}"
 
 
+def all_gather(
+    x: ttnn.Tensor,
+    dim: int,
+    *,
+    cluster_axis: int | None = None,
+    mesh_device: ttnn.MeshDevice | None = None,
+    num_links: int = 1,
+    topology: ttnn.Topology = ttnn.Topology.Ring,
+    memory_config: ttnn.MemoryConfig | None = None,
+) -> ttnn.Tensor:
+    assert cluster_axis is None or mesh_device is not None, "cluster_axis requires mesh_device to be set"
+
+    if cluster_axis is not None:
+        return ttnn.all_gather(
+            x,
+            dim,
+            cluster_axis,
+            mesh_device,
+            num_links=num_links,
+            topology=topology,
+            memory_config=memory_config,
+        )
+
+    return ttnn.all_gather(
+        x,
+        dim,
+        num_links=num_links,
+        topology=topology,
+        memory_config=memory_config,
+    )
+
+
 def reduce_scatter(
     x: ttnn.Tensor,
     dim: int,
     math_op: ttnn.ReduceType,
     *,
+    cluster_axis: int | None = None,
+    mesh_device: ttnn.MeshDevice | None = None,
     num_links: int = 1,
+    topology: ttnn.Topology = ttnn.Topology.Ring,
     memory_config: ttnn.MemoryConfig | None = None,
 ) -> ttnn.Tensor:
+    assert cluster_axis is None or mesh_device is not None, "cluster_axis requires mesh_device to be set"
+
     if memory_config is None:
         memory_config = x.memory_config()
 
-    # ttnn.reduce_scatter currently supports rank 4 tensors only
+    # ttnn.reduce_scatter currently supports tensors of rank 4 only
     rank = len(x.shape)
     if rank < 4:
         shape = [1] * (4 - rank) + list(x.shape)
         x = ttnn.reshape(x, shape)
 
-    x = ttnn.reduce_scatter(
-        x,
-        dim=dim,
-        math_op=math_op,
-        num_links=num_links,
-        memory_config=memory_config,
-    )
+    if cluster_axis is not None:
+        x = ttnn.reduce_scatter(
+            x,
+            dim,
+            cluster_axis,
+            mesh_device,
+            math_op,
+            num_links=num_links,
+            topology=topology,
+            memory_config=memory_config,
+        )
+    else:
+        x = ttnn.reduce_scatter(
+            x,
+            dim,
+            math_op,
+            num_links=num_links,
+            topology=topology,
+            memory_config=memory_config,
+        )
 
     if rank < 4:
         shape = list(x.shape)[4 - rank :]

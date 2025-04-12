@@ -39,6 +39,7 @@ class FluxTransformerParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.MeshDevice,
     ) -> FluxTransformerParameters:
+        _, mesh_width = device.shape
         embedding_dim = state["x_embedder.weight"].shape[0]
 
         return cls(
@@ -63,7 +64,7 @@ class FluxTransformerParameters:
             ],
             single_transformer_blocks=[
                 FluxSingleTransformerBlockParameters.from_torch(
-                    s, dtype=dtype, device=device, linear_on_host=i > 20 and device.get_num_devices() == 1
+                    s, dtype=dtype, device=device, linear_on_host=i > 20 and mesh_width == 1
                 )
                 for i, s in enumerate(indexed_substates(state, "single_transformer_blocks"))
             ],
@@ -79,7 +80,6 @@ class FluxTransformerParameters:
                 substate(state, "norm_out.norm"),
                 dtype=dtype,
                 device=device,
-                mesh_sharded=True,
                 weight_shape=[embedding_dim],
             ),
             proj_out=LinearParameters.from_torch(

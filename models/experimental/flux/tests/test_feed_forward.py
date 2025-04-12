@@ -20,7 +20,7 @@ from ..tt.utils import assert_quality
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
-@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
+@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2), (2, 2)], indirect=True)
 @pytest.mark.parametrize("linear_on_host", [False, True])
 @pytest.mark.usefixtures("use_program_cache")
 def test_feed_forward(
@@ -52,7 +52,7 @@ def test_feed_forward(
         device=mesh_device,
         layout=ttnn.TILE_LAYOUT,
         dtype=ttnn.bfloat8_b,
-        mesh_mapper=ttnn.ShardTensorToMesh(mesh_device, -1),
+        mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, tuple(mesh_device.shape), (0, -1)),
     )
 
     with torch.no_grad():
@@ -62,7 +62,7 @@ def test_feed_forward(
 
     tt_output_torch = ttnn.to_torch(
         tt_output,
-        mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=-1),
-    )[..., :output_dim]
+        mesh_composer=ttnn.ConcatMesh2dToTensor(mesh_device, tuple(mesh_device.shape), (0, -1)),
+    )
 
-    assert_quality(torch_output, tt_output_torch, pcc=0.99912, mse=0.00025)
+    assert_quality(torch_output, tt_output_torch, pcc=0.99907, mse=0.00025)

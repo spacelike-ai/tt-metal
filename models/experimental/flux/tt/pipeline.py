@@ -26,7 +26,6 @@ from .transformer import FluxTransformer, FluxTransformerParameters
 class FluxPipeline:
     def __init__(self, *, checkpoint: str, device: ttnn.MeshDevice, use_torch_encoder: bool = True) -> None:
         self._device = device
-        self._device_count = device.get_num_devices()
 
         logger.info("loading transformer...")
 
@@ -119,10 +118,11 @@ class FluxPipeline:
         latents_width = width // self._vae_scale_factor
         spatial_sequence_length = latents_width * latents_height
 
+        _, mesh_width = self._device.shape
         latents_shape = (
             prompt_count * num_images_per_prompt,
             spatial_sequence_length,
-            self._num_channels_latents * 4 // self._device.get_num_devices(),
+            self._num_channels_latents * 4 // mesh_width,
         )
 
         tt_prompt_embeds = ttnn.from_torch(
@@ -130,14 +130,14 @@ class FluxPipeline:
             device=self._device,
             layout=ttnn.TILE_LAYOUT,
             dtype=ttnn.bfloat8_b,
-            mesh_mapper=ttnn.ShardTensorToMesh(self._device, dim=-1),
+            mesh_mapper=ttnn.ShardTensor2dMesh(self._device, tuple(self._device.shape), (0, -1)),
         )
         tt_pooled_prompt_embeds = ttnn.from_torch(
             pooled_prompt_embeds,
             device=self._device,
             layout=ttnn.TILE_LAYOUT,
             dtype=ttnn.bfloat16,
-            mesh_mapper=ttnn.ReplicateTensorToMesh(self._device),
+            mesh_mapper=ttnn.ShardTensor2dMesh(self._device, tuple(self._device.shape), (0, None)),
         )
         tt_timestep = ttnn.allocate_tensor_on_device([1, 1], ttnn.float32, ttnn.ROW_MAJOR_LAYOUT, self._device)
         tt_sigma_difference = ttnn.allocate_tensor_on_device([1, 1], ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
@@ -256,7 +256,8 @@ class FluxPipeline:
         ids = torch.cat((text_ids, image_ids), dim=0)
         image_rotary_emb = self._pos_embed(ids)
 
-        sharded = ttnn.ShardTensorToMesh(self._device, dim=-1)
+        sharded = ttnn.ShardTensor2dMesh(self._device, tuple(self._device.shape), (0, -1))
+        batch_sharded = ttnn.ShardTensor2dMesh(self._device, tuple(self._device.shape), (0, None))
         unsharded = ttnn.ReplicateTensorToMesh(self._device)
 
         tt_prompt_embeds = ttnn.from_torch(
@@ -264,7 +265,7 @@ class FluxPipeline:
         )
         tt_initial_latents = ttnn.from_torch(latents, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=sharded)
         tt_pooled_prompt_embeds = ttnn.from_torch(
-            pooled_prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=unsharded
+            pooled_prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=batch_sharded
         )
         tt_imagerot1 = ttnn.from_torch(
             image_rotary_emb[0], layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded

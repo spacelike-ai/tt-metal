@@ -70,16 +70,7 @@ class CombinedTimestepTextProjEmbeddings:
     def forward(self, *, timestep: ttnn.Tensor, pooled_projection: ttnn.Tensor) -> ttnn.Tensor:
         assert timestep.dtype == ttnn.float32
 
-        batch_size = timestep.shape[0]
-
-        # ttnn.repeat currently does not work with mesh devices
-        assert batch_size == 1
-        time_proj_factor = self._time_proj_factor
-        # time_proj_factor = ttnn.repeat(self._time_proj_factor, ttnn.Shape([batch_size, 1]))
-
-        time_proj_factor = ttnn.to_layout(time_proj_factor, ttnn.TILE_LAYOUT)
-
-        emb = timestep * time_proj_factor
+        emb = timestep * self._time_proj_factor
         c = ttnn.cos(emb)
         s = ttnn.sin(emb)
 
@@ -102,7 +93,12 @@ class CombinedTimestepTextProjEmbeddings:
         exponent = exponent / half_dim
         factor = torch.exp(exponent).unsqueeze(0)
 
-        return ttnn.from_torch(factor, device=device, mesh_mapper=ttnn.ReplicateTensorToMesh(device))
+        return ttnn.from_torch(
+            factor,
+            device=device,
+            layout=ttnn.TILE_LAYOUT,
+            mesh_mapper=ttnn.ReplicateTensorToMesh(device),
+        )
 
 
 class _TimestepEmbedding:

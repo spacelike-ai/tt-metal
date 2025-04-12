@@ -15,10 +15,10 @@ from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
 
 @pytest.mark.parametrize(
-    ("batch_size", "spatial_sequence_length", "prompt_sequence_length", "pcc", "mse"),
+    ("spatial_sequence_length", "prompt_sequence_length", "pcc", "mse"),
     [
-        # (1, 1024, 512, 0.99944, 13.8),
-        (1, 4096, 512, 0.985, 0.0026),
+        # (1024, 512, 0.99944, 13.8),
+        (4096, 512, 0.985, 0.0032),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 18006016}], indirect=True)
@@ -30,6 +30,7 @@ from ..tt.utils import allocate_tensor_on_device_like, assert_quality
         ((1, 1), False),
         # Tracing on multiple devices currently causes hangs.
         ((1, 2), False),
+        ((2, 2), False),
     ],
     indirect=["mesh_device"],
 )
@@ -37,12 +38,13 @@ def test_transformer(  # noqa: PLR0915
     *,
     mesh_device: ttnn.MeshDevice,
     use_tracing: bool,
-    batch_size: int,
     prompt_sequence_length: int,
     spatial_sequence_length: int,
     pcc: float,
     mse: float,
 ) -> None:
+    batch_size, _ = mesh_device.shape
+
     torch.manual_seed(0)
 
     logger.info("loading model...")
@@ -52,7 +54,7 @@ def test_transformer(  # noqa: PLR0915
     spatial = torch.randn([batch_size, spatial_sequence_length, 64])
     prompt = torch.randn([batch_size, prompt_sequence_length, 4096])
     pooled_projection = torch.randn([batch_size, 768])
-    timestep = torch.randint(low=300, high=700, size=[batch_size])
+    timestep = torch.full([batch_size], fill_value=500, dtype=torch.float32)
     imagerot1 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
     imagerot2 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
 
@@ -80,16 +82,17 @@ def test_transformer(  # noqa: PLR0915
     )
     tt_model = FluxTransformer(parameters, num_attention_heads=torch_model_bfloat16.config.num_attention_heads)
 
-    sharded = ttnn.ShardTensorToMesh(mesh_device, dim=-1)
+    sharded = ttnn.ShardTensor2dMesh(mesh_device, tuple(mesh_device.shape), (0, -1))
+    batch_sharded = ttnn.ShardTensor2dMesh(mesh_device, tuple(mesh_device.shape), (0, None))
     unsharded = ttnn.ReplicateTensorToMesh(mesh_device)
 
     tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=sharded)
     tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=sharded)
     tt_pooled_projection_host = ttnn.from_torch(
-        pooled_projection, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=unsharded
+        pooled_projection, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=batch_sharded
     )
     tt_timestep_host = ttnn.from_torch(
-        timestep.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded
+        timestep.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=batch_sharded
     )
     tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded)
     tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded)
@@ -144,9 +147,5 @@ def test_transformer(  # noqa: PLR0915
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
         tt_output = tt_model.forward(**model_args)
 
-    tt_output_torch = ttnn.to_torch(
-        tt_output,
-        mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=-1),
-    )
-
-    assert_quality(torch_output, tt_output_torch, pcc=pcc, mse=mse)
+    composer = ttnn.ConcatMesh2dToTensor(mesh_device, tuple(mesh_device.shape), (0, -1))
+    assert_quality(torch_output, tt_output, pcc=pcc, mse=mse, mesh_composer=composer)

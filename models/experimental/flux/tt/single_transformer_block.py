@@ -33,6 +33,7 @@ class FluxSingleTransformerBlockParameters:
         device: ttnn.MeshDevice,
         linear_on_host: bool = False,
     ) -> FluxSingleTransformerBlockParameters:
+        _, mesh_width = device.shape
         embedding_dim = state["norm.linear.weight"].shape[1]
 
         return cls(
@@ -41,7 +42,6 @@ class FluxSingleTransformerBlockParameters:
                 substate(state, "norm"),
                 dtype=dtype,
                 device=device,
-                mesh_sharded=True,
                 weight_shape=[embedding_dim],
             ),
             time_embed=LinearParameters.from_torch(
@@ -63,7 +63,7 @@ class FluxSingleTransformerBlockParameters:
                 _re_fuse_proj_out_parameters(
                     substate(state, "proj_out"),
                     embedding_dim=embedding_dim,
-                    device_count=device.get_num_devices(),
+                    device_count=mesh_width,
                 ),
                 dtype=dtype,
                 device=device,

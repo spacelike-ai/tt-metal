@@ -20,10 +20,12 @@ def test_flux(
     *,
     mesh_device: ttnn.MeshDevice,
 ) -> None:
+    _, mesh_width = mesh_device.shape
+
     pipeline = FluxPipeline(
         checkpoint="black-forest-labs/FLUX.1-schnell",
         device=mesh_device,
-        use_torch_encoder=mesh_device.get_num_devices() == 1,
+        use_torch_encoder=mesh_width == 1,
     )
 
     pipeline.prepare(width=1024, height=1024, prompt_count=1, num_images_per_prompt=1)

@@ -21,7 +21,7 @@ class AttentionPartParameters:
     qkv_proj: LinearParameters
     norm_q: RmsNormParameters
     norm_k: RmsNormParameters
-    device_count: int
+    mesh_width: int
     out_proj: LinearParameters | None
 
 
@@ -38,6 +38,8 @@ class AttentionParameters:
         dtype: ttnn.DataType | None = None,
         device: ttnn.Device,
     ) -> AttentionParameters:
+        _, mesh_width = device.shape
+
         return cls(
             spatial=AttentionPartParameters(
                 qkv_proj=LinearParameters.from_torch(
@@ -59,7 +61,7 @@ class AttentionParameters:
                     if has_substate(state, "to_out.0")
                     else None
                 ),
-                device_count=device.get_num_devices(),
+                mesh_width=mesh_width,
             ),
             prompt=AttentionPartParameters(
                 qkv_proj=(
@@ -87,7 +89,7 @@ class AttentionParameters:
                     if has_substate(state, "add_q_proj")
                     else None
                 ),
-                device_count=device.get_num_devices(),
+                mesh_width=mesh_width,
             )
             if has_substate(state, "add_q_proj")
             else None,
@@ -106,7 +108,7 @@ class AttentionPart:
         self._norm_q = RmsNorm(parameters.norm_q, eps=eps)
         self._norm_k = RmsNorm(parameters.norm_k, eps=eps)
 
-        self._device_count = parameters.device_count
+        self._mesh_width = parameters.mesh_width
 
     def qkv(self, x: ttnn.Tensor, *, num_heads: int) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
         x = self._opt.prepare_qkv_projection(x)
@@ -117,7 +119,7 @@ class AttentionPart:
 
         q, k, v = ttnn.transformer.split_query_key_value_and_split_heads(
             x,
-            num_heads=num_heads // self._device_count,
+            num_heads=num_heads // self._mesh_width,
             transpose_key=False,
         )
         del x
