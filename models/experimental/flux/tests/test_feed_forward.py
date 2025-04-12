@@ -41,6 +41,7 @@ def test_feed_forward(
         device=mesh_device,
         linear_on_host=linear_on_host,
         dtype=ttnn.bfloat8_b,
+        mesh_sharded_input=True,
     )
     tt_model = FeedForward(parameters)
 
@@ -51,6 +52,7 @@ def test_feed_forward(
         device=mesh_device,
         layout=ttnn.TILE_LAYOUT,
         dtype=ttnn.bfloat8_b,
+        mesh_mapper=ttnn.ShardTensorToMesh(mesh_device, -1),
     )
 
     with torch.no_grad():
