@@ -8,14 +8,23 @@ import ttnn
 from models.experimental.flux.tt import FluxPipeline
 
 
-def main() -> None:
-    device_count = ttnn.get_num_devices()
+def run(
+    *,
+    mesh_width: int,
+    mesh_height: int,
+    num_images_per_prompt: int,
+    use_torch_encoder: bool,
+) -> None:
+    assert num_images_per_prompt % mesh_height == 0
 
-    mesh_shape = ttnn.MeshShape(1, min(2, device_count))
-    use_torch_encoder = device_count == 1
+    # ruff: noqa: T201
+    print(f"mesh_width = {mesh_width}")
+    print(f"mesh_height = {mesh_height}")
+    print(f"num_images_per_prompt = {num_images_per_prompt}")
+    print(f"use_torch_encoder = {use_torch_encoder}")
 
     mesh_device = ttnn.open_mesh_device(
-        mesh_shape,
+        ttnn.MeshShape(mesh_height, mesh_width),
         l1_small_size=8192,
         trace_region_size=15210496,
     )
@@ -28,7 +37,12 @@ def main() -> None:
         use_torch_encoder=use_torch_encoder,
     )
 
-    pipeline.prepare(width=1024, height=1024, prompt_count=1, num_images_per_prompt=1)
+    pipeline.prepare(
+        width=1024,
+        height=1024,
+        prompt_count=1,
+        num_images_per_prompt=num_images_per_prompt,
+    )
 
     prompt = "A luxury sports car."
 
@@ -46,7 +60,23 @@ def main() -> None:
             seed=0,
         )
 
-        images[0].save("flux_1024.png")
+        for i, image in enumerate(images, start=1):
+            image.save(f"flux_1024_{i}.png")
+
+
+def main() -> None:
+    device_count = ttnn.get_num_devices()
+
+    mesh_width = 1 if device_count == 1 else 2
+    mesh_height = device_count // mesh_width
+
+    run(
+        mesh_width=mesh_width,
+        mesh_height=mesh_height,
+        num_images_per_prompt=mesh_height,
+        # use_torch_encoder=mesh_width == 1,
+        use_torch_encoder=True,
+    )
 
 
 if __name__ == "__main__":

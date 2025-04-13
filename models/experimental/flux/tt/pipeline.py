@@ -118,13 +118,18 @@ class FluxPipeline:
         latents_width = width // self._vae_scale_factor
         spatial_sequence_length = latents_width * latents_height
 
-        _, mesh_width = self._device.shape
-        latents_shape = (
-            prompt_count * num_images_per_prompt,
-            spatial_sequence_length,
-            self._num_channels_latents * 4 // mesh_width,
-        )
+        mesh_height, mesh_width = self._device.shape
 
+        tt_latents = ttnn.allocate_tensor_on_device(
+            [
+                prompt_count * num_images_per_prompt // mesh_height,
+                spatial_sequence_length,
+                self._num_channels_latents * 4 // mesh_width,
+            ],
+            ttnn.bfloat16,
+            ttnn.TILE_LAYOUT,
+            self._device,
+        )
         tt_prompt_embeds = ttnn.from_torch(
             prompt_embeds,
             device=self._device,
@@ -139,9 +144,8 @@ class FluxPipeline:
             dtype=ttnn.bfloat16,
             mesh_mapper=ttnn.ShardTensor2dMesh(self._device, tuple(self._device.shape), (0, None)),
         )
-        tt_timestep = ttnn.allocate_tensor_on_device([1, 1], ttnn.float32, ttnn.ROW_MAJOR_LAYOUT, self._device)
+        tt_timestep = ttnn.allocate_tensor_on_device([1, 1], ttnn.float32, ttnn.TILE_LAYOUT, self._device)
         tt_sigma_difference = ttnn.allocate_tensor_on_device([1, 1], ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
-        tt_latents = ttnn.allocate_tensor_on_device(latents_shape, ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
         tt_imagerot1 = ttnn.allocate_tensor_on_device(
             [spatial_sequence_length + max_t5_sequence_length, 128], ttnn.float32, ttnn.TILE_LAYOUT, self._device
         )
@@ -294,6 +298,7 @@ class FluxPipeline:
             # )
             tt_timestep = ttnn.from_torch(
                 torch.full([1, 1], fill_value=t),
+                layout=ttnn.TILE_LAYOUT,
                 dtype=ttnn.float32,
                 mesh_mapper=unsharded,
             )
@@ -320,24 +325,23 @@ class FluxPipeline:
         ttnn.synchronize_device(self._device)
         denoising_end_time = time.time()
 
-        logger.info("decoding image...")
+        logger.info("decoding images...")
 
         image_decoding_start_time = time.time()
 
-        latents = ttnn.to_torch(
-            self._trace.spatial_input_output, mesh_composer=ttnn.ConcatMeshToTensor(self._device, dim=-1)
-        ).to(torch.float32)
+        composer = ttnn.ConcatMesh2dToTensor(self._device, tuple(self._device.shape), (0, -1))
+        latents = ttnn.to_torch(self._trace.spatial_input_output, mesh_composer=composer).to(torch.float32)
         latents = _unpack_latents(latents, height, width, self._vae_scale_factor)
         latents = latents / self._vae_scaling_factor + self._vae_shift_factor
 
         with torch.no_grad():
-            image = self._vae.decoder(latents)
-            image = self._image_processor.postprocess(image, output_type="pt")
-            assert isinstance(image, torch.Tensor)
+            images = self._vae.decoder(latents)
+            images = self._image_processor.postprocess(images, output_type="pt")
+            assert isinstance(images, torch.Tensor)
 
         image_decoding_end_time = time.time()
 
-        output = self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
+        output = self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(images))
 
         end_time = time.time()
 
@@ -358,11 +362,6 @@ class FluxPipeline:
         sigma_difference: ttnn.Tensor,
         image_rotary_emb: tuple[ttnn.Tensor, ttnn.Tensor],
     ) -> None:
-        batch_size = latents.shape[0]
-
-        timestep = ttnn.repeat(timestep, ttnn.Shape([batch_size, 1]))
-        timestep = ttnn.to_layout(timestep, ttnn.TILE_LAYOUT)
-
         noise_pred = self._tt_transformer.forward(
             spatial=latents,
             prompt=prompt_embeds,

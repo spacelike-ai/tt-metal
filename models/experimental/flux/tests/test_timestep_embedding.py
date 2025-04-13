@@ -34,16 +34,18 @@ def test_timestep_embedding(*, mesh_device: ttnn.MeshDevice, parent_torch_model:
     )
     tt_model = CombinedTimestepTextProjEmbeddings(parameters)
 
-    timestep = torch.full([batch_size], fill_value=500, dtype=torch.float32)
+    timestep = torch.tensor([500], dtype=torch.float32)
     pooled_projection = torch.randn((batch_size, 768))
 
+    unsharded = ttnn.ReplicateTensorToMesh(mesh_device)
     batch_sharded = ttnn.ShardTensor2dMesh(mesh_device, tuple(mesh_device.shape), (0, None))
+
     tt_timestep = from_torch_fast(
         timestep.unsqueeze(1),
         device=mesh_device,
         layout=ttnn.TILE_LAYOUT,
         dtype=ttnn.float32,
-        mesh_mapper=batch_sharded,
+        mesh_mapper=unsharded,
     )
     tt_pooled_projection = from_torch_fast(
         pooled_projection,
@@ -62,4 +64,4 @@ def test_timestep_embedding(*, mesh_device: ttnn.MeshDevice, parent_torch_model:
         mesh_composer=ttnn.ConcatMesh2dToTensor(mesh_device, tuple(mesh_device.shape), (0, -1)),
     )[..., : torch_output.shape[-1]]
 
-    assert_quality(torch_output, tt_output_torch, pcc=0.99945, mse=0.37)
+    assert_quality(torch_output, tt_output_torch, pcc=0.9998, mse=0.1)

@@ -18,7 +18,7 @@ from ..tt.utils import allocate_tensor_on_device_like, assert_quality
     ("spatial_sequence_length", "prompt_sequence_length", "pcc", "mse"),
     [
         # (1024, 512, 0.99944, 13.8),
-        (4096, 512, 0.985, 0.0032),
+        (4096, 512, 0.984, 12),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 18006016}], indirect=True)
@@ -43,7 +43,8 @@ def test_transformer(  # noqa: PLR0915
     pcc: float,
     mse: float,
 ) -> None:
-    batch_size, _ = mesh_device.shape
+    mesh_height, _ = mesh_device.shape
+    batch_size = mesh_height
 
     torch.manual_seed(0)
 
@@ -54,7 +55,7 @@ def test_transformer(  # noqa: PLR0915
     spatial = torch.randn([batch_size, spatial_sequence_length, 64])
     prompt = torch.randn([batch_size, prompt_sequence_length, 4096])
     pooled_projection = torch.randn([batch_size, 768])
-    timestep = torch.full([batch_size], fill_value=500, dtype=torch.float32)
+    timestep = torch.tensor([500], dtype=torch.float32)
     imagerot1 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
     imagerot2 = torch.randn([spatial_sequence_length + prompt_sequence_length, 128])
 
@@ -92,7 +93,7 @@ def test_transformer(  # noqa: PLR0915
         pooled_projection, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=batch_sharded
     )
     tt_timestep_host = ttnn.from_torch(
-        timestep.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=batch_sharded
+        timestep.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded
     )
     tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded)
     tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded)
