@@ -70,8 +70,10 @@ class CombinedTimestepTextProjEmbeddings:
     def forward(self, *, timestep: ttnn.Tensor, pooled_projection: ttnn.Tensor) -> ttnn.Tensor:
         assert timestep.dtype == ttnn.float32
 
-        # The result is not correct when using normal multiplication here. Fortunately, the shape of
-        # the tensors involved is such that matrix multiplication is equivalent.
+        # The result is not correct when using normal multiplication with a timestep that contains
+        # more than one entry. Fortunately, the shape of the tensors involved is such that matrix
+        # multiplication is equivalent. We currently  use timestep tensors with only one entry, so
+        # this does not really affect us.
         emb = timestep @ self._time_proj_factor
         timesteps_proj = ttnn.concat([ttnn.cos(emb), ttnn.sin(emb)], dim=-1)
         timesteps_proj = ttnn.clone(timesteps_proj, dtype=pooled_projection.dtype)
