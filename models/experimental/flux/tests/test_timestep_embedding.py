@@ -34,7 +34,7 @@ def test_timestep_embedding(*, mesh_device: ttnn.MeshDevice, parent_torch_model:
     )
     tt_model = CombinedTimestepTextProjEmbeddings(parameters)
 
-    timestep = torch.full([batch_size], fill_value=500)
+    timestep = torch.full([batch_size], fill_value=500, dtype=torch.float32)
     pooled_projection = torch.randn((batch_size, 768))
 
     batch_sharded = ttnn.ShardTensor2dMesh(mesh_device, tuple(mesh_device.shape), (0, None))

@@ -62,8 +62,8 @@ class CombinedTimestepTextProjEmbeddings:
 
         device = parameters.device
 
-        self._timestep_embedder = _TimestepEmbedding(parameters.timestep_embedder)
-        self._text_embedder = _TimestepEmbedding(parameters.text_embedder)
+        self._timestep_embedder = _Embedding(parameters.timestep_embedder)
+        self._text_embedder = _Embedding(parameters.text_embedder)
 
         self._time_proj_factor = self._create_time_proj_factor(num_channels=256, device=device)
 
@@ -71,10 +71,7 @@ class CombinedTimestepTextProjEmbeddings:
         assert timestep.dtype == ttnn.float32
 
         emb = timestep * self._time_proj_factor
-        c = ttnn.cos(emb)
-        s = ttnn.sin(emb)
-
-        timesteps_proj = ttnn.concat([c, s], dim=-1)
+        timesteps_proj = ttnn.concat([ttnn.cos(emb), ttnn.sin(emb)], dim=-1)
         timesteps_proj = ttnn.clone(timesteps_proj, dtype=pooled_projection.dtype)
 
         time_embed = self._timestep_embedder.forward(timesteps_proj)
@@ -101,7 +98,7 @@ class CombinedTimestepTextProjEmbeddings:
         )
 
 
-class _TimestepEmbedding:
+class _Embedding:
     def __init__(self, parameters: EmbeddingParameters) -> None:
         super().__init__()
 
