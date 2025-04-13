@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 import torch
 import ttnn
+from loguru import logger
 
 from ..tt.transformer_block import TransformerBlock, TransformerBlockParameters
 from ..tt.utils import allocate_tensor_on_device_like, assert_quality
@@ -43,6 +44,7 @@ def test_transformer_block(
 
     torch_model: TransformerBlockReference = parent_torch_model.transformer_blocks[block_index].to(torch.float32)
 
+    logger.debug("creating TT-NN model...")
     parameters = TransformerBlockParameters.from_torch(
         torch_model.state_dict(), device=mesh_device, dtype=ttnn.bfloat8_b
     )
@@ -88,14 +90,17 @@ def test_transformer_block(
 
     if use_tracing:
         # cache
+        logger.debug("caching...")
         tt_model.forward(**model_args)
 
         # trace
+        logger.debug("tracing...")
         tid = ttnn.begin_trace_capture(mesh_device)
         tt_spatial_output, tt_prompt_output = tt_model.forward(**model_args)
         ttnn.end_trace_capture(mesh_device, tid)
 
         # execute
+        logger.debug("executing...")
         ttnn.copy_host_to_device_tensor(tt_spatial_host, tt_spatial)
         ttnn.copy_host_to_device_tensor(tt_prompt_host, tt_prompt)
         ttnn.copy_host_to_device_tensor(tt_time_host, tt_time)
@@ -104,9 +109,11 @@ def test_transformer_block(
         ttnn.execute_trace(mesh_device, tid)
     else:
         # compile
+        logger.debug("compiling...")
         tt_model.forward(**model_args)
 
         # execute
+        logger.debug("executing...")
         ttnn.copy_host_to_device_tensor(tt_spatial_host, tt_spatial)
         ttnn.copy_host_to_device_tensor(tt_prompt_host, tt_prompt)
         ttnn.copy_host_to_device_tensor(tt_time_host, tt_time)
