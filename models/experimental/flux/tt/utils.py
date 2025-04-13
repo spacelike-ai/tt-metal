@@ -4,10 +4,11 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 import ttnn
 from loguru import logger
-from models.utility_functions import comp_pcc
 
 
 def allocate_tensor_on_device_like(
@@ -80,14 +81,23 @@ def assert_quality(
     a = a.to(torch.float32)
     b = b.to(torch.float32)
 
-    _, pcc_calculated = comp_pcc(a, b)
+    cov = torch.cov(torch.stack([a.flatten(), b.flatten()])).numpy()
+
+    std_a = math.sqrt(cov[0, 0])
+    std_b = math.sqrt(cov[1, 1])
+    pcc_calculated = cov[0, 1] / (std_a * std_b)
+    beta = cov[0, 1] / cov[0, 0]
+    mean_a = a.mean().item()
+    mean_b = b.mean().item()
+
     mse_calculated = torch.nn.functional.mse_loss(a, b).item()
 
-    logger.info(f"PCC = {pcc_calculated * 100:.4f} %, MSE = {mse_calculated:.6f}")
+    logger.info(f"μ₁ = {mean_a:.3g}, μ₂ = {mean_b:.3g}, σ₁ = {std_a:.3g}, σ₂ = {std_b:.3g}")
+    logger.info(f"PCC = {pcc_calculated * 100:.4f} %, MSE = {mse_calculated:.3g}, β = {beta * 100:.0f} %")
     if pcc is not None:
         assert pcc_calculated >= pcc, f"PCC = {pcc_calculated * 100:.4f} % >= {pcc * 100:.4f} %"
     if mse is not None:
-        assert mse_calculated <= mse, f"MSE = {mse_calculated:.6f} <= {mse:.6f}"
+        assert mse_calculated <= mse, f"MSE = {mse_calculated:.3g} <= {mse:.3g}"
 
 
 def all_gather(
