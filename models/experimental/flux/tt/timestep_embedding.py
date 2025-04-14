@@ -110,6 +110,5 @@ class _Embedding:
         self._linear_2 = Linear(parameters.linear_2)
 
     def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        x = self._linear_1.forward(x)
-        x = ttnn.silu(x)
+        x = self._linear_1.forward(x, activation="silu")
         return self._linear_2.forward(x)

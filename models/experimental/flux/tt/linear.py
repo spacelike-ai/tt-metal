@@ -142,6 +142,7 @@ class Linear:
         core_grid: ttnn.CoreGrid | None = None,
         output_tile: list[int] | None = None,
         dtype: ttnn.DataType | None = None,
+        activation: str | None = None,
     ) -> ttnn.Tensor:
         msg = f"last value in input shape {list(x.shape)} should be equal to {self._in_channels}"
         assert x.shape[-1] == self._in_channels, msg
@@ -162,6 +163,7 @@ class Linear:
             core_grid=core_grid,
             output_tile=output_tile,
             dtype=dtype,
+            activation=activation,
         )
 
         if self._reduce_scatter:

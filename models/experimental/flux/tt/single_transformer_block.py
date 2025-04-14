@@ -93,14 +93,17 @@ class FluxSingleTransformerBlock:
         combined: ttnn.Tensor,
         time_embed: ttnn.Tensor,
         image_rotary_emb: tuple[ttnn.Tensor, ttnn.Tensor] | None = None,
+        skip_time_embed_activation: bool = False,
     ) -> ttnn.Tensor:
-        t = ttnn.silu(time_embed, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        time = self._time_embed.forward(t)
+        if not skip_time_embed_activation:
+            time_embed = ttnn.silu(time_embed)
+        time = self._time_embed.forward(time_embed)
 
         shift_msa, scale_msa, gate_msa = chunk_time(time, 3)
         norm_combined = self._norm.forward(combined) * (1 + scale_msa) + shift_msa
 
         mlp_combined = self._proj_mlp.forward(norm_combined)
+        # Fusing the activation function currently gives worse PCC
         ttnn.gelu(mlp_combined, output_tensor=mlp_combined, fast_and_approximate_mode=False)
 
         # PCC of attn seems a bit low

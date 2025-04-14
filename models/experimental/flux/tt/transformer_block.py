@@ -151,12 +151,20 @@ class TransformerBlock:
         prompt: ttnn.Tensor,
         time_embed: ttnn.Tensor,
         image_rotary_emb: tuple[ttnn.Tensor, ttnn.Tensor] | None = None,
+        skip_time_embed_activation: bool = False,
     ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
-        t = ttnn.silu(time_embed, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        if not skip_time_embed_activation:
+            time_embed = ttnn.silu(time_embed)
 
-        spatial_time = self._spatial_time_embed.forward(t, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        prompt_time = self._prompt_time_embed.forward(t, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        del t
+        spatial_time = self._spatial_time_embed.forward(
+            time_embed,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        prompt_time = self._prompt_time_embed.forward(
+            time_embed,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        del time_embed
 
         [
             spatial_shift_dual_attn,

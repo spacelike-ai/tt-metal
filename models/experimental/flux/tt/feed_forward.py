@@ -57,6 +57,7 @@ class FeedForward:
         self.out_proj = Linear(parameters.out_proj)
 
     def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        # Fusing the activation function results in bad PCC.
         x = self.in_proj.forward(x)
         # Turning on fast_and_approximate_mode leads to big changes in the generated image.
         # The image quality might still be okay.

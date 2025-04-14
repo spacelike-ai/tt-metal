@@ -117,8 +117,10 @@ class FluxTransformer:
     ) -> ttnn.Tensor:
         prompt_sequence_length = prompt.shape[1]
 
-        spatial = self._x_embedder.forward(spatial)
         time_embed = self._time_text_embed.forward(timestep=timestep, pooled_projection=pooled_projection)
+        ttnn.silu(time_embed, output_tensor=time_embed)
+
+        spatial = self._x_embedder.forward(spatial)
         prompt = self._context_embedder.forward(prompt)
 
         time_embed = time_embed.reshape([time_embed.shape[0], 1, time_embed.shape[1]])
@@ -129,6 +131,7 @@ class FluxTransformer:
                 prompt=prompt,
                 time_embed=time_embed,
                 image_rotary_emb=image_rotary_emb,
+                skip_time_embed_activation=True,
             )
 
             if i % 6 == 0:
@@ -144,6 +147,7 @@ class FluxTransformer:
                 combined=combined,
                 time_embed=time_embed,
                 image_rotary_emb=image_rotary_emb,
+                skip_time_embed_activation=True,
             )
 
             if i % 6 == 0:
@@ -154,7 +158,7 @@ class FluxTransformer:
 
         spatial = self._norm_out.forward(spatial)
 
-        spatial_time = self._time_embed_out.forward(ttnn.silu(time_embed))
+        spatial_time = self._time_embed_out.forward(time_embed)
         [scale, shift] = chunk_time(spatial_time, 2)
         spatial = spatial * (1 + scale) + shift
 
