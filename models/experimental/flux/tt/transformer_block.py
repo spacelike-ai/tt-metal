@@ -13,7 +13,7 @@ from .attention import Attention, AttentionParameters
 from .feed_forward import FeedForward, FeedForwardParameters
 from .linear import Linear, LinearParameters
 from .normalization import LayerNorm, LayerNormParameters
-from .substate import has_substate, substate
+from .substate import substate
 
 if TYPE_CHECKING:
     import torch
@@ -22,14 +22,13 @@ if TYPE_CHECKING:
 @dataclass
 class TransformerBlockParameters:
     dual_attn: AttentionParameters
-    spatial_attn: AttentionParameters | None
     prompt_time_embed: LinearParameters
     spatial_time_embed: LinearParameters
     prompt_norm_1: LayerNormParameters
     prompt_norm_2: LayerNormParameters
     spatial_norm_1: LayerNormParameters
     spatial_norm_2: LayerNormParameters
-    prompt_ff: FeedForwardParameters | None
+    prompt_ff: FeedForwardParameters
     spatial_ff: FeedForwardParameters
 
     @classmethod
@@ -41,7 +40,6 @@ class TransformerBlockParameters:
         device: ttnn.MeshDevice,
         linear_on_host: bool = False,
     ) -> TransformerBlockParameters:
-        _, mesh_width = device.shape
         embedding_dim = state["norm1.linear.weight"].shape[1]
 
         def norm(state: dict[str, torch.Tensor]) -> LayerNormParameters:
@@ -74,23 +72,14 @@ class TransformerBlockParameters:
 
         return cls(
             dual_attn=AttentionParameters.from_torch(substate(state, "attn"), dtype=dtype, device=device),
-            spatial_attn=AttentionParameters.from_torch(substate(state, "attn2"), dtype=dtype, device=device)
-            if has_substate(state, "attn2")
-            else None,
             spatial_norm_1=norm(substate(state, "norm1.norm")),
             spatial_norm_2=norm(substate(state, "norm2")),
             prompt_norm_1=norm(substate(state, "norm1_context.norm")),
             prompt_norm_2=norm({}),
-            spatial_time_embed=linear(
-                substate(state, "norm1.linear"),
-                chunks=9 if has_substate(state, "attn2") else 6,
-            ),
-            prompt_time_embed=linear(
-                substate(state, "norm1_context.linear"),
-                chunks=6 if has_substate(state, "ff_context") else 2,
-            ),
+            spatial_time_embed=linear(substate(state, "norm1.linear"), chunks=6),
+            prompt_time_embed=linear(substate(state, "norm1_context.linear"), chunks=6),
             spatial_ff=ff(substate(state, "ff")),
-            prompt_ff=ff(substate(state, "ff_context")) if has_substate(state, "ff_context") else None,
+            prompt_ff=ff(substate(state, "ff_context")),
         )
 
 
@@ -104,9 +93,6 @@ class TransformerBlock:
         eps = 1e-6
 
         self._dual_attn = Attention(parameters.dual_attn, num_heads=num_heads)
-        self._spatial_attn = (
-            Attention(parameters.spatial_attn, num_heads=num_heads) if parameters.spatial_attn is not None else None
-        )
 
         self._spatial_norm_1 = LayerNorm(parameters.spatial_norm_1, eps=eps)
         self._spatial_norm_2 = LayerNorm(parameters.spatial_norm_2, eps=eps)
@@ -114,29 +100,10 @@ class TransformerBlock:
         self._prompt_norm_2 = LayerNorm(parameters.prompt_norm_2, eps=eps)
 
         self._spatial_ff = FeedForward(parameters.spatial_ff)
-        self._prompt_ff = FeedForward(parameters.prompt_ff) if parameters.prompt_ff is not None else None
+        self._prompt_ff = FeedForward(parameters.prompt_ff)
 
         self._spatial_time_embed = Linear(parameters.spatial_time_embed)
         self._prompt_time_embed = Linear(parameters.prompt_time_embed)
-
-        self._context_pre_only = self._prompt_ff is None
-
-    def _spatial_attn_block(
-        self,
-        inp: ttnn.Tensor,
-        *,
-        gate: ttnn.Tensor,
-        scale: ttnn.Tensor,
-        shift: ttnn.Tensor,
-        image_rotary_emb: tuple[ttnn.Tensor, ttnn.Tensor] | None,
-    ) -> ttnn.Tensor:
-        assert self._spatial_attn is not None
-
-        scaled = inp * (1 + scale) + shift
-        attn, _ = self._spatial_attn.forward(spatial=scaled, image_rotary_emb=image_rotary_emb)
-        del scaled, image_rotary_emb
-
-        return gate * attn
 
     def _dual_attn_block(
         self,
@@ -174,8 +141,6 @@ class TransformerBlock:
     def _prompt_ff_block(
         self, inp: ttnn.Tensor, *, gate: ttnn.Tensor, scale: ttnn.Tensor, shift: ttnn.Tensor
     ) -> ttnn.Tensor:
-        assert self._prompt_ff is not None
-
         scaled = inp * (1 + scale) + shift
         return gate * self._prompt_ff.forward(scaled)
 
@@ -193,51 +158,23 @@ class TransformerBlock:
         prompt_time = self._prompt_time_embed.forward(t, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         del t
 
-        if self._spatial_attn is not None:  # TODO: branch needed?
-            [
-                spatial_shift_dual_attn,
-                spatial_scale_dual_attn,
-                spatial_gate_dual_attn,
-                spatial_shift_ff,
-                spatial_scale_ff,
-                spatial_gate_ff,
-                spatial_shift_attn,
-                spatial_scale_attn,
-                spatial_gate_attn,
-            ] = chunk_time(spatial_time, 9)
-        else:
-            [
-                spatial_shift_dual_attn,
-                spatial_scale_dual_attn,
-                spatial_gate_dual_attn,
-                spatial_shift_ff,
-                spatial_scale_ff,
-                spatial_gate_ff,
-            ] = chunk_time(spatial_time, 6)
+        [
+            spatial_shift_dual_attn,
+            spatial_scale_dual_attn,
+            spatial_gate_dual_attn,
+            spatial_shift_ff,
+            spatial_scale_ff,
+            spatial_gate_ff,
+        ] = chunk_time(spatial_time, 6)
 
-            spatial_gate_attn = None
-            spatial_shift_attn = None
-            spatial_scale_attn = None
-
-        if self._context_pre_only:  # TODO: branch needed?
-            [
-                prompt_scale_attn,
-                prompt_shift_attn,
-            ] = chunk_time(prompt_time, 2)
-
-            prompt_gate_attn = None
-            prompt_shift_ff = None
-            prompt_scale_ff = None
-            prompt_gate_ff = None
-        else:
-            [
-                prompt_shift_attn,
-                prompt_scale_attn,
-                prompt_gate_attn,
-                prompt_shift_ff,
-                prompt_scale_ff,
-                prompt_gate_ff,
-            ] = chunk_time(prompt_time, 6)
+        [
+            prompt_shift_attn,
+            prompt_scale_attn,
+            prompt_gate_attn,
+            prompt_shift_ff,
+            prompt_scale_ff,
+            prompt_gate_ff,
+        ] = chunk_time(prompt_time, 6)
 
         spatial_normed = self._spatial_norm_1.forward(spatial)
         prompt_normed = self._prompt_norm_1.forward(prompt)
@@ -269,25 +206,6 @@ class TransformerBlock:
         spatial += spatial_attn
         del spatial_attn
 
-        if self._spatial_attn is not None:  # TODO: branch needed?
-            assert spatial_gate_attn is not None
-            assert spatial_scale_attn is not None
-            assert spatial_shift_attn is not None
-
-            spatial += self._spatial_attn_block(
-                spatial_normed,
-                gate=spatial_gate_attn,
-                scale=spatial_scale_attn,
-                shift=spatial_shift_attn,
-                image_rotary_emb=image_rotary_emb,
-            )
-            del (
-                spatial_normed,
-                spatial_gate_attn,
-                spatial_scale_attn,
-                spatial_shift_attn,
-            )
-
         spatial_normed = self._spatial_norm_2.forward(spatial)
 
         spatial_normed = ttnn.clone(spatial_normed, dtype=ttnn.bfloat8_b)
@@ -301,9 +219,6 @@ class TransformerBlock:
             spatial_scale_ff,
             spatial_shift_ff,
         )
-
-        if self._context_pre_only:
-            return spatial, None
 
         assert prompt_scale_ff is not None
         assert prompt_shift_ff is not None
