@@ -349,9 +349,8 @@ std::pair<string, string> get_op_init_and_func_default(UnaryOpType op_type, std:
         case UnaryOpType::NEG:
             op_init_and_name = {"negative_tile_init();", fmt::format("negative_tile({});", idst)};
             break;
-        case UnaryOpType::INTERLEAVED_COMPLEX_ROTATE:
-            op_init_and_name = {
-                "interleaved_complex_rotate_tile_init();", fmt::format("interleaved_complex_rotate_tile({});", idst)};
+        case UnaryOpType::ALT_COMPLEX_ROTATE90:
+            op_init_and_name = {"alt_complex_rotate90_tile_init();", fmt::format("alt_complex_rotate90_tile({});", idst)};
             break;
         case UnaryOpType::MISH: op_init_and_name = {}; break;
         default: TT_THROW("Undefined non-parametrized op type {}", op_type);
@@ -417,8 +416,8 @@ UnaryWithParam string_to_unary_with_param(const std::string& name) {
         return UnaryWithParam(UnaryOpType::SQUARE);
     } else if (name == "softplus") {
         return UnaryWithParam(UnaryOpType::SOFTPLUS);
-    } else if (name == "interleaved_complex_rotate") {
-        return UnaryWithParam(UnaryOpType::INTERLEAVED_COMPLEX_ROTATE);
+    } else if (name == "alt_complex_rotate90") {
+        return UnaryWithParam(UnaryOpType::ALT_COMPLEX_ROTATE90);
     }
     TT_THROW("Unknown unary op: {}", name);
 }

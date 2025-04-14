@@ -91,8 +91,8 @@ enum class UnaryOpType {
     DROPOUT,
     FILL,
     PRELU_SFPU,
-    INTERLEAVED_COMPLEX_ROTATE,
     ZERO_POINT,
+    ALT_COMPLEX_ROTATE90,
     MISH,
 };
 
