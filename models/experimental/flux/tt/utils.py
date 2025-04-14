@@ -41,13 +41,7 @@ def from_torch_fast(
     if conversion_device is None or layout is None or layout == ttnn.ROW_MAJOR_LAYOUT:
         return ttnn.from_torch(t, device=device, layout=layout, dtype=dtype, mesh_mapper=mesh_mapper)
 
-    try:
-        tensor = ttnn.from_torch(t, device=conversion_device, mesh_mapper=mesh_mapper)
-    except RuntimeError as e:
-        # https://github.com/tenstorrent/tt-metal/issues/16861
-        if "TODO: add support for multi-paged buffer with page size > 64KB" in str(e):
-            return ttnn.from_torch(t, device=device, layout=layout, dtype=dtype, mesh_mapper=mesh_mapper)
-        raise
+    tensor = ttnn.from_torch(t, device=conversion_device, mesh_mapper=mesh_mapper)
 
     if tensor.shape[-2] == 32 and t.shape[-2] == 1:
         # Work around the fact that the shape is erroneously set to the padded shape under certain conditions.
