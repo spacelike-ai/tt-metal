@@ -6,10 +6,7 @@ ignore = [
     "COM812",  # clashes with formatter
     "ISC001",  # may conflict with formatter
     "D10",     # allow missing documentation
-    "D203",    # incompatible with D211
-    "D212",    # incompatible with D213
     "ERA",     # allow commented out code
-    "D",       # skip documentation for now
     "PD",      # gives false positives
     "S101",    # allow asserts
     "TID252",  # allow relative imports
@@ -17,3 +14,6 @@ ignore = [
     "TD",      # allow any todos
     "PLR2004", # allow magic constants
 ]
+
+[lint.pydocstyle]
+convention = "google"

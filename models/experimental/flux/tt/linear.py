@@ -15,6 +15,8 @@ from .utils import from_torch_fast
 
 @dataclass
 class LinearParameters:
+    """A container for the parameters of a linear layer."""
+
     weight: ttnn.Tensor
     bias: ttnn.Tensor | None
     on_host: bool
@@ -33,6 +35,24 @@ class LinearParameters:
         mesh_sharding_dim: int | None = None,
         chunks: int | None = None,
     ) -> LinearParameters:
+        """Creates a LinearParameters instance from a torch state dictionary.
+
+        This method converts torch tensors to ttnn tensors and adapts them for use as linear layer
+        parameters.
+
+        `mesh_sharding_dim` can have three possible values: A value of 0 means that the weight
+        matrix will be sharded over its input dimension. In this case, the input tensor is required
+        to be sharded along its last dimension. The output tensor will be sharded over its last
+        dimension as well. A value of 1 means that the weight matrix will be sharded along its
+        output dimension. This value requires the input tensor to be replicated over the mesh. The
+        output tensor will be sharded over its last dimension. A value of None means that no
+        sharding of the weight matrix is performed.
+
+        Sharding of the weight matrix and output tensor is performed in the second dimension of the
+        mesh grid. Sharding of the input tensor is expected to be the same. In addition, input
+        tensors can be sharded in the first dimension of the mesh grid, which will be preserved by
+        the linear operation.
+        """
         _, mesh_width = device.shape
 
         weight = state["weight"]
@@ -160,7 +180,8 @@ class Linear:
 
 
 class _ShardBias(ttnn.TensorToMesh):
-    """
+    """A mesh mapper for sharding the bias of a linear operation.
+
     This mesh mapper is intended for sharding the bias of a linear operation on the first dimension.
     A single device receive the bias as is, while the other ones receive zero tensors of the same
     shape so that the bias is not added multiple times after gathering.
