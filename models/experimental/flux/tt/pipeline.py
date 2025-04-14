@@ -477,23 +477,22 @@ def _get_t5_prompt_embeds(
 
     if isinstance(text_encoder, T5Encoder):
         tt_text_input_ids = ttnn.from_torch(
-            text_input_ids,
+            text_input_ids.repeat(num_images_per_prompt, 1),
             device=device,
             layout=ttnn.TILE_LAYOUT,
             dtype=ttnn.bfloat16,
-            mesh_mapper=ttnn.ReplicateTensorToMesh(device),
+            mesh_mapper=ttnn.ShardTensor2dMesh(device, tuple(device.shape), (0, None)),
         )
         tt_prompt_embeds = text_encoder.forward(tt_text_input_ids)
-        prompt_embeds = ttnn.to_torch(tt_prompt_embeds, mesh_composer=ttnn.ConcatMeshToTensor(device, dim=0))[
-            : text_input_ids.shape[0]
-        ]
+        prompt_embeds = ttnn.to_torch(
+            tt_prompt_embeds,
+            mesh_composer=ttnn.ConcatMesh2dToTensor(device, tuple(device.shape), (0, -1)),
+        )
     else:
         prompt_embeds = text_encoder.forward(text_input_ids)[0]
+        prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
 
     _, seq_len, _ = prompt_embeds.shape
-
-    # duplicate text embeddings and attention mask for each generation per prompt, using mps friendly method
-    prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
     return prompt_embeds.view(prompt_count * num_images_per_prompt, seq_len, -1)
 
 

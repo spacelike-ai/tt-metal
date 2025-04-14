@@ -76,8 +76,7 @@ def main() -> None:
         mesh_width=mesh_width,
         mesh_height=mesh_height,
         num_images_per_prompt=mesh_height,
-        # use_torch_encoder=mesh_width == 1,
-        use_torch_encoder=True,
+        use_torch_encoder=mesh_width == 1,
     )
 
 

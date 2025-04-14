@@ -34,8 +34,7 @@ class T5EncoderParameters:
     blocks: list[T5BlockParameters]
     norm: T5LayerNorm
     attention_bias: torch.Tensor
-    device: ttnn.Device | ttnn.MeshDevice
-    gather: bool
+    device: ttnn.MeshDevice
 
     @classmethod
     def from_torch(
@@ -43,15 +42,15 @@ class T5EncoderParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device | ttnn.MeshDevice,
+        device: ttnn.MeshDevice,
     ) -> T5EncoderParameters:
         return cls(
-            token_embedding=ttnn.from_torch(
+            token_embedding=from_torch_fast(
                 state["encoder.embed_tokens.weight"],
                 dtype=dtype,
                 device=device,
                 layout=ttnn.TILE_LAYOUT,
-                mesh_mapper=ttnn.ShardTensorToMesh(device, dim=-1),
+                mesh_mapper=ttnn.ShardTensor2dMesh(device, tuple(device.shape), (None, -1)),
             ),
             blocks=[
                 T5BlockParameters.from_torch(s, dtype=dtype, device=device)
@@ -62,7 +61,6 @@ class T5EncoderParameters:
             ),
             attention_bias=state["encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"],
             device=device,
-            gather=device.get_num_devices() > 1,
         )
 
 
@@ -87,7 +85,6 @@ class T5Encoder:
         self._relative_attention_max_distance = relative_attention_max_distance
 
         self._device = parameters.device
-        self._gather = parameters.gather
 
     def forward(self, input_ids: ttnn.Tensor) -> ttnn.Tensor:
         _batch_size, seq_length = input_ids.shape
@@ -96,8 +93,6 @@ class T5Encoder:
         # https://github.com/tenstorrent/tt-metal/issues/17643
         input_ids = ttnn.to_layout(input_ids, ttnn.ROW_MAJOR_LAYOUT)
         inputs_embeds = ttnn.embedding(input_ids, self._token_embedding, layout=ttnn.TILE_LAYOUT)
-        if self._gather:
-            inputs_embeds = ttnn.all_gather(inputs_embeds, dim=-1)
 
         position_bias = _compute_bias(
             seq_length=seq_length,
@@ -125,7 +120,7 @@ class T5BlockParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device | ttnn.MeshDevice,
+        device: ttnn.MeshDevice,
     ) -> T5BlockParameters:
         return cls(
             attention=T5LayerSelfAttentionParameters.from_torch(substate(state, "layer.0"), dtype=dtype, device=device),
@@ -156,7 +151,7 @@ class T5LayerSelfAttentionParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device | ttnn.MeshDevice,
+        device: ttnn.MeshDevice,
     ) -> T5LayerSelfAttentionParameters:
         return cls(
             attention=T5AttentionParameters.from_torch(substate(state, "SelfAttention"), dtype=dtype, device=device),
@@ -181,7 +176,7 @@ class T5AttentionParameters:
     k_proj: ttnn.Tensor
     v_proj: ttnn.Tensor
     o_proj: ttnn.Tensor
-    gather: bool
+    mesh_width: int
 
     @classmethod
     def from_torch(
@@ -189,43 +184,44 @@ class T5AttentionParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device | ttnn.MeshDevice,
+        device: ttnn.MeshDevice,
     ) -> T5AttentionParameters:
+        _, mesh_width = device.shape
+
+        common = dict(
+            dtype=dtype,
+            device=device,
+            mesh_sharding_dim=0,
+        )
+
         return cls(
-            q_proj=LinearParameters.from_torch(substate(state, "q"), dtype=dtype, device=device, mesh_sharding_dim=1),
-            k_proj=LinearParameters.from_torch(substate(state, "k"), dtype=dtype, device=device, mesh_sharding_dim=1),
-            v_proj=LinearParameters.from_torch(substate(state, "v"), dtype=dtype, device=device, mesh_sharding_dim=1),
-            o_proj=LinearParameters.from_torch(substate(state, "o"), dtype=dtype, device=device, mesh_sharding_dim=1),
-            gather=device.get_num_devices() > 1,
+            q_proj=LinearParameters.from_torch(substate(state, "q"), **common),
+            k_proj=LinearParameters.from_torch(substate(state, "k"), **common),
+            v_proj=LinearParameters.from_torch(substate(state, "v"), **common),
+            o_proj=LinearParameters.from_torch(substate(state, "o"), **common),
+            mesh_width=mesh_width,
         )
 
 
 class T5Attention:
     def __init__(self, parameters: T5AttentionParameters, *, num_heads: int) -> None:
         self._num_heads = num_heads
+        self._mesh_width = parameters.mesh_width
 
         self._q_proj = Linear(parameters.q_proj)
         self._k_proj = Linear(parameters.k_proj)
         self._v_proj = Linear(parameters.v_proj)
         self._o_proj = Linear(parameters.o_proj)
 
-        self._gather = parameters.gather
-
     def forward(self, x: ttnn.Tensor, *, position_bias: ttnn.Tensor) -> ttnn.Tensor:
-        batch_size, seq_length, _ = x.shape
-
         q = self._q_proj.forward(x)
         k = self._k_proj.forward(x)
         v = self._v_proj.forward(x)
-        if self._gather:
-            q = ttnn.all_gather(q, dim=-1)
-            k = ttnn.all_gather(k, dim=-1)
-            v = ttnn.all_gather(v, dim=-1)
 
         qkv = ttnn.concat([q, k, v], dim=-1)
 
         q, k, v = ttnn.transformer.split_query_key_value_and_split_heads(
-            qkv, num_heads=self._num_heads, transpose_key=True
+            qkv, num_heads=self._num_heads // self._mesh_width, transpose_key=True
         )
 
         scores = ttnn.matmul(q, k) + position_bias
@@ -233,11 +229,7 @@ class T5Attention:
         attn = ttnn.matmul(attn_weights, v)
         attn = ttnn.transformer.concatenate_heads(attn)
 
-        result = self._o_proj.forward(attn)
-        if self._gather:
-            result = ttnn.all_gather(result, dim=-1)
-
-        return result
+        return self._o_proj.forward(attn)
 
 
 @dataclass
@@ -251,7 +243,7 @@ class T5LayerFFParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device | ttnn.MeshDevice,
+        device: ttnn.MeshDevice,
     ) -> T5LayerFFParameters:
         return cls(
             dense_gated_dense=T5DenseGatedActDenseParameters.from_torch(
@@ -277,7 +269,6 @@ class T5DenseGatedActDenseParameters:
     wi0: LinearParameters
     wi1: LinearParameters
     wo: LinearParameters
-    gather: bool
 
     @classmethod
     def from_torch(
@@ -285,13 +276,18 @@ class T5DenseGatedActDenseParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device | ttnn.MeshDevice,
+        device: ttnn.MeshDevice,
     ) -> T5DenseGatedActDenseParameters:
+        common = dict(
+            dtype=dtype,
+            device=device,
+            mesh_sharding_dim=0,
+        )
+
         return cls(
-            wi0=LinearParameters.from_torch(substate(state, "wi_0"), dtype=dtype, device=device, mesh_sharding_dim=1),
-            wi1=LinearParameters.from_torch(substate(state, "wi_1"), dtype=dtype, device=device, mesh_sharding_dim=1),
-            wo=LinearParameters.from_torch(substate(state, "wo"), dtype=dtype, device=device, mesh_sharding_dim=1),
-            gather=device.get_num_devices() > 1,
+            wi0=LinearParameters.from_torch(substate(state, "wi_0"), **common),
+            wi1=LinearParameters.from_torch(substate(state, "wi_1"), **common),
+            wo=LinearParameters.from_torch(substate(state, "wo"), **common),
         )
 
 
@@ -301,20 +297,11 @@ class T5DenseGatedActDense:
         self._wi1 = Linear(parameters.wi1)
         self._wo = Linear(parameters.wo)
 
-        self._gather = parameters.gather
-
     def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
         gelu = new_gelu_activation(self._wi0.forward(x))
         linear = self._wi1.forward(x)
         x = gelu * linear
-        if self._gather:
-            x = ttnn.all_gather(x, dim=-1)
-
-        result = self._wo.forward(x)
-        if self._gather:
-            result = ttnn.all_gather(result, dim=-1)
-
-        return result
+        return self._wo.forward(x)
 
 
 @dataclass
@@ -327,10 +314,16 @@ class T5LayerNormParameters:
         state: dict[str, torch.Tensor],
         *,
         dtype: ttnn.DataType | None = None,
-        device: ttnn.Device | ttnn.MeshDevice,
+        device: ttnn.MeshDevice,
     ) -> T5LayerNormParameters:
         return cls(
-            weight=from_torch_fast(state["weight"], layout=ttnn.TILE_LAYOUT, dtype=dtype, device=device),
+            weight=from_torch_fast(
+                state["weight"],
+                layout=ttnn.TILE_LAYOUT,
+                dtype=dtype,
+                device=device,
+                mesh_mapper=ttnn.ShardTensor2dMesh(device, tuple(device.shape), (None, -1)),
+            ),
         )
 
 
@@ -371,7 +364,7 @@ def _relative_position_bucket(relative_position: torch.Tensor, num_buckets: int,
 def _compute_bias(
     *,
     seq_length: int,
-    device: ttnn.Device | ttnn.MeshDevice,
+    device: ttnn.MeshDevice,
     relative_attention_num_buckets: int,
     relative_attention_max_distance: int,
     relative_attention_bias: torch.Tensor,
@@ -390,7 +383,12 @@ def _compute_bias(
     output = output.permute([2, 0, 1]).unsqueeze(0)
     output = output[:, :, -seq_length:, :]
 
-    return from_torch_fast(output, device=device, layout=ttnn.TILE_LAYOUT)
+    return from_torch_fast(
+        output,
+        device=device,
+        layout=ttnn.TILE_LAYOUT,
+        mesh_mapper=ttnn.ShardTensor2dMesh(device, tuple(device.shape), (None, 1)),
+    )
 
 
 def new_gelu_activation(x: ttnn.Tensor) -> ttnn.Tensor:
