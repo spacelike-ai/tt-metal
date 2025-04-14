@@ -72,8 +72,8 @@ def assert_quality(
 
     assert a.shape == b.shape, f"{a.shape} != {b.shape}"
 
-    a = a.to(torch.float32)
-    b = b.to(torch.float32)
+    a = a.detach().to(torch.float32)
+    b = b.detach().to(torch.float32)
 
     cov = torch.cov(torch.stack([a.flatten(), b.flatten()])).numpy()
 
