@@ -172,9 +172,10 @@ class FluxPipeline:
         #     sigma_difference=tt_sigma_difference,
         # )
         # ttnn.end_trace_capture(self._device, tid)
+        tid = 0
 
         self._trace = PipelineTrace(
-            tid=0,  # TODO
+            tid=tid,
             spatial_input_output=tt_latents,
             prompt_input=tt_prompt_embeds,
             pooled_projection_input=tt_pooled_prompt_embeds,
@@ -414,7 +415,7 @@ class PipelineTrace:
     tid: int
 
     def execute(self) -> None:
-        ttnn.execute_trace(self.spatial_input_output.device(), self.tid)  # TODO: allow for mesh device
+        ttnn.execute_trace(self.spatial_input_output.device(), self.tid)
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/flux/pipeline_flux.py

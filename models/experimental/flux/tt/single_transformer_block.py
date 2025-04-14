@@ -103,7 +103,7 @@ class FluxSingleTransformerBlock:
         mlp_combined = self._proj_mlp.forward(norm_combined)
         ttnn.gelu(mlp_combined, output_tensor=mlp_combined, fast_and_approximate_mode=False)
 
-        # TODO: PCC of attn seems a bit low
+        # PCC of attn seems a bit low
         attn, _ = self._attn.forward(spatial=norm_combined, image_rotary_emb=image_rotary_emb)
         del norm_combined
 
@@ -114,7 +114,7 @@ class FluxSingleTransformerBlock:
         combined += additional
 
         return combined
-        # return ttnn.clamp(combined, -65504, 65504)  # TODO: clamp gives worse PCC
+        # return ttnn.clamp(combined, -65504, 65504)  # clamp gives worse PCC
 
 
 def _re_fuse_proj_out_parameters(

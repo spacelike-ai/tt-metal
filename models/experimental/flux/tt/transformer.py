@@ -132,7 +132,7 @@ class FluxTransformer:
             )
 
             if i % 6 == 0:
-                ttnn.DumpDeviceProfiler(spatial.device())  # TODO: allow for mesh device
+                ttnn.DumpDeviceProfiler(spatial.device())
 
         prompt = ttnn.clone(prompt, dtype=spatial.dtype)
 
@@ -147,7 +147,7 @@ class FluxTransformer:
             )
 
             if i % 6 == 0:
-                ttnn.DumpDeviceProfiler(combined.device())  # TODO: allow for mesh device
+                ttnn.DumpDeviceProfiler(combined.device())
 
         spatial = combined[:, prompt_sequence_length:]
         del combined
