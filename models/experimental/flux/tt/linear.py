@@ -80,10 +80,10 @@ class LinearParameters:
         if mesh_sharding_dim is None:
             weight_mm = bias_mm = ttnn.ReplicateTensorToMesh(device)
             output_sharding = False
-        elif mesh_sharding_dim in [1, -1]:
+        elif mesh_sharding_dim == 1:
             weight_mm = bias_mm = ttnn.ShardTensor2dMesh(device, tuple(device.shape), (None, -1))
             output_sharding = False
-        elif mesh_sharding_dim in [0, -2]:
+        elif mesh_sharding_dim == 0:
             weight_mm = ttnn.ShardTensor2dMesh(device, tuple(device.shape), (None, -2))
             bias_mm = _ShardBias(device)
             output_sharding = True
