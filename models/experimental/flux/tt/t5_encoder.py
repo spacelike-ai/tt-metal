@@ -394,4 +394,4 @@ def _compute_bias(
 def new_gelu_activation(x: ttnn.Tensor) -> ttnn.Tensor:
     c = math.sqrt(2.0 / math.pi)
     y = 0.044715 * ttnn.pow(x, 3) + x
-    return 0.5 * x * (1.0 + ttnn.tanh(c * y))
+    return 0.5 * x * (1.0 + ttnn.tanh(c * y, accuracy=True))

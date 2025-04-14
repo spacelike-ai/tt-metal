@@ -104,4 +104,4 @@ def test_t5_encoder(*, mesh_device: ttnn.MeshDevice) -> None:
     composer = ttnn.ConcatMesh2dToTensor(mesh_device, tuple(mesh_device.shape), (0, -1))
     tt_output_torch = torch.cat([ttnn.to_torch(x, mesh_composer=composer) for x in tt_output])
 
-    assert_quality(output, tt_output_torch, pcc=0.908, mse=0.006)
+    assert_quality(output, tt_output_torch, pcc=0.947, mse=0.0031)
