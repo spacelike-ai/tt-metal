@@ -32,8 +32,7 @@ def from_torch_fast(
     to_host: bool = False,
     mesh_mapper: ttnn.TensorToMesh | None = None,
 ) -> ttnn.Tensor:
-    is_mesh_device = hasattr(device, "create_submesh")  # "is ttnn.MeshDevice" always returns False
-    if is_mesh_device and mesh_mapper is None:
+    if isinstance(device, ttnn.MeshDevice) and mesh_mapper is None:
         mesh_mapper = ttnn.ReplicateTensorToMesh(device)
 
     # ttnn.to_layout does not support changing the datatype or memory_config if the layout already matches. ttnn.clone
