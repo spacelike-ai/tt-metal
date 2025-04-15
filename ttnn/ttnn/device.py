@@ -6,6 +6,7 @@ import contextlib
 from typing import Optional, List
 
 import ttnn
+import ttnn._ttnn
 import os
 
 
