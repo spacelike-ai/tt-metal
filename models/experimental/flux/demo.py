@@ -23,10 +23,18 @@ def run(
     print(f"num_images_per_prompt = {num_images_per_prompt}")
     print(f"use_torch_encoder = {use_torch_encoder}")
 
+    if ttnn.get_num_devices() > 1:
+        is_blackhole = ttnn.get_arch_name() == "blackhole"
+        dispatch_core_axis = ttnn.DispatchCoreAxis.COL if is_blackhole else ttnn.DispatchCoreAxis.ROW
+        dispatch_core_config = ttnn.DispatchCoreConfig(ttnn.device.DispatchCoreType.ETH, dispatch_core_axis)
+    else:
+        dispatch_core_config = None
+
     mesh_device = ttnn.open_mesh_device(
         ttnn.MeshShape(mesh_height, mesh_width),
         l1_small_size=8192,
         trace_region_size=15210496,
+        dispatch_core_config=dispatch_core_config,
     )
     for device in mesh_device.get_devices():
         ttnn.enable_program_cache(device)
