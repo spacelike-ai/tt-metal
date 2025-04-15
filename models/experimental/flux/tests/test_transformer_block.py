@@ -11,6 +11,7 @@ import torch
 import ttnn
 from loguru import logger
 
+from ..tt import utils
 from ..tt.transformer_block import TransformerBlock, TransformerBlockParameters
 from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
@@ -119,7 +120,9 @@ def test_transformer_block(
         ttnn.copy_host_to_device_tensor(tt_time_host, tt_time)
         ttnn.copy_host_to_device_tensor(tt_imagerot1_host, tt_imagerot1)
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
+        utils.signpost("start")
         tt_spatial_output, tt_prompt_output = tt_model.forward(**model_args)
+        utils.signpost("end")
 
     assert (prompt_output is None) == (tt_prompt_output is None)
 

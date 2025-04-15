@@ -5,10 +5,15 @@
 from __future__ import annotations
 
 import math
+import os
+from typing import Any
 
 import torch
+import tracy
 import ttnn
 from loguru import logger
+
+ENABLE_SIGNPOSTS = os.environ.get("ENABLE_SIGNPOSTS") == "1"
 
 
 def allocate_tensor_on_device_like(
@@ -178,3 +183,8 @@ def reduce_scatter(
         x = ttnn.reshape(x, shape)
 
     return x
+
+
+def signpost(header: str, message: Any = None) -> None:  # noqa: ANN401
+    if ENABLE_SIGNPOSTS:
+        tracy.signpost(header, message)

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import ttnn
 
+from . import utils
 from .attention import Attention, AttentionParameters
 from .feed_forward import FeedForward, FeedForwardParameters
 from .linear import Linear, LinearParameters
@@ -126,6 +127,8 @@ class TransformerBlock:
             spatial=spatial_scaled, prompt=prompt_scaled, image_rotary_emb=image_rotary_emb
         )
         del spatial_scaled, prompt_scaled, image_rotary_emb
+
+        utils.signpost("postprocess dual attention")
 
         spatial_attn_scaled = spatial_gate * spatial_attn
         prompt_attn_scaled = prompt_gate * prompt_attn if prompt_gate is not None else None

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import torch
 import ttnn
 
+from . import utils
 from .attention import Attention, AttentionParameters
 from .linear import Linear, LinearParameters
 from .normalization import LayerNorm, LayerNormParameters
@@ -109,6 +110,8 @@ class FluxSingleTransformerBlock:
         # PCC of attn seems a bit low
         attn, _ = self._attn.forward(spatial=norm_combined, image_rotary_emb=image_rotary_emb)
         del norm_combined
+
+        utils.signpost("postprocess combined attention")
 
         additional = ttnn.concat([attn, mlp_combined], dim=-1)
         additional = self._proj_out.forward(additional)

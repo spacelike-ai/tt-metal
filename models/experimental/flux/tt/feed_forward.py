@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import ttnn
 
+from . import utils
 from .linear import Linear, LinearParameters
 from .substate import substate
 
@@ -57,9 +58,12 @@ class FeedForward:
         self.out_proj = Linear(parameters.out_proj)
 
     def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        utils.signpost("feedforward")
+
         # Fusing the activation function results in bad PCC.
         x = self.in_proj.forward(x)
         # Turning on fast_and_approximate_mode leads to big changes in the generated image.
         # The image quality might still be okay.
         x = ttnn.gelu(x, fast_and_approximate_mode=False)
+
         return self.out_proj.forward(x)

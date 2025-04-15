@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import torch
 import ttnn
 
+from . import utils
 from .linear import Linear, LinearParameters
 from .substate import substate
 
@@ -69,6 +70,7 @@ class CombinedTimestepTextProjEmbeddings:
 
     def forward(self, *, timestep: ttnn.Tensor, pooled_projection: ttnn.Tensor) -> ttnn.Tensor:
         assert timestep.dtype == ttnn.float32
+        utils.signpost("timestep embedding")
 
         # The result is not correct when using normal multiplication with a timestep that contains
         # more than one entry. Fortunately, the shape of the tensors involved is such that matrix

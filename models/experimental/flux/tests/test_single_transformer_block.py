@@ -11,6 +11,7 @@ import torch
 import ttnn
 from loguru import logger
 
+from ..tt import utils
 from ..tt.single_transformer_block import FluxSingleTransformerBlock, FluxSingleTransformerBlockParameters
 from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
@@ -112,7 +113,9 @@ def test_single_transformer_block(
         ttnn.copy_host_to_device_tensor(tt_time_host, tt_time)
         ttnn.copy_host_to_device_tensor(tt_imagerot1_host, tt_imagerot1)
         ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
+        utils.signpost("start")
         tt_combined_output = tt_model.forward(**model_args)
+        utils.signpost("end")
 
     composer = ttnn.ConcatMesh2dToTensor(mesh_device, tuple(mesh_device.shape), (0, -1))
     assert_quality(combined_output, tt_combined_output, pcc=0.99943, mse=2000, mesh_composer=composer)

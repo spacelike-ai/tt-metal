@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import torch
 import ttnn
 
+from . import utils
 from .linear import Linear, LinearParameters
 from .normalization import RmsNorm, RmsNormParameters
 from .optimizations import AttentionOptimization, AttentionPartOptimization
@@ -111,6 +112,8 @@ class AttentionPart:
         self._mesh_width = parameters.mesh_width
 
     def qkv(self, x: ttnn.Tensor, *, num_heads: int) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
+        utils.signpost("qkv preparation")
+
         x = self._opt.prepare_qkv_projection(x)
 
         x = self._qkv_proj.forward(x, **self._opt.qkv_projection_settings(x.device()))
@@ -168,9 +171,11 @@ class Attention:
 
         if prompt is None:
             if image_rotary_emb is not None:
+                utils.signpost("rotary embedding path I")
                 q = _apply_rotary_emb(q, image_rotary_emb)
                 k = _apply_rotary_emb(k, image_rotary_emb)
 
+            utils.signpost("dot product attention path I")
             # operands must be in DRAM
             attn = ttnn.transformer.scaled_dot_product_attention(
                 q, k, v, is_causal=False, **self._opt.sdpa_settings(device=device)
@@ -192,9 +197,11 @@ class Attention:
         del q2, k2, v2
 
         if image_rotary_emb is not None:
+            utils.signpost("rotary embedding path II")
             q = _apply_rotary_emb(q, image_rotary_emb)
             k = _apply_rotary_emb(k, image_rotary_emb)
 
+        utils.signpost("dot product attention path II")
         attn = ttnn.transformer.scaled_dot_product_attention(
             q, k, v, is_causal=False, **self._opt.sdpa_settings(device=device)
         )
