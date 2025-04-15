@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import ttnn
-from models.experimental.flux.tt import FluxPipeline
+from models.experimental.flux import FluxPipeline
 
 
 def run(
