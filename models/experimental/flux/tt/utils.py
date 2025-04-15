@@ -27,25 +27,29 @@ def from_torch_fast(
     to_host: bool = False,
     mesh_mapper: ttnn.TensorToMesh | None = None,
 ) -> ttnn.Tensor:
-    conversion_device = device
-    device = None if to_host else device
-
-    cd_is_mesh_device = hasattr(conversion_device, "create_submesh")  # "is ttnn.MeshDevice" always returns False
-    if cd_is_mesh_device and mesh_mapper is None:
-        mesh_mapper = ttnn.ReplicateTensorToMesh(conversion_device)
+    is_mesh_device = hasattr(device, "create_submesh")  # "is ttnn.MeshDevice" always returns False
+    if is_mesh_device and mesh_mapper is None:
+        mesh_mapper = ttnn.ReplicateTensorToMesh(device)
 
     # ttnn.to_layout does not support changing the datatype or memory_config if the layout already matches. ttnn.clone
     # does not support changing the datatype if the input is not tiled. An option could be to tilize the input before
     # changing the datatype and then untilize again, but it was not tested if this would be faster than converting the
-    # datatype on the host.
-    if conversion_device is None or layout is None or layout == ttnn.ROW_MAJOR_LAYOUT:
-        return ttnn.from_torch(t, device=device, layout=layout, dtype=dtype, mesh_mapper=mesh_mapper)
+    # datatype on the host. Also ttnn.to_dtype does not support device tensors.
+    if device is None or layout is None or layout == ttnn.ROW_MAJOR_LAYOUT:
+        return ttnn.from_torch(
+            t,
+            device=None if to_host else device,
+            layout=layout,
+            dtype=dtype,
+            memory_config=memory_config,
+            mesh_mapper=mesh_mapper,
+        )
 
-    tensor = ttnn.from_torch(t, device=conversion_device, mesh_mapper=mesh_mapper)
+    tensor = ttnn.from_torch(t, device=device, mesh_mapper=mesh_mapper)
 
     if tensor.shape[-2] == 32 and t.shape[-2] == 1:
         # Work around the fact that the shape is erroneously set to the padded shape under certain conditions.
-        assert isinstance(conversion_device, ttnn.MeshDevice)
+        assert isinstance(device, ttnn.MeshDevice)
         assert dtype in (ttnn.bfloat4_b, ttnn.bfloat8_b)
         tensor = tensor.reshape(ttnn.Shape(t.shape))
 
