@@ -96,6 +96,8 @@ class FluxSingleTransformerBlock:
         image_rotary_emb: tuple[ttnn.Tensor, ttnn.Tensor] | None = None,
         skip_time_embed_activation: bool = False,
     ) -> ttnn.Tensor:
+        utils.signpost("single transformer block")
+
         if not skip_time_embed_activation:
             time_embed = ttnn.silu(time_embed)
         time = self._time_embed.forward(time_embed)

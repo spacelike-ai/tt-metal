@@ -156,6 +156,8 @@ class TransformerBlock:
         image_rotary_emb: tuple[ttnn.Tensor, ttnn.Tensor] | None = None,
         skip_time_embed_activation: bool = False,
     ) -> tuple[ttnn.Tensor, ttnn.Tensor | None]:
+        utils.signpost("transformer block")
+
         if not skip_time_embed_activation:
             time_embed = ttnn.silu(time_embed)
 

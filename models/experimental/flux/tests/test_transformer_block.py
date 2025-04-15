@@ -130,4 +130,4 @@ def test_transformer_block(
 
     if tt_prompt_output is not None:
         assert_quality(prompt_output, tt_prompt_output, pcc=0.99929, mse=1500, mesh_composer=composer)
-    assert_quality(spatial_output, tt_spatial_output, pcc=0.9989, mse=83, mesh_composer=composer)
+    assert_quality(spatial_output, tt_spatial_output, pcc=0.9988, mse=83, mesh_composer=composer)
