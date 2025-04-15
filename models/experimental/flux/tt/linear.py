@@ -143,9 +143,13 @@ class Linear:
         output_tile: list[int] | None = None,
         dtype: ttnn.DataType | None = None,
         activation: str | None = None,
+        skip_reduce_scatter: bool = False,
     ) -> ttnn.Tensor:
         msg = f"last value in input shape {list(x.shape)} should be equal to {self._in_channels}"
         assert x.shape[-1] == self._in_channels, msg
+
+        if memory_config is None:
+            memory_config = x.memory_config()
 
         if self._paramters_on_host:
             weight = self._weight.to(self._device)
@@ -166,19 +170,30 @@ class Linear:
             activation=activation,
         )
 
-        if self._reduce_scatter:
-            _, mesh_width = self._device.shape
-            x = utils.reduce_scatter(
-                x,
-                dim=-1,
-                math_op=ttnn.ReduceType.Sum,
-                cluster_axis=1 if mesh_width != 1 else None,
-                mesh_device=self._device,
-                # reduce_scatter currently requires linear topology when specifying a cluster axis
-                topology=ttnn.Topology.Linear if mesh_width != 1 else ttnn.Topology.Ring,
-            )
+        if skip_reduce_scatter:
+            return x
 
-        return x
+        return self.reduce_scatter(x, memory_config=memory_config)
+
+    def reduce_scatter(
+        self,
+        x: ttnn.Tensor,
+        memory_config: ttnn.MemoryConfig | None = None,
+    ) -> ttnn.Tensor:
+        if not self._reduce_scatter:
+            return x
+
+        _, mesh_width = self._device.shape
+        return utils.reduce_scatter(
+            x,
+            dim=-1,
+            math_op=ttnn.ReduceType.Sum,
+            cluster_axis=1 if mesh_width != 1 else None,
+            mesh_device=self._device,
+            # reduce_scatter currently requires linear topology when specifying a cluster axis
+            topology=ttnn.Topology.Linear if mesh_width != 1 else ttnn.Topology.Ring,
+            memory_config=memory_config,
+        )
 
 
 class _ShardBias(ttnn.TensorToMesh):
