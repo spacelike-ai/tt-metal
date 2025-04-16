@@ -15,10 +15,11 @@ from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
 
 @pytest.mark.parametrize(
-    ("spatial_sequence_length", "prompt_sequence_length", "pcc", "mse"),
+    ("spatial_sequence_length", "prompt_sequence_length", "block_count", "pcc", "mse"),
     [
-        # (1024, 512, 0.99944, 13.8),
-        (4096, 512, 0.984, 12),
+        # (1024, 512, None, 0.99944, 13.8),
+        (4096, 512, None, 0.984, 12),
+        # (4096, 512, 1, 0.992, 320),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 18006016}], indirect=True)
@@ -40,6 +41,7 @@ def test_transformer(  # noqa: PLR0915
     use_tracing: bool,
     prompt_sequence_length: int,
     spatial_sequence_length: int,
+    block_count: int | None,
     pcc: float,
     mse: float,
 ) -> None:
@@ -51,6 +53,7 @@ def test_transformer(  # noqa: PLR0915
     logger.info("loading model...")
     torch_model = FluxTransformerReference.from_pretrained("black-forest-labs/FLUX.1-schnell", subfolder="transformer")
     torch_model.eval()
+    torch_model.keep_blocks_only(block_count, block_count)
 
     spatial = torch.randn([batch_size, spatial_sequence_length, 64])
     prompt = torch.randn([batch_size, prompt_sequence_length, 4096])
@@ -76,6 +79,7 @@ def test_transformer(  # noqa: PLR0915
         "black-forest-labs/FLUX.1-schnell", subfolder="transformer", torch_dtype=torch.bfloat16
     )
     torch_model_bfloat16.eval()
+    torch_model_bfloat16.keep_blocks_only(block_count, block_count)
 
     logger.info("creating TT-NN model...")
     parameters = FluxTransformerParameters.from_torch(

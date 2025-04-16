@@ -87,6 +87,12 @@ class FluxTransformer(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         self.norm_out = AdaLayerNormDummy(inner_dim, 2 * inner_dim)
         self.proj_out = torch.nn.Linear(inner_dim, patch_size * patch_size * self._out_channels)
 
+    def keep_blocks_only(self, blocks: int | None, single_blocks: int | None) -> None:
+        if blocks is not None:
+            del self.transformer_blocks[blocks:]
+        if single_blocks is not None:
+            del self.single_transformer_blocks[single_blocks:]
+
     def forward(
         self,
         spatial: torch.Tensor,
