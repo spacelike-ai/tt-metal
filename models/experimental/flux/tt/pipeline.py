@@ -500,7 +500,7 @@ def _get_t5_prompt_embeds(
         prompt_embeds = text_encoder.forward(text_input_ids)[0]
         prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
 
-    _, seq_len, _ = prompt_embeds.shape
+    _, seq_len = text_input_ids.shape
     return prompt_embeds.view(prompt_count * num_images_per_prompt, seq_len, -1)
 
 
