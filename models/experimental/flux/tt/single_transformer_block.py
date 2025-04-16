@@ -102,8 +102,11 @@ class FluxSingleTransformerBlock:
             time_embed = ttnn.silu(time_embed)
         time = self._time_embed.forward(time_embed)
 
+        combined_normed = self._norm.forward(combined)
+        combined_normed = ttnn.clone(combined_normed, dtype=ttnn.bfloat8_b)
+
         shift_msa, scale_msa, gate_msa = chunk_time(time, 3)
-        norm_combined = self._norm.forward(combined) * (1 + scale_msa) + shift_msa
+        norm_combined = combined_normed * (1 + scale_msa) + shift_msa
 
         mlp_combined = self._proj_mlp.forward(norm_combined)
         # Fusing the activation function currently gives worse PCC

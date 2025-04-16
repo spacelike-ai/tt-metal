@@ -118,4 +118,4 @@ def test_single_transformer_block(
         utils.signpost("end")
 
     composer = ttnn.ConcatMesh2dToTensor(mesh_device, tuple(mesh_device.shape), (0, -1))
-    assert_quality(combined_output, tt_combined_output, pcc=0.99943, mse=2000, mesh_composer=composer)
+    assert_quality(combined_output, tt_combined_output, pcc=0.99933, mse=2300, mesh_composer=composer)
