@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 
 import ttnn
 from models.experimental.flux import FluxPipeline
@@ -58,7 +59,7 @@ def run(
 
     prompt = "A luxury sports car."
 
-    while True:
+    for iteration in itertools.count(start=1):
         new_prompt = input("Enter the input prompt, or q to exit: ")
         if new_prompt:
             prompt = new_prompt
@@ -69,7 +70,7 @@ def run(
             prompt_1=[prompt],
             prompt_2=[prompt],
             num_inference_steps=4,
-            seed=0,
+            seed=iteration,
         )
 
         for i, image in enumerate(images, start=1):
