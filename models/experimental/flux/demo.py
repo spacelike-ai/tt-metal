@@ -78,13 +78,13 @@ def run(
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="FLUX.1 demo")
-    parser.add_argument("--mesh_height", type=int, default=1, help="corresponds to the batch size")
-    parser.add_argument("--mesh_width", type=int, help="parallelization of the model weights")
+    parser.add_argument("--batch-size", type=int, default=1, help="corresponds to the mesh height")
+    parser.add_argument("--mesh-width", type=int, help="parallelization of the model weights")
     args = parser.parse_args()
 
     device_count = ttnn.get_num_devices()
 
-    mesh_height = args.mesh_height
+    mesh_height = args.batch_size
     mesh_width = args.mesh_width if args.mesh_width is not None else device_count // mesh_height
 
     run(
