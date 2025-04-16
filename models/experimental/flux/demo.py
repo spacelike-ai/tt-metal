@@ -81,6 +81,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="FLUX.1 demo")
     parser.add_argument("--batch-size", type=int, default=1, help="corresponds to the mesh height")
     parser.add_argument("--mesh-width", type=int, help="parallelization of the model weights")
+    parser.add_argument("--encode-on-device", action="store_true", help="run T5 on the device instead of the CPU")
     args = parser.parse_args()
 
     device_count = ttnn.get_num_devices()
@@ -92,7 +93,7 @@ def main() -> None:
         mesh_width=mesh_width,
         mesh_height=mesh_height,
         num_images_per_prompt=mesh_height,
-        use_torch_encoder=mesh_width == 1,
+        use_torch_encoder=not args.encode_on_device,
     )
 
 
