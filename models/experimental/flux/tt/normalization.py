@@ -144,14 +144,13 @@ class LayerNorm:
             dtype=ttnn.bfloat16,
         )
 
-        _, mesh_width = self._device.shape
         stats = utils.all_gather(
             stats,
             dim=-1,
-            cluster_axis=1 if mesh_width != 1 else None,
+            cluster_axis=1,
             mesh_device=self._device,
             # all_gather currently requires linear topology when specifying a cluster axis
-            topology=ttnn.Topology.Linear if mesh_width != 1 else ttnn.Topology.Ring,
+            topology=ttnn.Topology.Linear,
         )
 
         x = ttnn.layer_norm_post_all_gather(
