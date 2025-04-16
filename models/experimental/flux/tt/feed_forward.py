@@ -60,7 +60,6 @@ class FeedForward:
     def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
         utils.signpost("feedforward")
 
-        # Fusing the activation function results in bad PCC.
         x = self.in_proj.forward(x)
         # Turning on fast_and_approximate_mode leads to big changes in the generated image.
         # The image quality might still be okay.

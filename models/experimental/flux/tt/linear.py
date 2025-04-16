@@ -148,6 +148,10 @@ class Linear:
         msg = f"last value in input shape {list(x.shape)} should be equal to {self._in_channels}"
         assert x.shape[-1] == self._in_channels, msg
 
+        if self._reduce_scatter:
+            msg = "activation function can not be fused when reduce_scatter is performed afterwards"
+            assert activation == None, msg
+
         if memory_config is None:
             memory_config = x.memory_config()
 
