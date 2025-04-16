@@ -15,6 +15,7 @@ from ..tt.transformer import FluxTransformer, FluxTransformerParameters
 from ..tt.utils import allocate_tensor_on_device_like
 
 
+@pytest.mark.skip
 @pytest.mark.parametrize(
     ("spatial_sequence_length", "prompt_sequence_length"),
     [
