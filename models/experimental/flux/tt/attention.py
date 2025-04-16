@@ -167,23 +167,31 @@ class Attention:
         device = spatial.device()
 
         opt = self._mesh_width > 1
+        _, spatial_seq_len, _ = spatial.shape
 
         if opt:
             spatial = ttnn.to_memory_config(spatial, ttnn.L1_MEMORY_CONFIG)
 
         q, k, v = self._spatial_attn.qkv(spatial, num_heads=self._num_heads)
 
+        if image_rotary_emb is not None:
+            emb = (
+                (
+                    image_rotary_emb[0][-spatial_seq_len:],
+                    image_rotary_emb[1][-spatial_seq_len:],
+                )
+                if prompt is not None
+                else image_rotary_emb
+            )
+            q = _apply_rotary_emb(q, emb)
+            k = _apply_rotary_emb(k, emb)
+
+        # operands to SDPA are required to be in DRAM
+        q = ttnn.to_memory_config(q, ttnn.DRAM_MEMORY_CONFIG)
+        k = ttnn.to_memory_config(k, ttnn.DRAM_MEMORY_CONFIG)
+        v = ttnn.to_memory_config(v, ttnn.DRAM_MEMORY_CONFIG)
+
         if prompt is None:
-            if image_rotary_emb is not None:
-                utils.signpost("rotary embedding path I")
-                q = _apply_rotary_emb(q, image_rotary_emb)
-                k = _apply_rotary_emb(k, image_rotary_emb)
-
-            # operands to SDPA are required to be in DRAM
-            q = ttnn.to_memory_config(q, ttnn.DRAM_MEMORY_CONFIG)
-            k = ttnn.to_memory_config(k, ttnn.DRAM_MEMORY_CONFIG)
-            v = ttnn.to_memory_config(v, ttnn.DRAM_MEMORY_CONFIG)
-
             utils.signpost("dot product attention path I")
             attn = ttnn.transformer.scaled_dot_product_attention(
                 q, k, v, is_causal=False, **self._sdpa_settings(device=device)
@@ -201,51 +209,30 @@ class Attention:
 
         q2, k2, v2 = self._prompt_attn.qkv(prompt, num_heads=self._num_heads)
 
-        q = ttnn.concat([q2, q], dim=2, memory_config=ttnn.L1_MEMORY_CONFIG if opt else None)
-        k = ttnn.concat([k2, k], dim=2, memory_config=ttnn.L1_MEMORY_CONFIG if opt else None)
-        v = ttnn.concat([v2, v], dim=2, memory_config=ttnn.L1_MEMORY_CONFIG if opt else None)
-        del q2, k2, v2
-
         if image_rotary_emb is not None:
-            utils.signpost("rotary embedding path II")
-            q = _apply_rotary_emb(q, image_rotary_emb)
-            k = _apply_rotary_emb(k, image_rotary_emb)
+            emb = (
+                image_rotary_emb[0][:-spatial_seq_len],
+                image_rotary_emb[1][:-spatial_seq_len],
+            )
+            q2 = _apply_rotary_emb(q2, emb)
+            k2 = _apply_rotary_emb(k2, emb)
 
         # operands to SDPA are required to be in DRAM
-        q = ttnn.to_memory_config(q, ttnn.DRAM_MEMORY_CONFIG)
-        k = ttnn.to_memory_config(k, ttnn.DRAM_MEMORY_CONFIG)
-        v = ttnn.to_memory_config(v, ttnn.DRAM_MEMORY_CONFIG)
+        q2 = ttnn.to_memory_config(q2, ttnn.DRAM_MEMORY_CONFIG)
+        k2 = ttnn.to_memory_config(k2, ttnn.DRAM_MEMORY_CONFIG)
+        v2 = ttnn.to_memory_config(v2, ttnn.DRAM_MEMORY_CONFIG)
 
         utils.signpost("dot product attention path II")
-        attn = ttnn.transformer.scaled_dot_product_attention(
-            q, k, v, is_causal=False, **self._sdpa_settings(device=device)
+        prompt, spatial = ttnn.transformer.joint_scaled_dot_product_attention(
+            q2, k2, v2, q, k, v, joint_strategy="rear", **self._sdpa_settings(device=device)
         )
-        del q, k, v
+        del q, k, v, q2, k2, v2
         if opt:
-            attn = ttnn.to_memory_config(attn, ttnn.L1_MEMORY_CONFIG)
+            prompt = ttnn.to_memory_config(prompt, ttnn.L1_MEMORY_CONFIG)
+            spatial = ttnn.to_memory_config(spatial, ttnn.L1_MEMORY_CONFIG)
 
-        attn = ttnn.transformer.concatenate_heads(attn)
-
-        if prompt is not None:
-            prompt = attn[:, : prompt.shape[1]]
-            spatial = attn[:, prompt.shape[1] :]
-        else:
-            spatial = attn
-
-        # if image_rotary_emb is not None:
-        #     emb = (image_rotary_emb[0][-q.shape[2] :], image_rotary_emb[1][-q.shape[2] :])
-        #     q = _apply_rotary_emb(q, emb)
-        #     k = _apply_rotary_emb(k, emb)
-        #     emb = (image_rotary_emb[0][: q2.shape[2]], image_rotary_emb[1][: q2.shape[2]])
-        #     q2 = _apply_rotary_emb(q2, emb)
-        #     k2 = _apply_rotary_emb(k2, emb)
-        #
-        # prompt, spatial = ttnn.transformer.joint_scaled_dot_product_attention(
-        #     q2, k2, v2, q, k, v, joint_strategy="rear", **self._sdpa_settings(device=device)
-        # )
-        #
-        # spatial = ttnn.transformer.concatenate_heads(spatial)
-        # prompt = ttnn.transformer.concatenate_heads(prompt)
+        spatial = ttnn.transformer.concatenate_heads(spatial)
+        prompt = ttnn.transformer.concatenate_heads(prompt)
 
         spatial = self._spatial_attn.out_proj(spatial)
         prompt = self._prompt_attn.out_proj(prompt)
