@@ -155,11 +155,16 @@ def reduce_scatter(
     if rank < 4:
         shape = [1] * (4 - rank) + list(x.shape)
         x = ttnn.reshape(x, shape)
+        if dim >= 0:
+            dim += 4 - rank
+
+    if dim not in {3, -1}:  # https://github.com/tenstorrent/tt-metal/issues/19433
+        x = ttnn.transpose(x, dim, 3)
 
     if cluster_axis is not None:
         x = ttnn.reduce_scatter(
             x,
-            dim,
+            3,
             cluster_axis,
             mesh_device,
             math_op,
@@ -170,12 +175,15 @@ def reduce_scatter(
     else:
         x = ttnn.reduce_scatter(
             x,
-            dim,
+            3,
             math_op,
             num_links=num_links,
             topology=topology,
             memory_config=memory_config,
         )
+
+    if dim not in {3, -1}:  # https://github.com/tenstorrent/tt-metal/issues/19433
+        x = ttnn.transpose(x, dim, 3)
 
     if rank < 4:
         shape = list(x.shape)[4 - rank :]

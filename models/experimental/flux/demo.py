@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import argparse
+
 import ttnn
 from models.experimental.flux import FluxPipeline
 
@@ -75,10 +77,15 @@ def run(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(prog="FLUX.1 demo")
+    parser.add_argument("--mesh_height", type=int, default=1, help="corresponds to the batch size")
+    parser.add_argument("--mesh_width", type=int, help="parallelization of the model weights")
+    args = parser.parse_args()
+
     device_count = ttnn.get_num_devices()
 
-    mesh_width = 1 if device_count == 1 else 2
-    mesh_height = device_count // mesh_width
+    mesh_height = args.mesh_height
+    mesh_width = args.mesh_width if args.mesh_width is not None else device_count // mesh_height
 
     run(
         mesh_width=mesh_width,

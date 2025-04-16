@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import ttnn
 
+from . import utils
 from .linear import Linear, LinearParameters
 from .normalization import LayerNorm, LayerNormParameters
 from .single_transformer_block import FluxSingleTransformerBlock, FluxSingleTransformerBlockParameters
@@ -30,6 +31,7 @@ class FluxTransformerParameters:
     time_embed_out: LinearParameters
     norm_out: LayerNormParameters
     proj_out: LinearParameters
+    device: ttnn.MeshDevice
 
     @classmethod
     def from_torch(
@@ -47,7 +49,7 @@ class FluxTransformerParameters:
                 substate(state, "x_embedder"),
                 dtype=dtype,
                 device=device,
-                mesh_sharding_dim=0,
+                mesh_sharding_dim=1,
             ),
             time_text_embed=CombinedTimestepTextProjEmbeddingsParameters.from_torch(
                 substate(state, "time_text_embed"), dtype=dtype, device=device
@@ -85,12 +87,15 @@ class FluxTransformerParameters:
             proj_out=LinearParameters.from_torch(
                 substate(state, "proj_out"), dtype=dtype, device=device, mesh_sharding_dim=0
             ),
+            device=device,
         )
 
 
 class FluxTransformer:
     def __init__(self, parameters: FluxTransformerParameters, *, num_attention_heads: int) -> None:
         super().__init__()
+
+        self._device = parameters.device
 
         self._x_embedder = Linear(parameters.x_embedder)
         self._time_text_embed = CombinedTimestepTextProjEmbeddings(parameters.time_text_embed)
@@ -119,6 +124,14 @@ class FluxTransformer:
 
         time_embed = self._time_text_embed.forward(timestep=timestep, pooled_projection=pooled_projection)
         ttnn.silu(time_embed, output_tensor=time_embed)
+
+        spatial = utils.all_gather(
+            spatial,
+            dim=-2,
+            cluster_axis=1,
+            mesh_device=self._device,
+            topology=ttnn.Topology.Linear,
+        )
 
         spatial = self._x_embedder.forward(spatial)
         prompt = self._context_embedder.forward(prompt)
@@ -162,4 +175,5 @@ class FluxTransformer:
         [scale, shift] = chunk_time(spatial_time, 2)
         spatial = spatial * (1 + scale) + shift
 
-        return self._proj_out.forward(spatial)
+        spatial = self._proj_out.forward(spatial, skip_reduce_scatter=True)
+        return self._proj_out.reduce_scatter(spatial, scatter_dim=-2)

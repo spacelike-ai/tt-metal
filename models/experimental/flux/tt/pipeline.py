@@ -123,8 +123,8 @@ class FluxPipeline:
         tt_latents = ttnn.allocate_tensor_on_device(
             [
                 prompt_count * num_images_per_prompt // mesh_height,
-                spatial_sequence_length,
-                self._num_channels_latents * 4 // mesh_width,
+                spatial_sequence_length // mesh_width,
+                self._num_channels_latents * 4,
             ],
             ttnn.bfloat16,
             ttnn.TILE_LAYOUT,
@@ -261,14 +261,21 @@ class FluxPipeline:
         ids = torch.cat((text_ids, image_ids), dim=0)
         image_rotary_emb = self._pos_embed(ids)
 
-        sharded = ttnn.ShardTensor2dMesh(self._device, tuple(self._device.shape), (0, -1))
         batch_sharded = ttnn.ShardTensor2dMesh(self._device, tuple(self._device.shape), (0, None))
         unsharded = ttnn.ReplicateTensorToMesh(self._device)
 
         tt_prompt_embeds = ttnn.from_torch(
-            prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=sharded
+            prompt_embeds,
+            layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat8_b,
+            mesh_mapper=ttnn.ShardTensor2dMesh(self._device, tuple(self._device.shape), (0, -1)),
         )
-        tt_initial_latents = ttnn.from_torch(latents, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=sharded)
+        tt_initial_latents = ttnn.from_torch(
+            latents,
+            layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat16,
+            mesh_mapper=ttnn.ShardTensor2dMesh(self._device, tuple(self._device.shape), (0, -2)),
+        )
         tt_pooled_prompt_embeds = ttnn.from_torch(
             pooled_prompt_embeds, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=batch_sharded
         )
@@ -330,7 +337,7 @@ class FluxPipeline:
 
         image_decoding_start_time = time.time()
 
-        composer = ttnn.ConcatMesh2dToTensor(self._device, tuple(self._device.shape), (0, -1))
+        composer = ttnn.ConcatMesh2dToTensor(self._device, tuple(self._device.shape), (0, -2))
         latents = ttnn.to_torch(self._trace.spatial_input_output, mesh_composer=composer).to(torch.float32)
         latents = _unpack_latents(latents, height, width, self._vae_scale_factor)
         latents = latents / self._vae_scaling_factor + self._vae_shift_factor

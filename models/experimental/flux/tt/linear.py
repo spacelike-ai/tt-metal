@@ -183,13 +183,14 @@ class Linear:
         self,
         x: ttnn.Tensor,
         memory_config: ttnn.MemoryConfig | None = None,
+        scatter_dim: int = -1,
     ) -> ttnn.Tensor:
         if not self._reduce_scatter:
             return x
 
         return utils.reduce_scatter(
             x,
-            dim=-1,
+            dim=scatter_dim,
             math_op=ttnn.ReduceType.Sum,
             cluster_axis=1,
             mesh_device=self._device,
