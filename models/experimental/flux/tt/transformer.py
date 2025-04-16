@@ -120,18 +120,21 @@ class FluxTransformer:
         timestep: ttnn.Tensor,
         image_rotary_emb: tuple[ttnn.Tensor, ttnn.Tensor],
     ) -> ttnn.Tensor:
+        _, mesh_width = self._device.shape
+
         prompt_sequence_length = prompt.shape[1]
 
         time_embed = self._time_text_embed.forward(timestep=timestep, pooled_projection=pooled_projection)
         ttnn.silu(time_embed, output_tensor=time_embed)
 
-        spatial = utils.all_gather(
-            spatial,
-            dim=-2,
-            cluster_axis=1,
-            mesh_device=self._device,
-            topology=ttnn.Topology.Linear,
-        )
+        if mesh_width > 1:
+            spatial = utils.all_gather(
+                spatial,
+                dim=-2,
+                cluster_axis=1,
+                mesh_device=self._device,
+                topology=ttnn.Topology.Linear,
+            )
 
         spatial = self._x_embedder.forward(spatial)
         prompt = self._context_embedder.forward(prompt)
