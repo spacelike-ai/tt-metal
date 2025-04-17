@@ -2,20 +2,26 @@
 
 set -eo pipefail
 
+FLAVOR=`grep '^ID=' /etc/os-release | awk -F= '{print $2}' | tr -d '"'`
+VERSION=`grep '^VERSION_ID=' /etc/os-release | awk -F= '{print $2}' | tr -d '"'`
+MAJOR=${VERSION%.*}
+ARCH=`uname -m`
+
 # Function to display help
 show_help() {
     echo "Usage: $0 [options]..."
     echo "  -h, --help                       Show this help message."
     echo "  -e, --export-compile-commands    Enable CMAKE_EXPORT_COMPILE_COMMANDS."
     echo "  -c, --enable-ccache              Enable ccache for the build."
-    echo "  -b, --build-type build_type      Set the build type. Default is Release. Other options are Debug, RelWithDebInfo, and CI."
-    echo "  -t, --trace                      Enable build time trace (clang only)."
+    echo "  -b, --build-type build_type      Set the build type. Default is Release. Other options are Debug, RelWithDebInfo, ASan and TSan."
+    echo "  -t, --enable-time-trace          Enable build time trace (clang only)."
     echo "  -a, --enable-asan                Enable AddressSanitizer."
     echo "  -m, --enable-msan                Enable MemorySanitizer."
     echo "  -s, --enable-tsan                Enable ThreadSanitizer."
     echo "  -u, --enable-ubsan               Enable UndefinedBehaviorSanitizer."
     echo "  -p, --enable-profiler            Enable Tracy profiler."
     echo "  --install-prefix                 Where to install build artifacts."
+    echo "  --build-dir                      Build directory."
     echo "  --build-tests                    Build All Testcases."
     echo "  --build-ttnn-tests               Build ttnn Testcases."
     echo "  --build-metal-tests              Build metal Testcases."
@@ -38,11 +44,16 @@ show_help() {
     echo "  --toolchain-path                 Set path to CMake toolchain file."
     echo "  --configure-only                 Only configure the project, do not build."
     echo "  --enable-coverage                Instrument the binaries for code coverage."
+    echo "  --without-python-bindings        Disable Python bindings (ttnncpp will be available as standalone library, otherwise ttnn will include the cpp backend and the python bindings), Enabled by default"
 }
 
 clean() {
     echo "INFO: Removing build artifacts!"
-    rm -rf build_Release* build_Debug* build_RelWithDebInfo* build built
+    rm -rf build_Release* build_Debug* build_RelWithDebInfo* build_ASan* build_TSan* build built
+    rm -rf ~/.cache/tt-metal-cache /tmp/tt-metal-cache
+    if [[ ! -z $TT_METAL_CACHE ]]; then
+        echo "User has TT_METAL_CACHE set, please make sure you delete it in order to delete all artifacts!"
+    fi
 }
 
 # Parse CLI options
@@ -55,6 +66,7 @@ enable_tsan="OFF"
 enable_ubsan="OFF"
 build_type="Release"
 enable_profiler="OFF"
+build_dir=""
 build_tests="OFF"
 build_ttnn_tests="OFF"
 build_metal_tests="OFF"
@@ -70,9 +82,17 @@ cpm_source_cache=""
 cpm_use_local_packages="OFF"
 c_compiler_path=""
 ttnn_shared_sub_libs="OFF"
-toolchain_path="cmake/x86_64-linux-clang-17-libcpp-toolchain.cmake"
+toolchain_path="cmake/x86_64-linux-clang-17-libstdcpp-toolchain.cmake"
+
+# Requested handling for 20.04 -> 22.04 migration
+if [[ "$FLAVOR" == "ubuntu" && "$VERSION" == "20.04" ]]; then
+    echo "WARNING: You are using Ubuntu 20.04 which is end of life. Default toolchain is set to libcpp, which is an unsupported configuration. This default behavior will be removed by June 2025."
+    toolchain_path="cmake/x86_64-linux-clang-17-libcpp-toolchain.cmake"
+fi
+
 configure_only="OFF"
 enable_coverage="OFF"
+with_python_bindings="ON"
 
 declare -a cmake_args
 
@@ -90,6 +110,7 @@ enable-ubsan
 build-type:
 enable-profiler
 install-prefix:
+build-dir:
 build-tests
 build-ttnn-tests
 build-metal-tests
@@ -111,6 +132,7 @@ ttnn-shared-sub-libs
 toolchain-path:
 configure-only
 enable-coverage
+without-python-bindings
 "
 
 # Flatten LONGOPTIONS into a comma-separated string for getopt
@@ -146,6 +168,8 @@ while true; do
             enable_ubsan="ON";;
         --enable-coverage)
             enable_coverage="ON";;
+	--build-dir)
+            build_dir="$2";shift;;
         -b|--build-type)
             build_type="$2";shift;;
         -p|--enable-profiler)
@@ -172,6 +196,8 @@ while true; do
             ttnn_shared_sub_libs="ON";;
         --configure-only)
             configure_only="ON";;
+        --without-python-bindings)
+            with_python_bindings="OFF";;
         --disable-unity-builds)
 	    unity_builds="OFF";;
         --disable-light-metal-trace)
@@ -208,17 +234,23 @@ if [[ $# -gt 0 ]]; then
 fi
 
 # Validate the build_type
-VALID_BUILD_TYPES=("Release" "Debug" "RelWithDebInfo")
+VALID_BUILD_TYPES=("Release" "Debug" "RelWithDebInfo" "ASan" "TSan")
 if [[ ! " ${VALID_BUILD_TYPES[@]} " =~ " ${build_type} " ]]; then
-    echo "ERROR: Invalid build type '$build_type'. Allowed values are Release, Debug, RelWithDebInfo."
+    echo "ERROR: Invalid build type '$build_type'. Allowed values are Release, Debug, RelWithDebInfo, ASan, TSan."
     show_help
     exit 1
 fi
 
-build_dir="build_$build_type"
-
-if [ "$enable_profiler" = "ON" ]; then
-    build_dir="${build_dir}_tracy"
+# If build-dir is not specified
+# Use build_type and enable_profiler setting to choose a default path
+if [ "$build_dir" = "" ]; then
+    build_dir="build_$build_type"
+    if [ "$enable_profiler" = "ON" ]; then
+        build_dir="${build_dir}_tracy"
+    fi
+    # Create and link the build directory
+    mkdir -p $build_dir
+    ln -nsf $build_dir build
 fi
 
 install_prefix_default=$build_dir
@@ -245,6 +277,7 @@ echo "INFO: Build tests: $build_tests"
 echo "INFO: Enable Unity builds: $unity_builds"
 echo "INFO: TTNN Shared sub libs : $ttnn_shared_sub_libs"
 echo "INFO: Enable Light Metal Trace: $light_metal_trace"
+echo "INFO: With python bindings: $with_python_bindings"
 
 # Prepare cmake arguments
 cmake_args+=("-B" "$build_dir")
@@ -362,16 +395,24 @@ if [ "$build_all" = "ON" ]; then
     cmake_args+=("-DBUILD_TT_TRAIN=ON")
 fi
 
+if [ "$light_metal_trace" = "ON" ]; then
+    cmake_args+=("-DTT_ENABLE_LIGHT_METAL_TRACE=ON")
+else
+    cmake_args+=("-DTT_ENABLE_LIGHT_METAL_TRACE=OFF")
+fi
+
+if [ "$with_python_bindings" = "ON" ]; then
+    cmake_args+=("-DWITH_PYTHON_BINDINGS=ON")
+else
+    cmake_args+=("-DWITH_PYTHON_BINDINGS=OFF")
+fi
+
 # toolchain and cxx_compiler settings would conflict with eachother
 # only use toolchain if not setting cxx compiler directly
 if [ "$cxx_compiler_path" == "" ]; then
     echo "INFO: CMAKE_TOOLCHAIN_FILE: $toolchain_path"
     cmake_args+=("-DCMAKE_TOOLCHAIN_FILE=${toolchain_path}")
 fi
-
-# Create and link the build directory
-mkdir -p $build_dir
-ln -nsf $build_dir build
 
 echo "INFO: Configuring Project"
 echo "INFO: Running: cmake "${cmake_args[@]}""

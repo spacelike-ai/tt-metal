@@ -5,6 +5,7 @@
 #include <tt-metalium/distributed.hpp>
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/tt_metal.hpp>
+#include <tt-metalium/sub_device.hpp>
 
 #include "tests/tt_metal/tt_metal/common/multi_device_fixture.hpp"
 #include "tests/tt_metal/tt_metal/dispatch/sub_device_test_utils.hpp"
@@ -12,6 +13,7 @@
 namespace tt::tt_metal::distributed::test {
 namespace {
 
+namespace tt::tt_metal {
 using MeshSubDeviceTestSuite = GenericMeshDeviceFixture;
 
 TEST_F(MeshSubDeviceTestSuite, SyncWorkloadsOnSubDevice) {
@@ -51,7 +53,7 @@ TEST_F(MeshSubDeviceTestSuite, DataCopyOnSubDevices) {
     uint32_t num_tiles = 32;
     DeviceLocalBufferConfig per_device_buffer_config{
         .page_size = single_tile_size * num_tiles,
-        .buffer_type = tt_metal::BufferType::DRAM,
+        .buffer_type = BufferType::DRAM,
         .buffer_layout = TensorMemoryLayout::INTERLEAVED,
         .bottom_up = true};
 
@@ -120,7 +122,7 @@ TEST_F(MeshSubDeviceTestSuite, DataCopyOnSubDevices) {
         EnqueueWriteMeshBuffer(mesh_device_->mesh_command_queue(), input_buf, src_vec, true);
 
         for (auto device : mesh_device_->get_devices()) {
-            tt::llrt::write_hex_vec_to_core(
+            llrt::write_hex_vec_to_core(
                 device->id(), syncer_core_phys, std::vector<uint32_t>{1}, global_sem.address());
         }
         mesh_device_->reset_sub_device_stall_group();
@@ -188,6 +190,53 @@ TEST_F(MeshSubDeviceTestSuite, SubDeviceSwitching) {
         mesh_device_->reset_sub_device_stall_group();
     }
     Finish(mesh_device_->mesh_command_queue());
+}
+
+TEST_F(MeshSubDeviceTestSuite, SubDeviceBasicProgramsReuse) {
+    constexpr uint32_t k_num_iters = 5;
+    constexpr uint32_t k_local_l1_size = 3200;
+
+    SubDevice sub_device_1(std::array{CoreRangeSet(CoreRange({0, 0}, {2, 2}))});
+    SubDevice sub_device_2(std::array{CoreRangeSet(std::vector{CoreRange({3, 3}, {3, 3}), CoreRange({4, 4}, {4, 4})})});
+    // sub-device 3 and 4 are supersets of sub-device 1 and 2 respectively
+    SubDevice sub_device_3(std::array{CoreRangeSet(std::vector{CoreRange({0, 0}, {2, 2}), CoreRange({5, 5}, {5, 5})})});
+    SubDevice sub_device_4(std::array{
+        CoreRangeSet(std::vector{CoreRange({3, 3}, {3, 3}), CoreRange({4, 4}, {4, 4}), CoreRange({6, 6}, {6, 6})})});
+    auto sub_device_manager_1 = mesh_device_->create_sub_device_manager({sub_device_1, sub_device_2}, k_local_l1_size);
+    auto sub_device_manager_2 = mesh_device_->create_sub_device_manager({sub_device_4, sub_device_3}, k_local_l1_size);
+    mesh_device_->load_sub_device_manager(sub_device_manager_1);
+
+    auto [waiter_program, syncer_program, incrementer_program, global_sem] =
+        create_basic_sync_program(mesh_device_.get(), sub_device_1, sub_device_2);
+    MeshCoordinateRange devices(mesh_device_->shape());
+    auto waiter_mesh_workload = CreateMeshWorkload();
+    auto syncer_mesh_workload = CreateMeshWorkload();
+    auto incrementer_mesh_workload = CreateMeshWorkload();
+    AddProgramToMeshWorkload(waiter_mesh_workload, std::move(waiter_program), devices);
+    AddProgramToMeshWorkload(syncer_mesh_workload, std::move(syncer_program), devices);
+    AddProgramToMeshWorkload(incrementer_mesh_workload, std::move(incrementer_program), devices);
+
+    // Run programs on sub-device manager 1
+    for (uint32_t i = 0; i < k_num_iters; i++) {
+        EnqueueMeshWorkload(mesh_device_->mesh_command_queue(), waiter_mesh_workload, false);
+        mesh_device_->set_sub_device_stall_group({SubDeviceId{0}});
+        EnqueueMeshWorkload(mesh_device_->mesh_command_queue(), syncer_mesh_workload, true);
+        EnqueueMeshWorkload(mesh_device_->mesh_command_queue(), incrementer_mesh_workload, false);
+        mesh_device_->reset_sub_device_stall_group();
+    }
+    Finish(mesh_device_->mesh_command_queue());
+
+    // Rerun programs on sub-device manager 2
+    mesh_device_->load_sub_device_manager(sub_device_manager_2);
+    for (uint32_t i = 0; i < k_num_iters; i++) {
+        EnqueueMeshWorkload(mesh_device_->mesh_command_queue(), waiter_mesh_workload, false);
+        mesh_device_->set_sub_device_stall_group({SubDeviceId{1}});
+        EnqueueMeshWorkload(mesh_device_->mesh_command_queue(), syncer_mesh_workload, true);
+        EnqueueMeshWorkload(mesh_device_->mesh_command_queue(), incrementer_mesh_workload, false);
+        mesh_device_->reset_sub_device_stall_group();
+    }
+    Finish(mesh_device_->mesh_command_queue());
+}
 }
 }  // namespace
 }  // namespace tt::tt_metal::distributed::test

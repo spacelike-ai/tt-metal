@@ -13,6 +13,9 @@
 #include <tt-metalium/semaphore.hpp>
 #include <tt-metalium/kernel.hpp>
 #include <tt-metalium/circular_buffer.hpp>
+#include <tt-metalium/allocator.hpp>
+
+#include "llrt/hal.hpp"
 
 //////////////////////////////////////////////////////////////////////////////////////////
 // TODO: explain what test does
@@ -67,7 +70,7 @@ void check_semaphores_are_initialized(
                     res);
                 std::vector<uint32_t> filtered_res;
                 static uint32_t num_u32_to_skip =
-                    tt_metal::hal.get_alignment(tt_metal::HalMemType::L1) / sizeof(uint32_t);
+                    tt_metal::hal_ref.get_alignment(tt_metal::HalMemType::L1) / sizeof(uint32_t);
                 for (int i = 0; i < res.size(); i += num_u32_to_skip) {
                     filtered_res.push_back(res.at(i));
                 }
@@ -176,8 +179,8 @@ bool test_program_specified_with_core_range_set(
         tt_metal::SetRuntimeArgs(program, unary_reader_kernel, core, reader_rt_args);
 
         auto bank_id = 0;
-        auto l1_dst_noc_xy =
-            device->virtual_core_from_logical_core(dst_l1_buffer->logical_core_from_bank_id(0), CoreType::WORKER);
+        auto l1_dst_noc_xy = device->virtual_core_from_logical_core(
+            dst_l1_buffer->allocator()->get_logical_core_from_bank_id(0), CoreType::WORKER);
 
         tt_metal::SetRuntimeArgs(
             program,

@@ -11,15 +11,20 @@
 #include <optional>
 #include <unordered_set>
 
-#include "logger.hpp"
-#include "tt_backend_api_types.hpp"
 #include "buffer.hpp"
-#include "tile.hpp"
-
 #include "circular_buffer_constants.h"
+#include "logger.hpp"
+#include "tile.hpp"
+#include "tt_backend_api_types.hpp"
+
+namespace tt {
+enum class DataFormat : uint8_t;
+namespace tt_metal {
+class Buffer;
+}  // namespace tt_metal
+}  // namespace tt
 
 namespace tt::tt_metal {
-inline namespace v0 {
 
 using CBHandle = uintptr_t;
 
@@ -129,5 +134,4 @@ private:
 bool operator==(const CircularBufferConfig& lhs, const CircularBufferConfig& rhs);
 bool operator!=(const CircularBufferConfig& lhs, const CircularBufferConfig& rhs);
 
-}  // namespace v0
 }  // namespace tt::tt_metal

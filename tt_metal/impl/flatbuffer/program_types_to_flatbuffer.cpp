@@ -5,9 +5,11 @@
 #include "flatbuffer/base_types_to_flatbuffer.hpp"
 #include "flatbuffer/program_types_to_flatbuffer.hpp"
 #include "lightmetal/lightmetal_capture.hpp"  // For LightMetalCaptureContext
-#include <overloaded.hpp>
+#include <tt_stl/overloaded.hpp>
 
 namespace tt::tt_metal {
+
+using RuntimeArgs = std::vector<std::variant<Buffer*, uint32_t>>;
 
 flatbuffers::Offset<flatbuffer::CoreCoord> to_flatbuffer(
     flatbuffers::FlatBufferBuilder& builder, const CoreCoord& coord) {
@@ -212,7 +214,7 @@ flatbuffers::Offset<flatbuffers::Vector<uint8_t>> to_flatbuffer(
     flatbuffers::FlatBufferBuilder& builder, tt::stl::Span<const SubDeviceId> sub_device_ids) {
     std::vector<uint8_t> fb_sub_device_ids(sub_device_ids.size());
     for (size_t i = 0; i < sub_device_ids.size(); ++i) {
-        fb_sub_device_ids[i] = sub_device_ids[i].id;
+        fb_sub_device_ids[i] = *sub_device_ids[i];
     }
     return builder.CreateVector(fb_sub_device_ids);
 }

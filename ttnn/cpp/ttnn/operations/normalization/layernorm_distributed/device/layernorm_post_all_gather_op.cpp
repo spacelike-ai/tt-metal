@@ -16,7 +16,6 @@
 
 using uint32_t = std::uint32_t;
 using namespace tt::constants;
-using namespace tt::tt_metal;
 
 namespace ttnn::operations::normalization {
 
@@ -44,60 +43,53 @@ void LayerNormPostAllGather::validate(
     TT_FATAL(stats.get_padded_shape()[2] == a.get_padded_shape()[2], "Error");
     // TODO: How to check if number of tile columns is correct? Would have to know # of devices and is_rmsnorm
 
-    // TT_FATAL(gamma.has_value(), "Error");
-    if (gamma.has_value()) {
-        const auto& gamma_tensor = gamma.value();
+    TT_FATAL(gamma.has_value(), "Error");
+    const auto& gamma_tensor = gamma.value();
 
-        TT_FATAL(gamma_tensor.get_layout() == Layout::ROW_MAJOR, "Error");  // Only support packed RM right now
-        if (gamma_tensor.get_layout() == Layout::TILE) {
+    TT_FATAL(gamma_tensor.get_layout() == Layout::ROW_MAJOR, "Error");  // Only support packed RM right now
+    if (gamma_tensor.get_layout() == Layout::TILE) {
+        TT_FATAL(
+            a.get_padded_shape()[-1] == gamma.value().get_padded_shape()[-1],
+            "{} != {}",
+            a.get_padded_shape()[-1],
+            gamma.value().get_padded_shape()[-1]);
+        TT_FATAL(gamma.value().buffer() != nullptr, "Operands to layernorm need to be allocated in buffers on device!");
+        TT_FATAL(a.device() == gamma.value().device(), "Error");
+        TT_FATAL(gamma.value().get_padded_shape()[-2] == TILE_HEIGHT, "Error");
+    } else {
+        TT_FATAL(gamma_tensor.get_layout() == Layout::ROW_MAJOR, "Error");
+        TT_FATAL(
+            (gamma_tensor.get_padded_shape()[-1] == TILE_WIDTH &&
+             gamma_tensor.volume() / TILE_WIDTH == a.get_padded_shape()[-1] / TILE_WIDTH),
+            "Error");
+        TT_FATAL(gamma_tensor.buffer() != nullptr, "Operands to layernorm need to be allocated in buffers on device!");
+        TT_FATAL(a.device() == gamma_tensor.device(), "Error");
+        TT_FATAL(gamma_tensor.get_dtype() == DataType::BFLOAT16, "Error");
+    }
+    const bool is_layernorm = this->norm_type == LayerNormDistributedType::LAYERNORM;
+    const bool has_beta = beta.has_value();
+    TT_FATAL(is_layernorm == has_beta, "Error");  // TODO: Is this a necessary check?
+
+    if (beta.has_value()) {
+        const auto& beta_tensor = beta.value();
+        TT_FATAL(gamma_tensor.get_layout() == beta_tensor.get_layout(), "Gamma and beta must have the same layout!");
+        TT_FATAL(beta_tensor.get_layout() == Layout::ROW_MAJOR, "Error");
+        if (beta_tensor.get_layout() == Layout::TILE) {
+            TT_FATAL(a.get_padded_shape()[-1] == beta_tensor.get_padded_shape()[-1], "Error");
             TT_FATAL(
-                a.get_padded_shape()[-1] == gamma.value().get_padded_shape()[-1],
-                "{} != {}",
-                a.get_padded_shape()[-1],
-                gamma.value().get_padded_shape()[-1]);
-            TT_FATAL(
-                gamma.value().buffer() != nullptr, "Operands to layernorm need to be allocated in buffers on device!");
-            TT_FATAL(a.device() == gamma.value().device(), "Error");
-            TT_FATAL(gamma.value().get_padded_shape()[-2] == TILE_HEIGHT, "Error");
+                beta_tensor.buffer() != nullptr, "Operands to layernorm need to be allocated in buffers on device!");
+            TT_FATAL(a.device() == beta_tensor.device(), "Error");
+            TT_FATAL(beta.value().get_padded_shape()[-2] == TILE_HEIGHT, "Error");
         } else {
-            TT_FATAL(gamma_tensor.get_layout() == Layout::ROW_MAJOR, "Error");
+            TT_FATAL(beta_tensor.get_layout() == Layout::ROW_MAJOR, "Error");
             TT_FATAL(
-                (gamma_tensor.get_padded_shape()[-1] == TILE_WIDTH &&
-                 gamma_tensor.volume() / TILE_WIDTH == a.get_padded_shape()[-1] / TILE_WIDTH),
+                (beta_tensor.get_padded_shape()[-1] == TILE_WIDTH &&
+                 beta_tensor.volume() / TILE_WIDTH == a.get_padded_shape()[-1] / TILE_WIDTH),
                 "Error");
             TT_FATAL(
-                gamma_tensor.buffer() != nullptr, "Operands to layernorm need to be allocated in buffers on device!");
-            TT_FATAL(a.device() == gamma_tensor.device(), "Error");
-            TT_FATAL(gamma_tensor.get_dtype() == DataType::BFLOAT16, "Error");
-        }
-        const bool is_layernorm = this->norm_type == LayerNormDistributedType::LAYERNORM;
-        const bool has_beta = beta.has_value();
-        TT_FATAL(is_layernorm == has_beta, "Error");  // TODO: Is this a necessary check?
-
-        if (beta.has_value()) {
-            const auto& beta_tensor = beta.value();
-            TT_FATAL(
-                gamma_tensor.get_layout() == beta_tensor.get_layout(), "Gamma and beta must have the same layout!");
-            TT_FATAL(beta_tensor.get_layout() == Layout::ROW_MAJOR, "Error");
-            if (beta_tensor.get_layout() == Layout::TILE) {
-                TT_FATAL(a.get_padded_shape()[-1] == beta_tensor.get_padded_shape()[-1], "Error");
-                TT_FATAL(
-                    beta_tensor.buffer() != nullptr,
-                    "Operands to layernorm need to be allocated in buffers on device!");
-                TT_FATAL(a.device() == beta_tensor.device(), "Error");
-                TT_FATAL(beta.value().get_padded_shape()[-2] == TILE_HEIGHT, "Error");
-            } else {
-                TT_FATAL(beta_tensor.get_layout() == Layout::ROW_MAJOR, "Error");
-                TT_FATAL(
-                    (beta_tensor.get_padded_shape()[-1] == TILE_WIDTH &&
-                     beta_tensor.volume() / TILE_WIDTH == a.get_padded_shape()[-1] / TILE_WIDTH),
-                    "Error");
-                TT_FATAL(
-                    beta_tensor.buffer() != nullptr,
-                    "Operands to layernorm need to be allocated in buffers on device!");
-                TT_FATAL(a.device() == beta_tensor.device(), "Error");
-                TT_FATAL(beta_tensor.get_dtype() == DataType::BFLOAT16, "Error");
-            }
+                beta_tensor.buffer() != nullptr, "Operands to layernorm need to be allocated in buffers on device!");
+            TT_FATAL(a.device() == beta_tensor.device(), "Error");
+            TT_FATAL(beta_tensor.get_dtype() == DataType::BFLOAT16, "Error");
         }
     }
 }
@@ -106,10 +98,11 @@ std::vector<TensorSpec> LayerNormPostAllGather::compute_output_specs(const std::
     auto& input_tensor = input_tensors.at(0);
     return {TensorSpec(
         input_tensor.get_logical_shape(),
-        TensorLayout(this->dtype.value_or(input_tensor.get_dtype()), PageConfig(Layout::TILE), memory_config))};
+        tt::tt_metal::TensorLayout(
+            this->dtype.value_or(input_tensor.get_dtype()), tt::tt_metal::PageConfig(Layout::TILE), memory_config))};
 }
 
-operation::ProgramWithCallbacks LayerNormPostAllGather::create_program(
+tt::tt_metal::operation::ProgramWithCallbacks LayerNormPostAllGather::create_program(
     const std::vector<Tensor>& input_tensors,
     const std::vector<std::optional<const Tensor>>& optional_input_tensors,
     std::vector<Tensor>& output_tensors) const {

@@ -2,18 +2,20 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include <tt-metalium/device_command.hpp>
-#include "cq_commands.hpp"
-#include "memcpy.hpp"
 #include <gtest/gtest.h>
+#include "tt_metal/impl/dispatch/device_command.hpp"
 #include "tt_metal/impl/dispatch/device_command_calculator.hpp"
+#include "tt_metal/impl/dispatch/kernels/cq_commands.hpp"
+#include <tt-metalium/vector_aligned.hpp>
+
+namespace tt::tt_metal {
 
 TEST(DeviceCommandTest, AddDispatchWait) {
     DeviceCommandCalculator calculator;
     calculator.add_dispatch_wait();
 
     HostMemDeviceCommand command(calculator.write_offset_bytes());
-    command.add_dispatch_wait(0, 0, 0);
+    command.add_dispatch_wait(0, 0, 0, 0);
     EXPECT_EQ(command.size_bytes(), command.write_offset_bytes());
 }
 
@@ -22,7 +24,7 @@ TEST(DeviceCommandTest, AddDispatchWaitWithPrefetchStall) {
     calculator.add_dispatch_wait_with_prefetch_stall();
 
     HostMemDeviceCommand command(calculator.write_offset_bytes());
-    command.add_dispatch_wait_with_prefetch_stall(0, 0, 0);
+    command.add_dispatch_wait_with_prefetch_stall(0, 0, 0, 0);
     EXPECT_EQ(command.size_bytes(), command.write_offset_bytes());
 }
 
@@ -114,7 +116,7 @@ TEST(DeviceCommandTest, AddDispatchSetGoSignalNocData) {
     calculator.add_dispatch_set_go_signal_noc_data(5);
 
     HostMemDeviceCommand command(calculator.write_offset_bytes());
-    vector_memcpy_aligned<uint32_t> data(5);
+    vector_aligned<uint32_t> data(5);
     command.add_dispatch_set_go_signal_noc_data(data, DispatcherSelect::DISPATCH_MASTER);
     EXPECT_EQ(command.size_bytes(), command.write_offset_bytes());
 }
@@ -257,7 +259,7 @@ TYPED_TEST(WritePackedCommandTest, RandomAddDispatchWritePacked) {
         }
 
         HostMemDeviceCommand command(calculator.write_offset_bytes());
-        command.add_data(nullptr, 0, random_start);
+        command.add_data(data, 0, random_start);
         uint32_t curr_sub_cmd_idx = 0;
         for (const auto& [sub_cmd_ct, payload_size] : packed_cmd_payloads) {
             std::vector<TypeParam> sub_cmds(sub_cmd_ct);
@@ -269,9 +271,13 @@ TYPED_TEST(WritePackedCommandTest, RandomAddDispatchWritePacked) {
                 sub_cmds,
                 data_collection,
                 packed_write_max_unicast_sub_cmds,
+                0,
+                false,
                 curr_sub_cmd_idx);
             curr_sub_cmd_idx += sub_cmd_ct;
         }
         EXPECT_EQ(command.size_bytes(), command.write_offset_bytes());
     }
 }
+
+}  // namespace tt::tt_metal

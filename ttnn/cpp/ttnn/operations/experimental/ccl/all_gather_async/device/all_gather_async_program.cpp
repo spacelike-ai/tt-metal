@@ -27,6 +27,7 @@
 #include <type_traits>
 #include <ranges>
 #include <optional>
+
 using namespace tt::constants;
 
 namespace ttnn {
@@ -77,13 +78,13 @@ std::tuple<CoreRangeSet, std::vector<CoreCoord>> choose_worker_cores(
     size_t num_workers_per_link,
     bool persistent_fabric_mode,
     IDevice* device,
-    const std::optional<SubDeviceId>& sub_device_id) {
+    const std::optional<tt::tt_metal::SubDeviceId>& sub_device_id) {
     std::tuple<CoreRangeSet, std::vector<CoreCoord>> result;
     CoreRangeSet sender_worker_core_range;
     if (persistent_fabric_mode) {
         const size_t num_workers_preferred = num_workers_per_link * num_links;
         const auto available_cores = device->worker_cores(
-            HalProgrammableCoreType::TENSIX,
+            tt::tt_metal::HalProgrammableCoreType::TENSIX,
             sub_device_id.has_value() ? *sub_device_id : device->get_sub_device_ids().at(0));
         if (available_cores.num_cores() < num_workers_preferred) {
             log_warning(
@@ -125,7 +126,7 @@ std::tuple<CoreRangeSet, std::vector<CoreCoord>> choose_worker_cores(
 // For ring all-gather, we can send sub-sections of input tensor in opposite directions
 // For linear all-gather though, we must ensure we send full tensors in BOTH directions
 //   (in other words, disable the "bidirectional" send flag)
-operation::ProgramWithCallbacks all_gather_async_multi_core_with_workers(
+tt::tt_metal::operation::ProgramWithCallbacks all_gather_async_multi_core_with_workers(
     const Tensor& input_tensor,
     std::optional<IDevice*> forward_device,
     std::optional<IDevice*> backward_device,
@@ -136,7 +137,7 @@ operation::ProgramWithCallbacks all_gather_async_multi_core_with_workers(
     const uint32_t ring_index,
     ccl::Topology topology,
     const GlobalSemaphore semaphore,
-    const std::optional<SubDeviceId>& sub_device_id,
+    const std::optional<tt::tt_metal::SubDeviceId>& sub_device_id,
     bool enable_persistent_fabric_mode) {
     tt::tt_metal::Program program{};
     const bool enable_async_output_tensor = false;
@@ -161,16 +162,17 @@ operation::ProgramWithCallbacks all_gather_async_multi_core_with_workers(
                   backward_device.value_or(nullptr),
                   &program,
                   enable_persistent_fabric_mode,
-                  num_links)
+                  num_links,
+                  topology)
             : ccl::EdmLineFabricOpInterface(
                   device,
                   forward_device.value_or(nullptr),
                   backward_device.value_or(nullptr),
                   &program,
                   enable_persistent_fabric_mode,
-                  num_links);
-
-    LineTopology line_topology(ring_size, ring_index);
+                  num_links,
+                  false,
+                  topology);
 
     std::unique_ptr<ccl::CclOpTensorConfig> input_tensor_config =
         ttnn::ccl::CclOpTensorConfig::build_all_gather_tensor_config(input_tensor);
@@ -202,7 +204,7 @@ operation::ProgramWithCallbacks all_gather_async_multi_core_with_workers(
     tt::tt_metal::CircularBufferConfig cb_src0_config =
         tt::tt_metal::CircularBufferConfig(cb_num_pages * l1_scratch_cb_page_size_bytes, {{src0_cb_index, df}})
             .set_page_size(src0_cb_index, l1_scratch_cb_page_size_bytes);
-    CBHandle cb_src0_workers = CreateCircularBuffer(program, sender_worker_core_range, cb_src0_config);
+    tt::tt_metal::CBHandle cb_src0_workers = CreateCircularBuffer(program, sender_worker_core_range, cb_src0_config);
 
     // Create Tensor slicer
     // read the entire input tensor (partition size = 1, partition index = 0)
@@ -224,7 +226,7 @@ operation::ProgramWithCallbacks all_gather_async_multi_core_with_workers(
     );
 
     // KERNEL CREATION
-    KernelHandle worker_sender_reader_kernel_id =
+    tt::tt_metal::KernelHandle worker_sender_reader_kernel_id =
         ttnn::ccl::worker_detail::generate_multi_command_stream_kernel_ct_args(
             program,
             {src0_cb_index},
@@ -234,7 +236,7 @@ operation::ProgramWithCallbacks all_gather_async_multi_core_with_workers(
             1,  // num_command_streams
             device->id());
 
-    KernelHandle worker_sender_writer_kernel_id =
+    tt::tt_metal::KernelHandle worker_sender_writer_kernel_id =
         ttnn::ccl::worker_detail::generate_multi_command_stream_kernel_ct_args(
             program,
             {src0_cb_index},
@@ -243,14 +245,24 @@ operation::ProgramWithCallbacks all_gather_async_multi_core_with_workers(
             tt::tt_metal::WriterDataMovementConfig{},
             1,  // num_command_streams
             device->id());
+    size_t num_targets_forward = 0;
+    size_t num_targets_backward = 0;
+    if (topology == ccl::Topology::Linear) {
+        LineTopology line_topology(ring_size, ring_index);
+        num_targets_forward =
+            line_topology.get_distance_to_end_of_line(ttnn::ccl::EdmLineFabricOpInterface::Direction::FORWARD);
+        num_targets_backward =
+            line_topology.get_distance_to_end_of_line(ttnn::ccl::EdmLineFabricOpInterface::Direction::BACKWARD);
+    } else if (topology == ccl::Topology::Ring) {
+        // TODO: Commonize
+        num_targets_forward = tt::div_up(ring_size - 1, 2);
+        num_targets_backward = ring_size - 1 - num_targets_forward;
+        if (ring_index % 2 == 0) {
+            std::swap(num_targets_forward, num_targets_backward);
+        }
+    }
 
-    const size_t forward_direction_distance_to_end_of_line =
-        line_topology.get_distance_to_end_of_line(ttnn::ccl::EdmLineFabricOpInterface::Direction::FORWARD);
-    const size_t backward_direction_distance_to_end_of_line =
-        line_topology.get_distance_to_end_of_line(ttnn::ccl::EdmLineFabricOpInterface::Direction::BACKWARD);
-
-    ttnn::ccl::cmd::MulticastCommandDestArgs mcast_dest_args = {
-        forward_direction_distance_to_end_of_line, backward_direction_distance_to_end_of_line};
+    ttnn::ccl::cmd::MulticastCommandDestArgs mcast_dest_args = {num_targets_forward, num_targets_backward};
     log_trace(
         tt::LogOp,
         "[mcast_dest_args] num target forward: {}, num target backward: {}",
@@ -286,28 +298,28 @@ operation::ProgramWithCallbacks all_gather_async_multi_core_with_workers(
         log_trace(tt::LogOp, "DEBUG: output tensor slice v2:");
         print_tensor_slice(output_worker_slice_v2);
 
-        std::optional<ttnn::ccl::SenderWorkerAdapterSpec> forward_fabric_connection =
-            line_topology.is_first_device_in_line(ttnn::ccl::EdmLineFabricOpInterface::Direction::BACKWARD)
+        std::optional<tt::tt_fabric::SenderWorkerAdapterSpec> forward_fabric_connection =
+            !forward_device.has_value()
                 ? std::nullopt
-                : std::optional<ttnn::ccl::SenderWorkerAdapterSpec>(local_fabric_handle->uniquely_connect_worker(
+                : std::optional<tt::tt_fabric::SenderWorkerAdapterSpec>(local_fabric_handle->uniquely_connect_worker(
                       device, ttnn::ccl::EdmLineFabricOpInterface::FORWARD));
-        std::optional<ttnn::ccl::SenderWorkerAdapterSpec> backward_fabric_connection =
-            line_topology.is_last_device_in_line(ttnn::ccl::EdmLineFabricOpInterface::Direction::BACKWARD)
+        std::optional<tt::tt_fabric::SenderWorkerAdapterSpec> backward_fabric_connection =
+            !backward_device.has_value()
                 ? std::nullopt
-                : std::optional<ttnn::ccl::SenderWorkerAdapterSpec>(local_fabric_handle->uniquely_connect_worker(
+                : std::optional<tt::tt_fabric::SenderWorkerAdapterSpec>(local_fabric_handle->uniquely_connect_worker(
                       device, ttnn::ccl::EdmLineFabricOpInterface::BACKWARD));
 
         log_trace(
             tt::LogOp,
-            "DEBUG: line_index: {}, line_size: {}, forward_fabric_connection: {}",
-            line_topology.line_index(),
-            line_topology.line_size(),
+            "DEBUG: ring_index: {}, ring_size: {}, forward_fabric_connection: {}",
+            ring_index,
+            ring_size,
             forward_fabric_connection.has_value());
         log_trace(
             tt::LogOp,
-            "DEBUG: line_index: {}, line_size: {}, backward_fabric_connection: {}",
-            line_topology.line_index(),
-            line_topology.line_size(),
+            "DEBUG: ring_index: {}, ring_size: {}, backward_fabric_connection: {}",
+            ring_index,
+            ring_size,
             backward_fabric_connection.has_value());
 
         // READER COMMAND STREAM and RT ARGS

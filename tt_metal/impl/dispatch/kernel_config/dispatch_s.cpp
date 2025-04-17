@@ -2,15 +2,30 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 #include "dispatch_s.hpp"
-#include "dispatch.hpp"
-#include "prefetch.hpp"
 
 #include <host_api.hpp>
-#include <tt_metal.hpp>
-#include "tt_metal/impl/dispatch/dispatch_query_manager.hpp"
-
-#include <tt-metalium/command_queue_interface.hpp>
 #include <tt-metalium/dispatch_settings.hpp>
+#include <tt_metal.hpp>
+#include <map>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "assert.hpp"
+#include "command_queue_common.hpp"
+#include "device.hpp"
+#include "dispatch.hpp"
+#include "dispatch/kernel_config/fd_kernel.hpp"
+#include "dispatch_core_common.hpp"
+#include "dispatch_mem_map.hpp"
+#include "hal.hpp"
+#include "hal_types.hpp"
+#include "prefetch.hpp"
+#include "tt_metal/impl/dispatch/dispatch_query_manager.hpp"
+#include <umd/device/tt_core_coordinates.h>
+#include <umd/device/types/xy_pair.h>
+#include "utils.hpp"
 
 using namespace tt::tt_metal;
 
@@ -41,14 +56,14 @@ void DispatchSKernel::GenerateStaticConfigs() {
         my_dispatch_constants.get_device_command_queue_addr(CommandQueueDeviceAddrType::DISPATCH_S_SYNC_SEM);
     // used by dispatch_d to signal that dispatch_s can send go signal
 
-    static_config_.mcast_go_signal_addr = hal.get_dev_addr(HalProgrammableCoreType::TENSIX, HalL1MemAddrType::GO_MSG);
+    static_config_.mcast_go_signal_addr =
+        hal_ref.get_dev_addr(HalProgrammableCoreType::TENSIX, HalL1MemAddrType::GO_MSG);
     static_config_.unicast_go_signal_addr =
-        (hal.get_programmable_core_type_index(HalProgrammableCoreType::ACTIVE_ETH) != -1)
-            ? hal.get_dev_addr(HalProgrammableCoreType::ACTIVE_ETH, HalL1MemAddrType::GO_MSG)
+        (hal_ref.get_programmable_core_type_index(HalProgrammableCoreType::ACTIVE_ETH) != -1)
+            ? hal_ref.get_dev_addr(HalProgrammableCoreType::ACTIVE_ETH, HalL1MemAddrType::GO_MSG)
             : 0;
     static_config_.distributed_dispatcher = DispatchQueryManager::instance().distributed_dispatcher();
-    static_config_.worker_sem_base_addr =
-        my_dispatch_constants.get_device_command_queue_addr(CommandQueueDeviceAddrType::DISPATCH_MESSAGE);
+    static_config_.first_stream_used = my_dispatch_constants.get_dispatch_stream_index(0);
     static_config_.max_num_worker_sems = DispatchSettings::DISPATCH_MESSAGE_ENTRIES;
     static_config_.max_num_go_signal_noc_data_entries = DispatchSettings::DISPATCH_GO_SIGNAL_NOC_DATA_ENTRIES;
 }
@@ -79,7 +94,7 @@ void DispatchSKernel::CreateKernel() {
         static_config_.mcast_go_signal_addr.value(),
         static_config_.unicast_go_signal_addr.value(),
         static_config_.distributed_dispatcher.value(),
-        static_config_.worker_sem_base_addr.value(),
+        static_config_.first_stream_used.value(),
         static_config_.max_num_worker_sems.value(),
         static_config_.max_num_go_signal_noc_data_entries.value(),
     };
@@ -122,14 +137,8 @@ void DispatchSKernel::ConfigureCore() {
     auto& my_dispatch_constants = DispatchMemMap::get(GetCoreType());
     uint32_t dispatch_s_sync_sem_base_addr =
         my_dispatch_constants.get_device_command_queue_addr(CommandQueueDeviceAddrType::DISPATCH_S_SYNC_SEM);
-    uint32_t dispatch_message_base_addr =
-        my_dispatch_constants.get_device_command_queue_addr(CommandQueueDeviceAddrType::DISPATCH_MESSAGE);
     for (uint32_t i = 0; i < DispatchSettings::DISPATCH_MESSAGE_ENTRIES; i++) {
-        uint32_t dispatch_s_sync_sem_addr =
-            dispatch_s_sync_sem_base_addr + my_dispatch_constants.get_dispatch_message_offset(i);
-        uint32_t dispatch_message_addr =
-            dispatch_message_base_addr + my_dispatch_constants.get_dispatch_message_offset(i);
+        uint32_t dispatch_s_sync_sem_addr = dispatch_s_sync_sem_base_addr + my_dispatch_constants.get_sync_offset(i);
         detail::WriteToDeviceL1(device_, logical_core_, dispatch_s_sync_sem_addr, zero, GetCoreType());
-        detail::WriteToDeviceL1(device_, logical_core_, dispatch_message_addr, zero, GetCoreType());
     }
 }

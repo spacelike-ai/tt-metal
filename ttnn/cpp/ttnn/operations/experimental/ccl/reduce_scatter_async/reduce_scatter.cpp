@@ -18,7 +18,7 @@ ttnn::Tensor ExecuteReduceScatter::invoke(
     const std::optional<ttnn::MemoryConfig>& memory_config,
     ttnn::ccl::Topology topology,
     const std::optional<size_t> num_preferred_links,
-    std::optional<SubDeviceId> worker_subdevice_id_opt) {
+    std::optional<tt::tt_metal::SubDeviceId> worker_subdevice_id_opt) {
     MemoryConfig out_memory_config = memory_config.value_or(input_tensor.memory_config());
     return ttnn::operations::experimental::ccl::reduce_scatter(
         input_tensor,
@@ -39,11 +39,12 @@ ttnn::Tensor ExecuteReduceScatter::invoke(
     const MeshDevice& mesh_device,
     const global_semaphore::MultiDeviceGlobalSemaphore& from_remote_multi_device_global_semaphore,
     const global_semaphore::MultiDeviceGlobalSemaphore& to_remote_multi_device_global_semaphore,
+    const std::optional<std::vector<ttnn::Tensor>>& persistent_output_tensors,
     ttnn::operations::reduction::ReduceType math_op,
     const std::optional<ttnn::MemoryConfig>& memory_config,
     ttnn::ccl::Topology topology,
     const std::optional<size_t> num_preferred_links,
-    std::optional<SubDeviceId> worker_subdevice_id_opt) {
+    std::optional<tt::tt_metal::SubDeviceId> worker_subdevice_id_opt) {
     MemoryConfig out_memory_config = memory_config.value_or(input_tensor.memory_config());
     return ttnn::operations::experimental::ccl::reduce_scatter(
         input_tensor,
@@ -52,6 +53,7 @@ ttnn::Tensor ExecuteReduceScatter::invoke(
         mesh_device,
         from_remote_multi_device_global_semaphore,
         to_remote_multi_device_global_semaphore,
+        persistent_output_tensors,
         math_op,
         out_memory_config,
         topology,

@@ -2,7 +2,14 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
+#include <stdint.h>
+#include <optional>
+
+#include "dispatch/dispatch_core_manager.hpp"
 #include "fd_kernel.hpp"
+#include "system_memory_manager.hpp"
+#include "tt_cluster.hpp"
+#include <umd/device/tt_xy_pair.h>
 
 typedef struct dispatch_s_static_config {
     std::optional<uint32_t> cb_base;
@@ -14,7 +21,7 @@ typedef struct dispatch_s_static_config {
     std::optional<uint32_t> mcast_go_signal_addr;
     std::optional<uint32_t> unicast_go_signal_addr;
     std::optional<uint32_t> distributed_dispatcher;
-    std::optional<uint32_t> worker_sem_base_addr;
+    std::optional<uint32_t> first_stream_used;
     std::optional<uint32_t> max_num_worker_sems;
     std::optional<uint32_t> max_num_go_signal_noc_data_entries;
 } dispatch_s_static_config_t;
@@ -31,7 +38,8 @@ public:
         int node_id, chip_id_t device_id, chip_id_t servicing_device_id, uint8_t cq_id, noc_selection_t noc_selection) :
         FDKernel(node_id, device_id, servicing_device_id, cq_id, noc_selection) {
         uint16_t channel = tt::Cluster::instance().get_assigned_channel_for_device(device_id);
-        this->logical_core_ = dispatch_core_manager::instance().dispatcher_s_core(device_id, channel, cq_id_);
+        this->logical_core_ =
+            tt::tt_metal::dispatch_core_manager::instance().dispatcher_s_core(device_id, channel, cq_id_);
     }
     void CreateKernel() override;
     void GenerateStaticConfigs() override;

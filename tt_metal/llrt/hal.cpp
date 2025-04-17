@@ -2,12 +2,14 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include "hal.hpp"
+#include "llrt/hal.hpp"
 
-#include <tt_backend_api_types.hpp>
 #include <assert.hpp>
 
 #include "get_platform_architecture.hpp"
+#include "hal_types.hpp"
+#include <umd/device/types/arch.h>
+
 namespace tt {
 
 namespace tt_metal {
@@ -16,7 +18,7 @@ namespace tt_metal {
 // Once it knows the architecture it can self initialize architecture specific memory maps
 Hal::Hal() : arch_(get_platform_architecture()) {
     switch (this->arch_) {
-        case tt::ARCH::GRAYSKULL: initialize_gs(); break;
+        case tt::ARCH::GRAYSKULL: /*TT_THROW("Unsupported arch for HAL")*/; break;
 
         case tt::ARCH::WORMHOLE_B0: initialize_wh(); break;
 

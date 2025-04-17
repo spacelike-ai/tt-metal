@@ -15,6 +15,7 @@
 #include <tt-metalium/logger.hpp>
 #include <tt-metalium/tt_metal.hpp>
 #include <tt-metalium/host_api.hpp>
+#include <thread>
 #include "tt_metal/test_utils/stimulus.hpp"
 #include "tt_metal/jit_build/build_env_manager.hpp"
 
@@ -50,7 +51,7 @@ const size_t get_rand_32_byte_aligned_address(const size_t& base, const size_t& 
 }
 
 bool eth_direct_sender_receiver_kernels(
-    DispatchFixture* fixture,
+    tt_metal::DispatchFixture* fixture,
     tt_metal::IDevice* sender_device,
     tt_metal::IDevice* receiver_device,
     const size_t& byte_size,
@@ -227,11 +228,12 @@ bool send_over_eth(
         receiver_device->id(), receiver_core, args_1, eth_l1_mem::address_map::ERISC_APP_SYNC_INFO_BASE);
 
     // TODO: this should be updated to use kernel api
-    uint32_t active_eth_index = hal.get_programmable_core_type_index(HalProgrammableCoreType::ACTIVE_ETH);
-    auto sender_firmware_path = BuildEnvManager::get_instance()
+    uint32_t active_eth_index =
+        tt_metal::hal_ref.get_programmable_core_type_index(tt_metal::HalProgrammableCoreType::ACTIVE_ETH);
+    auto sender_firmware_path = tt_metal::BuildEnvManager::get_instance()
                                     .get_firmware_build_state(sender_device->build_id(), active_eth_index, 0, 0)
                                     .get_target_out_path("");
-    auto receiver_firmware_path = BuildEnvManager::get_instance()
+    auto receiver_firmware_path = tt_metal::BuildEnvManager::get_instance()
                                       .get_firmware_build_state(receiver_device->build_id(), active_eth_index, 0, 0)
                                       .get_target_out_path("");
     const ll_api::memory& binary_mem_send = llrt::get_risc_binary(sender_firmware_path);
@@ -269,6 +271,8 @@ bool send_over_eth(
 }
 
 }  // namespace unit_tests::erisc::direct_send
+
+namespace tt::tt_metal {
 
 TEST_F(N300DeviceFixture, ActiveEthSingleCoreDirectSendChip0ToChip1) {
     using namespace CMAKE_UNIQUE_NAMESPACE;
@@ -517,6 +521,9 @@ TEST_F(DeviceFixture, ActiveEthKernelsDirectSendAllConnectedChips) {
                 continue;
             }
             for (const auto& sender_core : sender_device->get_active_ethernet_cores(true)) {
+                if (not tt::Cluster::instance().is_ethernet_link_up(sender_device->id(), sender_core)) {
+                    continue;
+                }
                 auto [device_id, receiver_core] = sender_device->get_connected_ethernet_core(sender_core);
                 if (receiver_device->id() != device_id) {
                     continue;
@@ -562,7 +569,7 @@ TEST_F(DeviceFixture, ActiveEthKernelsDirectSendAllConnectedChips) {
     }
 }
 
-TEST_F(N300DeviceFixture, ActiveEthKernelsBidirectionalDirectSend) {
+TEST_F(TwoDeviceFixture, ActiveEthKernelsBidirectionalDirectSend) {
     using namespace CMAKE_UNIQUE_NAMESPACE;
     const auto& device_0 = devices_.at(0);
     const auto& device_1 = devices_.at(1);
@@ -571,6 +578,9 @@ TEST_F(N300DeviceFixture, ActiveEthKernelsBidirectionalDirectSend) {
     const size_t dst_eth_l1_byte_address = eth_l1_mem::address_map::ERISC_L1_UNRESERVED_BASE;
 
     for (const auto& sender_core : device_0->get_active_ethernet_cores(true)) {
+        if (not tt::Cluster::instance().is_ethernet_link_up(device_0->id(), sender_core)) {
+            continue;
+        }
         CoreCoord receiver_core = std::get<1>(device_0->get_connected_ethernet_core(sender_core));
         ASSERT_TRUE(unit_tests::erisc::direct_send::eth_direct_sender_receiver_kernels(
             static_cast<DispatchFixture*>(this),
@@ -592,6 +602,9 @@ TEST_F(N300DeviceFixture, ActiveEthKernelsBidirectionalDirectSend) {
             sender_core));
     }
     for (const auto& sender_core : device_0->get_active_ethernet_cores(true)) {
+        if (not tt::Cluster::instance().is_ethernet_link_up(device_0->id(), sender_core)) {
+            continue;
+        }
         CoreCoord receiver_core = std::get<1>(device_0->get_connected_ethernet_core(sender_core));
         ASSERT_TRUE(unit_tests::erisc::direct_send::eth_direct_sender_receiver_kernels(
             static_cast<DispatchFixture*>(this),
@@ -613,6 +626,9 @@ TEST_F(N300DeviceFixture, ActiveEthKernelsBidirectionalDirectSend) {
             sender_core));
     }
     for (const auto& sender_core : device_0->get_active_ethernet_cores(true)) {
+        if (not tt::Cluster::instance().is_ethernet_link_up(device_0->id(), sender_core)) {
+            continue;
+        }
         CoreCoord receiver_core = std::get<1>(device_0->get_connected_ethernet_core(sender_core));
         ASSERT_TRUE(unit_tests::erisc::direct_send::eth_direct_sender_receiver_kernels(
             static_cast<DispatchFixture*>(this),
@@ -634,6 +650,9 @@ TEST_F(N300DeviceFixture, ActiveEthKernelsBidirectionalDirectSend) {
             sender_core));
     }
     for (const auto& sender_core : device_0->get_active_ethernet_cores(true)) {
+        if (not tt::Cluster::instance().is_ethernet_link_up(device_0->id(), sender_core)) {
+            continue;
+        }
         CoreCoord receiver_core = std::get<1>(device_0->get_connected_ethernet_core(sender_core));
         ASSERT_TRUE(unit_tests::erisc::direct_send::eth_direct_sender_receiver_kernels(
             static_cast<DispatchFixture*>(this),
@@ -656,7 +675,7 @@ TEST_F(N300DeviceFixture, ActiveEthKernelsBidirectionalDirectSend) {
     }
 }
 
-TEST_F(N300DeviceFixture, ActiveEthKernelsRepeatedDirectSends) {
+TEST_F(TwoDeviceFixture, ActiveEthKernelsRepeatedDirectSends) {
     using namespace CMAKE_UNIQUE_NAMESPACE;
     const auto& device_0 = devices_.at(0);
     const auto& device_1 = devices_.at(1);
@@ -665,6 +684,9 @@ TEST_F(N300DeviceFixture, ActiveEthKernelsRepeatedDirectSends) {
     const size_t dst_eth_l1_byte_address = eth_l1_mem::address_map::ERISC_L1_UNRESERVED_BASE;
 
     for (const auto& sender_core : device_0->get_active_ethernet_cores(true)) {
+        if (not tt::Cluster::instance().is_ethernet_link_up(device_0->id(), sender_core)) {
+            continue;
+        }
         CoreCoord receiver_core = std::get<1>(device_0->get_connected_ethernet_core(sender_core));
         for (int i = 0; i < 10; i++) {
             ASSERT_TRUE(unit_tests::erisc::direct_send::eth_direct_sender_receiver_kernels(
@@ -691,7 +713,7 @@ TEST_F(N300DeviceFixture, ActiveEthKernelsRepeatedDirectSends) {
     }
 }
 
-TEST_F(N300DeviceFixture, ActiveEthKernelsRandomDirectSendTests) {
+TEST_F(TwoDeviceFixture, ActiveEthKernelsRandomDirectSendTests) {
     using namespace CMAKE_UNIQUE_NAMESPACE;
     srand(0);
     const auto& device_0 = devices_.at(0);
@@ -712,6 +734,11 @@ TEST_F(N300DeviceFixture, ActiveEthKernelsRandomDirectSendTests) {
 
         const auto& send_chip = devices_.at(std::get<0>(it->first));
         CoreCoord sender_core = std::get<1>(it->first);
+
+        if (not tt::Cluster::instance().is_ethernet_link_up(send_chip->id(), sender_core)) {
+            continue;
+        }
+
         const auto& receiver_chip = devices_.at(std::get<0>(it->second));
         CoreCoord receiver_core = std::get<1>(it->second);
 
@@ -736,17 +763,23 @@ TEST_F(N300DeviceFixture, ActiveEthKernelsRandomDirectSendTests) {
             receiver_core));
     }
 }
-TEST_F(N300DeviceFixture, ActiveEthKernelsRandomEthPacketSizeDirectSendTests) {
+TEST_F(TwoDeviceFixture, ActiveEthKernelsRandomEthPacketSizeDirectSendTests) {
     srand(0);
     const auto& device_0 = devices_.at(0);
     const auto& device_1 = devices_.at(1);
 
     std::map<std::tuple<int, CoreCoord>, std::tuple<int, CoreCoord>> connectivity = {};
     for (const auto& sender_core : device_0->get_active_ethernet_cores(true)) {
+        if (not tt::Cluster::instance().is_ethernet_link_up(device_0->id(), sender_core)) {
+            continue;
+        }
         const auto& receiver_core = device_0->get_connected_ethernet_core(sender_core);
         connectivity.insert({{0, sender_core}, receiver_core});
     }
     for (const auto& sender_core : device_1->get_active_ethernet_cores(true)) {
+        if (not tt::Cluster::instance().is_ethernet_link_up(device_1->id(), sender_core)) {
+            continue;
+        }
         const auto& receiver_core = device_1->get_connected_ethernet_core(sender_core);
         connectivity.insert({{1, sender_core}, receiver_core});
     }
@@ -799,6 +832,9 @@ TEST_F(CommandQueueMultiDeviceProgramFixture, ActiveEthKernelsDirectSendAllConne
                 continue;
             }
             for (const auto& sender_core : sender_device->get_active_ethernet_cores(true)) {
+                if (not tt::Cluster::instance().is_ethernet_link_up(sender_device->id(), sender_core)) {
+                    continue;
+                }
                 auto [device_id, receiver_core] = sender_device->get_connected_ethernet_core(sender_core);
                 if (receiver_device->id() != device_id) {
                     continue;
@@ -843,3 +879,5 @@ TEST_F(CommandQueueMultiDeviceProgramFixture, ActiveEthKernelsDirectSendAllConne
         }
     }
 }
+
+}  // namespace tt::tt_metal

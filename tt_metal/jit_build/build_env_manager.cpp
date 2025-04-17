@@ -3,8 +3,33 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "build_env_manager.hpp"
-#include <command_queue_interface.hpp>
+
+#include <limits.h>
+#include <magic_enum/magic_enum.hpp>
+#include <math.h>
+#include <tracy/Tracy.hpp>
+#include <bitset>
+#include <cstddef>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <variant>
+
+#include "assert.hpp"
+#include "core_coord.hpp"
+#include "core_descriptor.hpp"
+#include "dispatch_core_common.hpp"
+#include "dispatch_mem_map.hpp"
+#include "hal.hpp"
+#include "hal_types.hpp"
+#include "impl/dispatch/dispatch_core_manager.hpp"
+#include "jit_build/build.hpp"
+#include "metal_soc_descriptor.h"
+#include "system_memory_manager.hpp"
 #include "tt_cluster.hpp"
+#include <umd/device/tt_core_coordinates.h>
 
 namespace tt::tt_metal {
 
@@ -16,13 +41,13 @@ BuildEnvManager& BuildEnvManager::get_instance() {
 BuildEnvManager::BuildEnvManager() {
     // Initialize build_state_indices_
     uint32_t index = 0;
-    uint32_t programmable_core_type_count = hal.get_programmable_core_type_count();
+    uint32_t programmable_core_type_count = hal_ref.get_programmable_core_type_count();
     build_state_indices_.resize(programmable_core_type_count);
     for (uint32_t programmable_core = 0; programmable_core < programmable_core_type_count; programmable_core++) {
-        uint32_t processor_class_count = hal.get_processor_classes_count(programmable_core);
+        uint32_t processor_class_count = hal_ref.get_processor_classes_count(programmable_core);
         build_state_indices_[programmable_core].resize(processor_class_count);
         for (uint32_t processor_class = 0; processor_class < processor_class_count; processor_class++) {
-            uint32_t processor_types_count = hal.get_processor_types_count(programmable_core, processor_class);
+            uint32_t processor_types_count = hal_ref.get_processor_types_count(programmable_core, processor_class);
             build_state_indices_[programmable_core][processor_class] = {index, processor_types_count};
             index += processor_types_count;
         }
@@ -36,7 +61,7 @@ std::map<std::string, std::string> initialize_device_kernel_defines(chip_id_t de
     const size_t num_dram_banks = static_cast<size_t>(soc_d.get_num_dram_views());
     // # of L1 banks needs to match allocator. For L1BankingAllocator this is the # of storage cores. TODO: when
     // allocator is pulled out of device, use it to get that info here.
-    const auto& dispatch_core_config = dispatch_core_manager::instance().get_dispatch_core_config(device_id);
+    const auto& dispatch_core_config = dispatch_core_manager::instance().get_dispatch_core_config();
     const size_t num_compute_and_storage_cores =
         tt::get_logical_compute_cores(device_id, num_hw_cqs, dispatch_core_config).size();
     const size_t num_storage_only_cores =
@@ -94,13 +119,13 @@ uint32_t compute_build_key(chip_id_t device_id, uint8_t num_hw_cqs) {
 
     // num_hw_cqs, dispatch_core_axis, dispatch_core_type all change the number of banks, so need to be part of the
     // build key since we have defines based on number of banks.
-    const auto& dispatch_core_config = dispatch_core_manager::instance().get_dispatch_core_config(device_id);
+    const auto& dispatch_core_config = dispatch_core_manager::instance().get_dispatch_core_config();
     build_key = (static_cast<uint32_t>(dispatch_core_config.get_dispatch_core_type())
                  << (harvesting_map_bits + num_hw_cq_bits + dispatch_core_axis_bits)) |
                 (static_cast<uint32_t>(dispatch_core_config.get_dispatch_core_axis())
                  << (harvesting_map_bits + num_hw_cq_bits)) |
                 (static_cast<uint32_t>(num_hw_cqs) << harvesting_map_bits);
-    if (not hal.is_coordinate_virtualization_enabled()) {
+    if (not hal_ref.is_coordinate_virtualization_enabled()) {
         // Coordinate virtualization is not enabled. For a single program, its associated binaries will vary across
         // devices with different cores harvested.
         build_key |= tt::Cluster::instance().get_harvesting_mask(device_id);
@@ -114,14 +139,13 @@ uint32_t compute_build_key(chip_id_t device_id, uint8_t num_hw_cqs) {
 
 JitBuildStateSet create_build_state(JitBuildEnv& build_env, chip_id_t device_id, uint8_t num_hw_cqs, bool is_fw) {
     // Get the dispatch message address for this device
-    CoreType dispatch_core_type = dispatch_core_manager::instance().get_dispatch_core_type(device_id);
-    uint32_t dispatch_message_addr = DispatchMemMap::get(dispatch_core_type, num_hw_cqs)
-                                         .get_device_command_queue_addr(CommandQueueDeviceAddrType::DISPATCH_MESSAGE);
+    CoreType dispatch_core_type = dispatch_core_manager::instance().get_dispatch_core_type();
+    uint32_t dispatch_message_addr =
+        DispatchMemMap::get(dispatch_core_type, num_hw_cqs).get_dispatch_message_addr_start();
 
     // Prepare the container for build states
-    uint32_t num_build_states = hal.get_num_risc_processors();
+    uint32_t num_build_states = hal_ref.get_num_risc_processors();
     std::vector<std::shared_ptr<JitBuildState>> build_states(num_build_states);
-    ;
 
     // Helper lambda to create a build state based on the core type and processor info.
     auto create_jit_build_state = [&](HalProgrammableCoreType core_type,
@@ -151,14 +175,13 @@ JitBuildStateSet create_build_state(JitBuildEnv& build_env, chip_id_t device_id,
             }
             case HalProgrammableCoreType::ACTIVE_ETH: {
                 // Cooperative means active erisc FW needs to context switch to base FW
-                bool is_cooperative = tt::Cluster::instance().arch() == ARCH::WORMHOLE_B0;
                 return std::make_shared<JitBuildActiveEthernet>(
                     build_env,
                     JitBuiltStateConfig{
                         .processor_id = processor_class,
                         .is_fw = is_fw,
                         .dispatch_message_addr = dispatch_message_addr,
-                        .is_cooperative = is_cooperative});
+                        .is_cooperative = hal_ref.get_eth_fw_is_cooperative()});
                 break;
             }
             case HalProgrammableCoreType::IDLE_ETH: {
@@ -179,15 +202,15 @@ JitBuildStateSet create_build_state(JitBuildEnv& build_env, chip_id_t device_id,
 
     // Loop through programmable core types and their processor classes/types.
     uint32_t index = 0;
-    uint32_t programmable_core_type_count = hal.get_programmable_core_type_count();
+    uint32_t programmable_core_type_count = hal_ref.get_programmable_core_type_count();
     for (uint32_t programmable_core = 0; programmable_core < programmable_core_type_count; programmable_core++) {
         HalProgrammableCoreType core_type = magic_enum::enum_value<HalProgrammableCoreType>(programmable_core);
-        uint32_t processor_class_count = hal.get_processor_classes_count(programmable_core);
+        uint32_t processor_class_count = hal_ref.get_processor_classes_count(programmable_core);
         for (uint32_t processor_class = 0; processor_class < processor_class_count; processor_class++) {
             auto compute_proc_class = magic_enum::enum_cast<HalProcessorClassType>(processor_class);
             bool is_compute_processor =
                 compute_proc_class.has_value() and compute_proc_class.value() == HalProcessorClassType::COMPUTE;
-            uint32_t processor_types_count = hal.get_processor_types_count(programmable_core, processor_class);
+            uint32_t processor_types_count = hal_ref.get_processor_types_count(programmable_core, processor_class);
             for (uint32_t processor_type = 0; processor_type < processor_types_count; processor_type++) {
                 build_states[index++] =
                     create_jit_build_state(core_type, processor_class, processor_type, is_compute_processor);

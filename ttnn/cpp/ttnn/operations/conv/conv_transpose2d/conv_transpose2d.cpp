@@ -13,9 +13,10 @@
 #include "ttnn/operations/conv/conv2d/prepare_conv2d_weights.hpp"
 #include "ttnn/operations/sliding_window/halo/halo.hpp"
 
-using namespace tt;
 namespace ttnn {
 namespace operations::conv {
+
+using namespace tt;
 using sliding_window::ParallelConfig;
 using sliding_window::SlidingWindowConfig;
 
@@ -34,7 +35,7 @@ Tensor _transform_weights_for_conv_transpose2d(const Tensor& conv_weight_tensor,
         auto kernel_height = in_w_shape[2];
         auto kernel_width = in_w_shape[3];
         ttnn::Shape output_shape{out_channels, in_channels, kernel_height, kernel_width};
-        auto output_buffer = owned_buffer::create<T>(output_shape.volume());
+        auto output_buffer = tt::tt_metal::owned_buffer::create<T>(output_shape.volume());
 
         for (auto out_channels_index = 0; out_channels_index < out_channels; out_channels_index++) {
             auto output_weight_out_channel_base_idx = out_channels_index * in_channels * kernel_height * kernel_width;
@@ -64,16 +65,17 @@ Tensor _transform_weights_for_conv_transpose2d(const Tensor& conv_weight_tensor,
                 }
             }
         }
-        return Tensor(std::move(OwnedStorage{std::move(output_buffer)}), output_shape, dtype, Layout::ROW_MAJOR);
+        return Tensor(
+            std::move(tt::tt_metal::OwnedStorage{std::move(output_buffer)}), output_shape, dtype, Layout::ROW_MAJOR);
     };
     auto convert_tensor = [&compute](const auto& conv_weight_tensor) {
         return std::visit(
             [&compute](auto&& storage) -> Tensor {
                 using StorageType = std::decay_t<decltype(storage)>;
-                if constexpr (std::is_same_v<StorageType, OwnedStorage>) {
-                    return compute(owned_buffer::get_as<T>(storage.buffer));
-                } else if constexpr (std::is_same_v<StorageType, BorrowedStorage>) {
-                    return compute(borrowed_buffer::get_as<T>(storage.buffer));
+                if constexpr (std::is_same_v<StorageType, tt::tt_metal::OwnedStorage>) {
+                    return compute(tt::tt_metal::owned_buffer::get_as<T>(storage.buffer));
+                } else if constexpr (std::is_same_v<StorageType, tt::tt_metal::BorrowedStorage>) {
+                    return compute(tt::tt_metal::borrowed_buffer::get_as<T>(storage.buffer));
                 } else {
                     TT_THROW("Unsupported storage type");
                 }
@@ -128,7 +130,7 @@ Result conv_transpose2d(
         .input_hw = {input_height, input_width},
         .window_hw = {kernel_size[0], kernel_size[1]},
         .stride_hw = {stride[0], stride[1]},
-        .pad_hw = {padding[0], padding[1]},
+        .padding = sliding_window::get_pair_n4_padding(padding),
         .output_pad_hw = {output_padding[0], output_padding[1]},
         .dilation_hw = {dilation[0], dilation[1]},
         .is_transpose = true};
@@ -336,7 +338,7 @@ Result conv_transpose2d(
         out_channels,
         groups,
         conv_config.output_layout == Layout::ROW_MAJOR,
-        conv_config.activation == "relu",
+        conv_config.activation,
         opt_conv_op_parallel_config,
         opt_conv_op_block_config,
         conv_out_memory_config,

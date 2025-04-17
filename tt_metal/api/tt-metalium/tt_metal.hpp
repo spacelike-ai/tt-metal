@@ -3,35 +3,47 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #pragma once
-#include <vector>
+#include <stdint.h>
+#include <cstddef>
 #include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
-#include "umd/device/types/cluster_descriptor_types.h"
-#include "umd/device/tt_soc_descriptor.h"
-#include "hostdevcommon/common_values.hpp"
-#include "core_coord.hpp"
-#include "dispatch_core_manager.hpp"
+#include "assert.hpp"
 #include "buffer.hpp"
-#include "profiler.hpp"
+#include "core_coord.hpp"
+#include "dispatch_core_common.hpp"
+#include "fabric_types.hpp"
+#include "hostdevcommon/common_values.hpp"
+#include "profiler_optional_metadata.hpp"
+#include "profiler_types.hpp"
+#include "span.hpp"
+#include <umd/device/tt_core_coordinates.h>
+#include <umd/device/tt_soc_descriptor.h>
+#include <umd/device/types/cluster_descriptor_types.h>
+
+namespace tt {
+namespace tt_metal {
+enum class FabricConfig : uint32_t;
+}  // namespace tt_metal
+}  // namespace tt
 
 namespace tt::tt_metal {
-inline namespace v0 {
-class Program;
 class Buffer;
 class IDevice;
-}  // namespace v0
+class Program;
 
 namespace detail {
-
-enum class FabricSetting { DISABLED = 0, FABRIC = 1, EDM = 2, DEFAULT = 3 };
 
 bool DispatchStateCheck(bool isFastDispatch);
 
 bool InWorkerThread();
 inline bool InMainThread() { return not InWorkerThread(); }
 
-// Call before CreateDevices to enable fabric, which uses all ethernet cores and some tensix cores
-void InitializeFabricSetting(detail::FabricSetting fabric_setting);
+// Call before CreateDevices to enable fabric, which uses all free ethernet cores
+void InitializeFabricConfig(FabricConfig fabric_config);
 
 std::map<chip_id_t, IDevice*> CreateDevices(
     // TODO: delete this in favour of DevicePool
@@ -165,7 +177,7 @@ void CompileProgram(IDevice* device, Program& program, bool fd_bootloader_mode =
  * | program             | The program holding the runtime args                                   | const Program & | |
  * Yes      |
  */
-void WriteRuntimeArgsToDevice(IDevice* device, Program& program);
+void WriteRuntimeArgsToDevice(IDevice* device, Program& program, bool fd_bootloader_mode = false);
 
 // Configures a given device with a given program.
 // - Loads all kernel binaries into L1s of assigned Tensix cores
@@ -221,7 +233,10 @@ void ProfilerSync(ProfilerSyncState state);
  * | satate        | Dumpprofiler various states                       | ProfilerDumpState |                  | False |
  * */
 void DumpDeviceProfileResults(
-    IDevice* device, std::vector<CoreCoord>& worker_cores, ProfilerDumpState = ProfilerDumpState::NORMAL);
+    IDevice* device,
+    std::vector<CoreCoord>& worker_cores,
+    ProfilerDumpState = ProfilerDumpState::NORMAL,
+    const std::optional<ProfilerOptionalMetadata>& metadata = {});
 
 /**
  * Traverse all cores and read device side profiler data and dump results into device side CSV log
@@ -233,7 +248,7 @@ void DumpDeviceProfileResults(
  * | device        | The device holding the program being profiled.    | Device * |                           | True |
  * | satate        | Dumpprofiler various states                       | ProfilerDumpState |                  | False |
  * */
-void DumpDeviceProfileResults(IDevice* device, ProfilerDumpState = ProfilerDumpState::NORMAL);
+void DumpDeviceProfileResults(IDevice* device, ProfilerDumpState = ProfilerDumpState::NORMAL, const std::optional<ProfilerOptionalMetadata>& metadata = {});
 
 /**
  * Set the directory for device-side CSV logs produced by the profiler instance in the tt-metal module

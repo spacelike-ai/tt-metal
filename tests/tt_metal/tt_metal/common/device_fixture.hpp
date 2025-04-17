@@ -11,7 +11,8 @@
 #include <tt-metalium/tt_metal.hpp>
 #include "tt_metal/test_utils/env_vars.hpp"
 #include <tt-metalium/device_pool.hpp>
-#include "llrt.hpp"
+
+namespace tt::tt_metal {
 
 class DeviceFixture : public DispatchFixture {
 protected:
@@ -113,3 +114,5 @@ class DeviceSingleCardFastSlowDispatchFixture : public DeviceSingleCardFixture {
         }
     }
 };
+
+}  // namespace tt::tt_metal

@@ -4,15 +4,18 @@
 
 #pragma once
 
-#include "hal.hpp"
+#include <cstdint>
+
 #include "core_coord.hpp"
-#include "umd/device/tt_soc_descriptor.h"
+#include <umd/device/tt_soc_descriptor.h>
+
+enum class CoreType;
 
 namespace tt {
 
 namespace tt_metal {
 
-constexpr std::uint32_t NUM_SEMAPHORES = 8;
+constexpr std::uint32_t NUM_SEMAPHORES = 16;
 
 class Semaphore {
 public:

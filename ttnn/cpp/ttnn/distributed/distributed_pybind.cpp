@@ -27,8 +27,9 @@ namespace py = pybind11;
 void py_module_types(py::module& module) {
     py::class_<MeshDevice, std::shared_ptr<MeshDevice>>(module, "MeshDevice");
     py::class_<MeshSubDeviceManagerId>(module, "MeshSubDeviceManagerId");
-    py::class_<MeshShape>(module, "MeshShape", "Struct representing the shape of a mesh device.");
-    py::class_<MeshCoordinate>(module, "MeshCoordinate", "Struct representing the coordinate of a mesh device.");
+    py::class_<MeshShape>(module, "MeshShape", "Shape of a mesh device.");
+    py::class_<MeshCoordinate>(module, "MeshCoordinate", "Coordinate within a mesh device.");
+    py::class_<MeshCoordinateRange>(module, "MeshCoordinateRange", "Range of coordinates within a mesh device.");
 }
 
 void py_module(py::module& module) {
@@ -88,6 +89,29 @@ void py_module(py::module& module) {
             [](const MeshCoordinate& mc) { return py::make_iterator(mc.coords().begin(), mc.coords().end()); },
             py::keep_alive<0, 1>());
 
+    static_cast<py::class_<MeshCoordinateRange>>(module.attr("MeshCoordinateRange"))
+        .def(
+            py::init(
+                [](const MeshCoordinate& start, const MeshCoordinate& end) { return MeshCoordinateRange(start, end); }),
+            "Constructor with specified start and end coordinates.",
+            py::arg("start"),
+            py::arg("end"))
+        .def(
+            py::init([](const MeshShape& shape) { return MeshCoordinateRange(shape); }),
+            "Constructor that spans the entire mesh.",
+            py::arg("shape"))
+        .def(
+            "__repr__",
+            [](const MeshCoordinateRange& mcr) {
+                std::ostringstream str;
+                str << mcr;
+                return str.str();
+            })
+        .def(
+            "__iter__",
+            [](const MeshCoordinateRange& mcr) { return py::make_iterator(mcr.begin(), mcr.end()); },
+            py::keep_alive<0, 1>());
+
     auto py_mesh_device = static_cast<py::class_<MeshDevice, std::shared_ptr<MeshDevice>>>(module.attr("MeshDevice"));
     py_mesh_device
         .def(
@@ -99,11 +123,7 @@ void py_module(py::module& module) {
                         const std::optional<MeshCoordinate>& offset,
                         const std::vector<chip_id_t>& physical_device_ids) {
                 return MeshDevice::create(
-                    MeshDeviceConfig{
-                        .mesh_shape = mesh_shape,
-                        .offset = offset,
-                        .physical_device_ids = physical_device_ids,
-                    },
+                    MeshDeviceConfig(mesh_shape, offset, physical_device_ids),
                     l1_small_size,
                     trace_region_size,
                     num_command_queues,
@@ -143,7 +163,7 @@ void py_module(py::module& module) {
             "create_submesh",
             &MeshDevice::create_submesh,
             py::arg("submesh_shape"),
-            py::arg("offset"),
+            py::arg("offset") = std::nullopt,
             py::keep_alive<1, 0>())  // Keep MeshDevice alive as long as SubmeshDevice is alive
         .def(
             "create_submeshes",
@@ -392,7 +412,6 @@ void py_module(py::module& module) {
         py::arg("tensors"),
         py::kw_only());
     module.def("get_t3k_physical_device_ids_ring", &get_t3k_physical_device_ids_ring);
-    module.attr("DefaultMeshCommandQueueId") = ttnn::DefaultMeshCommandQueueId;
 }
 
 }  // namespace ttnn::distributed

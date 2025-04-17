@@ -12,9 +12,8 @@ namespace ttnn::operations::experimental::transformer {
 
 using namespace tt::constants;
 using namespace tt;
-using namespace tt::tt_metal;
 
-operation::ProgramWithCallbacks multi_core_nlp_create_qkv_heads_segformer(
+tt::tt_metal::operation::ProgramWithCallbacks multi_core_nlp_create_qkv_heads_segformer(
     const Tensor& a, std::vector<Tensor>& output, CoreCoord compute_with_storage_grid_size) {
     const auto& ashape = a.get_padded_shape();
 
@@ -56,7 +55,6 @@ operation::ProgramWithCallbacks multi_core_nlp_create_qkv_heads_segformer(
     ////////////////////////////////////////////////////////////////////////////
     //                      Grayskull Device Setup
     ////////////////////////////////////////////////////////////////////////////
-    TT_ASSERT((output.size() == 1), "Output vector must be size 1 !");
     tt_metal::Tensor& q = output[0];
     tt_metal::Tensor& k = output[1];
     tt_metal::Tensor& v = output[2];

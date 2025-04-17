@@ -6,6 +6,11 @@
 
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/device_pool.hpp>
+#include <tt-metalium/allocator.hpp>
+
+#include "rtoptions.hpp"
+
+namespace tt::tt_metal {
 
 using namespace tt;
 
@@ -129,3 +134,5 @@ TEST(DevicePool, DevicePoolReduceDevices) {
     ASSERT_TRUE(dev->is_initialized());
     DevicePool::instance().close_device(0);
 }
+
+}  // namespace tt::tt_metal

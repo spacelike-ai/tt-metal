@@ -91,5 +91,7 @@ enum SfpuType {
     unused,
     reshuffle_rows,
     cumsum,
-    fill
+    fill,
+    round,
+    cpy_values,
 };

@@ -15,10 +15,6 @@ from tests.tt_eager.python_api_testing.sweep_tests.comparison_funcs import comp_
 
 
 def reference_layernorm(x, gamma, beta, epsilon, is_rmsnorm):
-    if gamma is None:
-        gamma = torch.ones(x.shape[-1])
-    if beta is None:
-        beta = torch.zeros(x.shape[-1])
     if is_rmsnorm:
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + epsilon) * gamma
     else:
@@ -70,15 +66,7 @@ def tt_distributed_layernorm(inp, gamma, beta, epsilon, is_rmsnorm, compute_kern
 
 
 def run_distributed_layernorm(
-    inp_shape,
-    n_devices,
-    is_rmsnorm,
-    dtype,
-    stats_dtype,
-    mesh_device,
-    has_weights=True,
-    fp32_enabled=False,
-    iterations=1,
+    inp_shape, n_devices, is_rmsnorm, dtype, stats_dtype, mesh_device, fp32_enabled=False, iterations=1
 ):
     compute_kernel_config = ttnn.WormholeComputeKernelConfig(
         math_fidelity=ttnn.MathFidelity.HiFi4,  # Highest fidelity
@@ -96,6 +84,9 @@ def run_distributed_layernorm(
     beta_chunked = beta.chunk(n_devices, dim=-1)
     inp_chunked = canon_inp.chunk(n_devices, dim=-1)
     epsilon = 1e-5
+
+    # reference impl
+    out_torch = reference_layernorm(canon_inp, gamma, beta, epsilon, is_rmsnorm)
 
     tt_inp = []
     for d in range(n_devices):
@@ -132,21 +123,11 @@ def run_distributed_layernorm(
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
         )
-
-    if not has_weights:
-        gamma = None
-        beta = None
-        tt_gamma = [None] * n_devices
-        tt_beta = [None] * n_devices
-
     for i in range(iterations):
         tt_out = tt_distributed_layernorm(
             tt_inp, tt_gamma, tt_beta, epsilon, is_rmsnorm, compute_kernel_config, stats_dtype
         )
         tt_output_host = torch.concat([tt2torch_tensor(tt_o) for tt_o in tt_out], -1)
-
-    # reference impl
-    out_torch = reference_layernorm(canon_inp, gamma, beta, epsilon, is_rmsnorm)
 
     passing, output_str = comp_allclose(tt_output_host, out_torch, rtol=1e-1, atol=1e-01)
     logger.debug(f"torch vs tt distributed layernorm = {output_str}")
@@ -172,21 +153,12 @@ rms_norm_parametrization_ids = ["rmsnorm", "layernorm"]
 
 
 def run_test_distributed_layernorm_with_program_cache_and_checks(
-    inp_shape, n_devices, is_rmsnorm, dtype, stats_dtype, mesh_device, use_program_cache, iterations, has_weights
+    inp_shape, n_devices, is_rmsnorm, dtype, stats_dtype, mesh_device, use_program_cache, iterations
 ):
     if mesh_device.get_num_devices() < n_devices:
         pytest.skip("Not T3000!")
 
-    run_distributed_layernorm(
-        inp_shape,
-        n_devices,
-        is_rmsnorm,
-        dtype,
-        stats_dtype,
-        mesh_device,
-        has_weights=has_weights,
-        iterations=iterations,
-    )
+    run_distributed_layernorm(inp_shape, n_devices, is_rmsnorm, dtype, stats_dtype, mesh_device, iterations=iterations)
 
     for d in mesh_device.get_devices():
         assert d.num_program_cache_entries() == 3, "Program cache should have only 3 entries, but has " + str(
@@ -216,20 +188,9 @@ def test_distributed_layernorm_with_program_cache(
 @pytest.mark.parametrize("inp_shape", inp_shapes, ids=inp_shape_ids)
 @pytest.mark.parametrize("n_devices", [4])
 @pytest.mark.parametrize("is_rmsnorm", rms_norm_parametrizations, ids=rms_norm_parametrization_ids)
-@pytest.mark.parametrize("has_weights", [True, False], ids=["has_weights", "no_weights"])
 def test_distributed_layernorm_with_program_cache_4chip(
-    inp_shape, n_devices, is_rmsnorm, dtype, stats_dtype, iterations, pcie_mesh_device, use_program_cache, has_weights
+    inp_shape, n_devices, is_rmsnorm, dtype, stats_dtype, iterations, pcie_mesh_device, use_program_cache
 ):
-    if not has_weights and is_rmsnorm:
-        pytest.skip("RMSNorm does not support no weights")
     run_test_distributed_layernorm_with_program_cache_and_checks(
-        inp_shape,
-        n_devices,
-        is_rmsnorm,
-        dtype,
-        stats_dtype,
-        pcie_mesh_device,
-        use_program_cache,
-        iterations=iterations,
-        has_weights=has_weights,
+        inp_shape, n_devices, is_rmsnorm, dtype, stats_dtype, pcie_mesh_device, use_program_cache, iterations=iterations
     )

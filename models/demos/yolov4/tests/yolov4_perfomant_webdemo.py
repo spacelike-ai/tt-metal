@@ -2,20 +2,9 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-import pytest
 import torch
 import ttnn
-from models.utility_functions import (
-    is_wormhole_b0,
-)
 from models.demos.yolov4.tests.yolov4_test_infra import create_test_infra
-
-try:
-    from tracy import signpost
-
-    use_signpost = True
-except ModuleNotFoundError:
-    use_signpost = False
 
 
 def buffer_address(tensor):
@@ -40,31 +29,33 @@ class Yolov4Trace2CQ:
         act_dtype=ttnn.bfloat16,
         weight_dtype=ttnn.bfloat16,
         model_location_generator=None,
+        resolution=(320, 320),
     ):
+        self.resolution = resolution
         self.test_infra = create_test_infra(
             device,
             device_batch_size,
             act_dtype,
             weight_dtype,
             model_location_generator=model_location_generator,
+            resolution=resolution,
         )
         self.tt_inputs_host, sharded_mem_config_DRAM, self.input_mem_config = self.test_infra.setup_dram_sharded_input(
             device
         )
         self.tt_image_res = self.tt_inputs_host.to(device, sharded_mem_config_DRAM)
-        self.op_event = ttnn.create_event(device)
-        self.write_event = ttnn.create_event(device)
+
         # Initialize the op event so we can write
-        ttnn.record_event(0, self.op_event)
+        self.op_event = ttnn.record_event(device, 0)
 
         # First run configures convs JIT
         ttnn.wait_for_event(1, self.op_event)
         ttnn.copy_host_to_device_tensor(self.tt_inputs_host, self.tt_image_res, 1)
-        ttnn.record_event(1, self.write_event)
+        self.write_event = ttnn.record_event(device, 1)
         ttnn.wait_for_event(0, self.write_event)
         self.test_infra.input_tensor = ttnn.to_memory_config(self.tt_image_res, self.input_mem_config)
         spec = self.test_infra.input_tensor.spec
-        ttnn.record_event(0, self.op_event)
+        self.op_event = ttnn.record_event(device, 0)
         self.test_infra.run()
         self.test_infra.validate()
         self.test_infra.dealloc_output()
@@ -72,20 +63,20 @@ class Yolov4Trace2CQ:
         # Optimized run
         ttnn.wait_for_event(1, self.op_event)
         ttnn.copy_host_to_device_tensor(self.tt_inputs_host, self.tt_image_res, 1)
-        ttnn.record_event(1, self.write_event)
+        self.write_event = ttnn.record_event(device, 1)
         ttnn.wait_for_event(0, self.write_event)
         self.test_infra.input_tensor = ttnn.to_memory_config(self.tt_image_res, self.input_mem_config)
-        ttnn.record_event(0, self.op_event)
+        self.op_event = ttnn.record_event(device, 0)
         self.test_infra.run()
         self.test_infra.validate()
 
         # Capture
         ttnn.wait_for_event(1, self.op_event)
         ttnn.copy_host_to_device_tensor(self.tt_inputs_host, self.tt_image_res, 1)
-        ttnn.record_event(1, self.write_event)
+        self.write_event = ttnn.record_event(device, 1)
         ttnn.wait_for_event(0, self.write_event)
         self.test_infra.input_tensor = ttnn.to_memory_config(self.tt_image_res, self.input_mem_config)
-        ttnn.record_event(0, self.op_event)
+        self.op_event = ttnn.record_event(device, 0)
         self.test_infra.dealloc_output()
         trace_input_addr = ttnn.buffer_address(self.test_infra.input_tensor)
         self.tid = ttnn.begin_trace_capture(device, cq_id=0)
@@ -113,13 +104,13 @@ class Yolov4Trace2CQ:
         tt_inputs_host = self.tt_inputs_host if tt_inputs_host is None else tt_inputs_host
         ttnn.wait_for_event(1, self.op_event)
         ttnn.copy_host_to_device_tensor(tt_inputs_host, self.tt_image_res, 1)
-        ttnn.record_event(1, self.write_event)
+        self.write_event = ttnn.record_event(self.device, 1)
         ttnn.wait_for_event(0, self.write_event)
         # TODO: Add in place support to ttnn to_memory_config
         self.input_tensor = ttnn.reshard(self.tt_image_res, self.input_mem_config, self.input_tensor)
-        ttnn.record_event(0, self.op_event)
+        self.op_event = ttnn.record_event(self.device, 0)
         ttnn.execute_trace(self.device, self.tid, cq_id=0, blocking=False)
-        ttnn.synchronize_devices(self.device)
+        ttnn.synchronize_device(self.device)
 
         ttnn_output_tensor = self.test_infra.output_tensor
 
@@ -131,12 +122,21 @@ class Yolov4Trace2CQ:
         # That ttnn tensor is the concat output of 3 padded tensors
         # As a perf workaround I'm doing the unpadding on the torch output here.
         # TODO: cleaner ttnn code when ttnn.untilize() is fully optimized
-        box_1_start_i = 0
-        box_1_end_i = 6100
-        box_2_start_i = 6128
-        box_2_end_i = 6228
-        box_3_start_i = 6256
-        box_3_end_i = 6356
+        if self.resolution[0] == 320:
+            box_1_start_i = 0
+            box_1_end_i = 6100
+            box_2_start_i = 6128
+            box_2_end_i = 6228
+            box_3_start_i = 6256
+            box_3_end_i = 6356
+        else:
+            box_1_start_i = 0
+            box_1_end_i = 24400
+            box_2_start_i = 24428
+            box_2_end_i = 24828
+            box_3_start_i = 24856
+            box_3_end_i = 25256
+
         result_boxes_list.append(result_boxes_padded[:, box_1_start_i:box_1_end_i])
         result_boxes_list.append(result_boxes_padded[:, box_2_start_i:box_2_end_i])
         result_boxes_list.append(result_boxes_padded[:, box_3_start_i:box_3_end_i])

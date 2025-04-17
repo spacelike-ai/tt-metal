@@ -6,10 +6,11 @@
 #include <chrono>
 #include <functional>
 #include <random>
+#include <string>
 #include <thread>
 
 #include <tt-metalium/bfloat16.hpp>
-#include <tt-metalium/test_tiles.hpp>
+#include <tt-metalium/tilize_utils.hpp>
 #include <tt-metalium/tt_metal.hpp>
 #include "test_common.hpp"
 #include <tt-metalium/host_api.hpp>
@@ -31,7 +32,7 @@ std::vector<T> slice_vec(std::vector<T> const& v, int m, int n) {
     return vec;
 }
 
-void print_vec(const std::vector<bfloat16>& data, int rows, int cols, const string& name) {
+void print_vec(const std::vector<bfloat16>& data, int rows, int cols, const std::string& name) {
     std::cout << name << ": " << std::endl;
     int index = 0;
     for (int i = 0; i < rows; i++) {

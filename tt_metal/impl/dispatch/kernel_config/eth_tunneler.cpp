@@ -2,12 +2,24 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 #include "eth_tunneler.hpp"
-#include "eth_router.hpp"
-#include "demux.hpp"
-#include "mux.hpp"
 
-#include <host_api.hpp>
-#include <tt_metal.hpp>
+#include <map>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "assert.hpp"
+#include "demux.hpp"
+#include "device.hpp"
+#include "dispatch/dispatch_core_manager.hpp"
+#include "dispatch/kernel_config/fd_kernel.hpp"
+#include "dispatch_core_common.hpp"
+#include "eth_router.hpp"
+#include "hal.hpp"
+#include "mux.hpp"
+#include "tt_cluster.hpp"
+#include <umd/device/tt_xy_pair.h>
+#include "utils.hpp"
 
 using namespace tt::tt_metal;
 
@@ -80,7 +92,8 @@ void EthTunnelerKernel::GenerateDependentConfigs() {
                 // kernels
                 dependent_config_.remote_sender_queue_id[remote_idx] =
                     router_vc_count + idx + router_vc_count - router_fwd_vc_count;
-                dependent_config_.remote_sender_network_type[remote_idx] = (uint32_t)DispatchRemoteNetworkType::NOC0;
+                dependent_config_.remote_sender_network_type[remote_idx] =
+                    (uint32_t)tt::packet_queue::DispatchRemoteNetworkType::NOC0;
                 remote_idx++;
             }
         }
@@ -90,7 +103,7 @@ void EthTunnelerKernel::GenerateDependentConfigs() {
         dependent_config_.remote_sender_queue_id[this->static_config_.vc_count.value() - 1] =
             this->static_config_.vc_count.value() * 2 - 1;
         dependent_config_.remote_sender_network_type[this->static_config_.vc_count.value() - 1] =
-            (uint32_t)DispatchRemoteNetworkType::ETH;
+            (uint32_t)tt::packet_queue::DispatchRemoteNetworkType::ETH;
         dependent_config_.inner_stop_mux_d_bypass = 0;
 
         // Downstream, we expect the same US_TUNNELER_LOCAL and a DEMUX (tunnel start)/MUX_D (non-tunnel start)
@@ -107,7 +120,8 @@ void EthTunnelerKernel::GenerateDependentConfigs() {
                 // Last VC is the return VC, driving a DEMUX or MUX_D
                 dependent_config_.remote_receiver_x[idx] = other_ds_kernel->GetVirtualCore().x;
                 dependent_config_.remote_receiver_y[idx] = other_ds_kernel->GetVirtualCore().y;
-                dependent_config_.remote_receiver_network_type[idx] = (uint32_t)DispatchRemoteNetworkType::NOC0;
+                dependent_config_.remote_receiver_network_type[idx] =
+                    (uint32_t)tt::packet_queue::DispatchRemoteNetworkType::NOC0;
                 if (auto demux_kernel = dynamic_cast<DemuxKernel*>(other_ds_kernel)) {
                     dependent_config_.remote_receiver_queue_start[idx] =
                         demux_kernel->GetStaticConfig().rx_queue_start_addr_words;
@@ -132,7 +146,8 @@ void EthTunnelerKernel::GenerateDependentConfigs() {
                 dependent_config_.remote_receiver_y[idx] = paired_physical_coord.y;
                 // Tunneler upstream queue ids start counting up from 0
                 dependent_config_.remote_receiver_queue_id[idx] = idx;
-                dependent_config_.remote_receiver_network_type[idx] = (uint32_t)DispatchRemoteNetworkType::ETH;
+                dependent_config_.remote_receiver_network_type[idx] =
+                    (uint32_t)tt::packet_queue::DispatchRemoteNetworkType::ETH;
                 dependent_config_.remote_receiver_queue_start[idx] =
                     static_config_.in_queue_start_addr_words.value() +
                     idx * this->static_config_.in_queue_size_words.value();
@@ -165,13 +180,15 @@ void EthTunnelerKernel::GenerateDependentConfigs() {
                 dependent_config_.remote_sender_y[idx] = mux_kernel->GetVirtualCore().y;
                 // MUX output queue id is counted after all of it's inputs
                 dependent_config_.remote_sender_queue_id[idx] = mux_kernel->GetStaticConfig().mux_fan_in.value();
-                dependent_config_.remote_sender_network_type[idx] = (uint32_t)DispatchRemoteNetworkType::NOC0;
+                dependent_config_.remote_sender_network_type[idx] =
+                    (uint32_t)tt::packet_queue::DispatchRemoteNetworkType::NOC0;
             } else {
                 dependent_config_.remote_sender_x[idx] = paired_physical_coord.x;
                 dependent_config_.remote_sender_y[idx] = paired_physical_coord.y;
                 // Tunneler downstream queue ids start counting after the upstream ones
                 dependent_config_.remote_sender_queue_id[idx] = this->static_config_.vc_count.value() + idx;
-                dependent_config_.remote_sender_network_type[idx] = (uint32_t)DispatchRemoteNetworkType::ETH;
+                dependent_config_.remote_sender_network_type[idx] =
+                    (uint32_t)tt::packet_queue::DispatchRemoteNetworkType::ETH;
             }
         }
 
@@ -197,7 +214,8 @@ void EthTunnelerKernel::GenerateDependentConfigs() {
                 dependent_config_.remote_receiver_y[remote_idx] = router_kernel->GetVirtualCore().y;
                 dependent_config_.remote_receiver_queue_id[remote_idx] =
                     idx;  // Queue ids start counting from 0 at input
-                dependent_config_.remote_receiver_network_type[remote_idx] = (uint32_t)DispatchRemoteNetworkType::NOC0;
+                dependent_config_.remote_receiver_network_type[remote_idx] =
+                    (uint32_t)tt::packet_queue::DispatchRemoteNetworkType::NOC0;
                 dependent_config_.remote_receiver_queue_start[remote_idx] =
                     router_kernel->GetStaticConfig().rx_queue_start_addr_words.value() +
                     idx * router_kernel->GetStaticConfig().rx_queue_size_words.value();
@@ -211,7 +229,8 @@ void EthTunnelerKernel::GenerateDependentConfigs() {
         dependent_config_.remote_receiver_x[return_vc_id] = paired_physical_coord.x;
         dependent_config_.remote_receiver_y[return_vc_id] = paired_physical_coord.y;
         dependent_config_.remote_receiver_queue_id[return_vc_id] = return_vc_id;
-        dependent_config_.remote_receiver_network_type[return_vc_id] = (uint32_t)DispatchRemoteNetworkType::ETH;
+        dependent_config_.remote_receiver_network_type[return_vc_id] =
+            (uint32_t)tt::packet_queue::DispatchRemoteNetworkType::ETH;
         dependent_config_.remote_receiver_queue_start[return_vc_id] =
             static_config_.in_queue_start_addr_words.value() +
             (return_vc_id) * this->static_config_.in_queue_size_words.value();
@@ -278,7 +297,7 @@ void EthTunnelerKernel::CreateKernel() {
         static_config_.kernel_status_buf_size_bytes.value(),
         static_config_.timeout_cycles.value(),
         dependent_config_.inner_stop_mux_d_bypass.value()};
-    for (int idx = 0; idx < MAX_TUNNEL_LANES; idx++) {
+    for (int idx = 0; idx < tt::packet_queue::MAX_TUNNEL_LANES; idx++) {
         if (dependent_config_.remote_receiver_x[idx]) {
             compile_args[4 + idx] |= (dependent_config_.remote_receiver_x[idx].value() & 0xFF);
             compile_args[4 + idx] |= (dependent_config_.remote_receiver_y[idx].value() & 0xFF) << 8;
@@ -302,21 +321,23 @@ void EthTunnelerKernel::CreateKernel() {
     const auto& grid_size = device_->grid_size();
     std::map<string, string> defines = {
         // All of these unused, remove later
-        {"MY_NOC_X", std::to_string(tt::tt_metal::hal.noc_coordinate(noc_selection_.non_dispatch_noc, grid_size.x, 0))},
-        {"MY_NOC_Y", std::to_string(tt::tt_metal::hal.noc_coordinate(noc_selection_.non_dispatch_noc, grid_size.y, 0))},
+        {"MY_NOC_X",
+         std::to_string(tt::tt_metal::hal_ref.noc_coordinate(noc_selection_.non_dispatch_noc, grid_size.x, 0))},
+        {"MY_NOC_Y",
+         std::to_string(tt::tt_metal::hal_ref.noc_coordinate(noc_selection_.non_dispatch_noc, grid_size.y, 0))},
         {"UPSTREAM_NOC_INDEX", std::to_string(noc_selection_.upstream_noc)},
         {"UPSTREAM_NOC_X",
-         std::to_string(tt::tt_metal::hal.noc_coordinate(noc_selection_.upstream_noc, grid_size.x, 0))},
+         std::to_string(tt::tt_metal::hal_ref.noc_coordinate(noc_selection_.upstream_noc, grid_size.x, 0))},
         {"UPSTREAM_NOC_Y",
-         std::to_string(tt::tt_metal::hal.noc_coordinate(noc_selection_.upstream_noc, grid_size.y, 0))},
+         std::to_string(tt::tt_metal::hal_ref.noc_coordinate(noc_selection_.upstream_noc, grid_size.y, 0))},
         {"DOWNSTREAM_NOC_X",
-         std::to_string(tt::tt_metal::hal.noc_coordinate(noc_selection_.downstream_noc, grid_size.x, 0))},
+         std::to_string(tt::tt_metal::hal_ref.noc_coordinate(noc_selection_.downstream_noc, grid_size.x, 0))},
         {"DOWNSTREAM_NOC_Y",
-         std::to_string(tt::tt_metal::hal.noc_coordinate(noc_selection_.downstream_noc, grid_size.y, 0))},
+         std::to_string(tt::tt_metal::hal_ref.noc_coordinate(noc_selection_.downstream_noc, grid_size.y, 0))},
         {"DOWNSTREAM_SLAVE_NOC_X",
-         std::to_string(tt::tt_metal::hal.noc_coordinate(noc_selection_.downstream_noc, grid_size.x, 0))},
+         std::to_string(tt::tt_metal::hal_ref.noc_coordinate(noc_selection_.downstream_noc, grid_size.x, 0))},
         {"DOWNSTREAM_SLAVE_NOC_Y",
-         std::to_string(tt::tt_metal::hal.noc_coordinate(noc_selection_.downstream_noc, grid_size.y, 0))},
+         std::to_string(tt::tt_metal::hal_ref.noc_coordinate(noc_selection_.downstream_noc, grid_size.y, 0))},
         {"SKIP_NOC_LOGGING", "1"}};
     configure_kernel_variant(
         dispatch_kernel_file_names[is_remote_ ? US_TUNNELER_REMOTE : US_TUNNELER_LOCAL],

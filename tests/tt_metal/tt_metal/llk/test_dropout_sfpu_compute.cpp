@@ -8,9 +8,10 @@
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/bfloat16.hpp>
 
+namespace tt::tt_metal {
+
 using std::vector;
 using namespace tt;
-using namespace tt::tt_metal;
 
 /*
  * 1. Host creates one vector of data with constant non-zero values.
@@ -240,9 +241,6 @@ void test_dropout(tt_metal::IDevice* device, const DropoutConfig& test_config) {
 }  // namespace unit_tests::compute::sfpu::dropout
 
 TEST_F(DeviceFixture, TensixComputeDropout) {
-    if (this->arch_ != tt::ARCH::WORMHOLE_B0) {
-        GTEST_SKIP();
-    }
     srand(0);
     int num_tests = 5;
     float fill_constant = 9.0;
@@ -256,3 +254,5 @@ TEST_F(DeviceFixture, TensixComputeDropout) {
         unit_tests::compute::sfpu::dropout::test_dropout(this->devices_.at(0), test_config);
     }
 }
+
+}  // namespace tt::tt_metal

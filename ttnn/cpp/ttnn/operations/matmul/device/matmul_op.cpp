@@ -1291,7 +1291,7 @@ Matmul create_matmul_struct(
 
     if (is_optional_output_tensor) {
         const auto& optional_output_tensor = optional_output_tensors.at(0);
-        if (output_mem_config == operation::DEFAULT_OUTPUT_MEMORY_CONFIG) {
+        if (output_mem_config == tt::tt_metal::operation::DEFAULT_OUTPUT_MEMORY_CONFIG) {
             output_mem_config = optional_output_tensor->memory_config();
         } else {
             TT_FATAL(
@@ -1341,7 +1341,8 @@ Matmul create_matmul_struct(
         parameters.transpose_a,
         parameters.transpose_b,
         output_tile,
-        parameters.global_cb};
+        parameters.global_cb,
+        parameters.sub_device_id};
 }
 
 Tensor matmul(
@@ -2229,7 +2230,7 @@ operation::ProgramWithCallbacks Matmul::create_program(
         get_program_config(input_tensor_a, input_tensor_b, bias_single_tile_size, this);
 
     return std::visit(
-        [&](const auto& program_config) -> operation::ProgramWithCallbacks {
+        [&](const auto& program_config) -> tt::tt_metal::operation::ProgramWithCallbacks {
             using ProgramConfigType = std::decay_t<decltype(program_config)>;
             if constexpr (std::is_same_v<ProgramConfigType, MatmulMultiCoreReuseProgramConfig>) {
                 TT_FATAL(!bias.has_value(), "Bias is not supported for MatmulMultiCoreReuseProgramConfig!");
@@ -2271,7 +2272,7 @@ operation::ProgramWithCallbacks Matmul::create_program(
                     program_config.fused_activation,
                     this->untilize_out);
             } else if constexpr (std::is_same_v<ProgramConfigType, MatmulMultiCoreReuseMultiCast1DProgramConfig>) {
-                std::optional<tt::tt_metal::v1::experimental::GlobalCircularBuffer> global_cb = std::nullopt;
+                std::optional<tt::tt_metal::experimental::GlobalCircularBuffer> global_cb = std::nullopt;
                 if (this->global_cb.has_value()) {
                     global_cb = get_global_circular_buffer(*this->global_cb, input_tensor_a.device()->id());
                 }
@@ -2297,7 +2298,8 @@ operation::ProgramWithCallbacks Matmul::create_program(
                     program_config.hop_cores,
                     this->untilize_out,
                     global_cb,
-                    program_config.num_global_cb_receivers);
+                    program_config.num_global_cb_receivers,
+                    this->sub_device_id);
             } else if constexpr (std::is_same_v<
                                      ProgramConfigType,
                                      MatmulMultiCoreReuseMultiCastDRAMShardedProgramConfig>) {

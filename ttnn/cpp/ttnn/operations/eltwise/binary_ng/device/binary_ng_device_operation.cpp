@@ -37,10 +37,17 @@ bool is_binary_sfpu_op(BinaryOpType val, DataType a, DataType b) {
         case BITWISE_XOR:
         case BITWISE_AND:
         case BITWISE_OR: return (a == INT32 && b == INT32);
+        case QUANT:
+        case REQUANT:
+        case DEQUANT:
         case POWER: return true;
         default: return false;
     }
     return false;
+}
+
+bool is_quant_op(const BinaryOpType val) {
+    return (val == BinaryOpType::QUANT) || (val == BinaryOpType::DEQUANT) || (val == BinaryOpType::REQUANT);
 }
 }  // namespace utils
 
@@ -103,16 +110,19 @@ SubtileBroadcastType get_subtile_broadcast_type(uint32_t a_h, uint32_t a_w, uint
 }
 
 tt::stl::hash::hash_t BinaryNgDeviceOperation::operation_attributes_t::to_hash() const {
+    // TODO: a more generalized way to skip the hashing of an UnaryWithParam?
+    // Don't hash the quantization scale, otherwise we build the kernel for each different scale
     return tt::stl::hash::hash_objects_with_default_seed(
         binary_op_type,
         lhs_activations,
         rhs_activations,
-        post_activations,
+        is_quant_op ? ttnn::SmallVector<unary::UnaryWithParam>{} : post_activations,
         memory_config,
         get_dtype(),
         compute_kernel_config,
         subtile_broadcast_type,
-        is_sfpu);
+        is_sfpu,
+        is_quant_op);
 }
 
 DataType BinaryNgDeviceOperation::operation_attributes_t::get_dtype() const {
@@ -154,23 +164,6 @@ void BinaryNgDeviceOperation::validate_on_program_cache_miss(
     const auto& input_tensor_a = tensor_args.input_tensor_a;
     const auto& input_tensor_b = tensor_args.input_tensor_b;
     const auto& output_tensor = tensor_args.output_tensor;
-
-    auto nd_support = [](const auto& shape) {
-        bool valid = true;
-        for (int i = -5; i >= -shape.rank(); --i) {
-            if (shape[i] != 1) {
-                valid = false;
-                break;
-            }
-        }
-        return valid;
-    };
-
-    TT_FATAL(nd_support(input_tensor_a.get_logical_shape()), "Tensor a does not support 5D or more");
-
-    if (input_tensor_b.has_value()) {
-        TT_FATAL(nd_support(input_tensor_b->get_logical_shape()), "Tensor b does not support 5D or more");
-    }
 
     TT_FATAL(
         input_tensor_b.has_value() != attributes.scalar.has_value(), "Either the tensor b or scalar should be set");
@@ -276,8 +269,9 @@ void BinaryNgDeviceOperation::validate_on_program_cache_hit(
 
         if (i <= -5) {
             TT_FATAL(
-                a_dim == 1 && b_dim == 1,
-                "Broadcasting rule violation for 5D {}, dim a: {}, dim b: {}",
+                a_dim == b_dim,
+                "Broadcasting rule violation for rank >= 5 : dim {}, Broadcast is supported upto rank 4, dim a: {}, "
+                "dim b: {}",
                 i,
                 a_dim,
                 b_dim);
@@ -421,7 +415,7 @@ BinaryNgDeviceOperation::invoke(
     DataType dtype_b = input_tensor_b.get_dtype();
     bool device_check = input_tensor_a.device()->arch() != tt::ARCH::GRAYSKULL;
     bool is_sfpu_op = (utils::is_binary_sfpu_op(binary_op_type, dtype_a, dtype_b) && device_check);
-
+    bool is_quant_op = utils::is_quant_op(binary_op_type);
     return {
         operation_attributes_t{
             binary_op_type,
@@ -435,7 +429,8 @@ BinaryNgDeviceOperation::invoke(
             get_worker_grid(input_tensor_a, &input_tensor_b, output_tensor),
             std::nullopt,
             subtile_broadcast_type,
-            is_sfpu_op},
+            is_sfpu_op,
+            is_quant_op},
         tensor_args_t{input_tensor_a, input_tensor_b, std::move(output_tensor)}};
 }
 
@@ -453,6 +448,7 @@ BinaryNgDeviceOperation::invoke(
     DataType dtype_a = input_tensor_a.get_dtype();
     bool device_check = input_tensor_a.device()->arch() != tt::ARCH::GRAYSKULL;
     bool is_sfpu_op = (utils::is_binary_sfpu_op(binary_op_type, dtype_a, dtype_a) && device_check);
+    bool is_quant_op = utils::is_quant_op(binary_op_type);
     return {
         operation_attributes_t{
             binary_op_type,
@@ -466,7 +462,8 @@ BinaryNgDeviceOperation::invoke(
             get_worker_grid(input_tensor_a, nullptr, output_tensor),
             std::nullopt,
             SubtileBroadcastType::NONE,
-            is_sfpu_op},
+            is_sfpu_op,
+            is_quant_op},
         tensor_args_t{input_tensor_a, std::nullopt, std::move(output_tensor)}};
 }
 

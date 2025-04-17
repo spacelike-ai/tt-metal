@@ -5,9 +5,8 @@
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/tt_metal.hpp>
 #include <tt-metalium/device_impl.hpp>
-#include <tt-metalium/rtoptions.hpp>
+#include "rtoptions.hpp"
 #include <tt-metalium/control_plane.hpp>
-// #include <tt-metalium/cq_commands.hpp>
 // #include "tt_metal/impl/dispatch/kernels/packet_queue_ctrl.hpp"
 #include "tt_metal/fabric/hw/inc/tt_fabric_status.h"
 #include "test_common.hpp"
@@ -236,6 +235,7 @@ int main(int argc, char** argv) {
             std::filesystem::path(tt::llrt::RunTimeOptions::get_instance().get_root_dir()) /
             "tt_metal/fabric/mesh_graph_descriptors/tg_mesh_graph_descriptor.yaml";
         auto control_plane = std::make_unique<tt::tt_fabric::ControlPlane>(tg_mesh_graph_desc_path.string());
+        control_plane->write_routing_tables_to_all_chips();
 
         int num_devices = tt_metal::GetNumAvailableDevices();
         if (test_device_id_l >= num_devices) {
@@ -264,7 +264,7 @@ int main(int argc, char** argv) {
 
         std::map<chip_id_t, std::vector<CoreCoord>> device_router_map;
 
-        auto const& device_active_eth_cores = device_map[test_device_id_l]->get_active_ethernet_cores();
+        const auto& device_active_eth_cores = device_map[test_device_id_l]->get_active_ethernet_cores();
 
         if (device_active_eth_cores.size() == 0) {
             log_info(
@@ -298,7 +298,8 @@ int main(int argc, char** argv) {
         CoreCoord router_logical_core;
         CoreCoord router_phys_core;
         CoreCoord gk_phys_core;
-        uint32_t routing_table_addr = hal.get_dev_addr(HalProgrammableCoreType::TENSIX, HalL1MemAddrType::UNRESERVED);
+        uint32_t routing_table_addr =
+            hal_ref.get_dev_addr(HalProgrammableCoreType::TENSIX, HalL1MemAddrType::UNRESERVED);
         uint32_t gk_interface_addr = routing_table_addr + sizeof(fabric_router_l1_config_t) * 4;
         uint32_t client_interface_addr = routing_table_addr + sizeof(fabric_router_l1_config_t) * 4;
         uint32_t client_pull_req_buf_addr = client_interface_addr + sizeof(fabric_pull_client_interface_t);
@@ -308,20 +309,19 @@ int main(int argc, char** argv) {
         log_info(LogTest, "GK Socket Info Addr = 0x{:08X}", socket_info_addr);
 
         for (auto device : device_map) {
-            auto neighbors = tt::Cluster::instance().get_ethernet_connected_device_ids(device.second->id());
+            auto neighbors = tt::Cluster::instance().get_ethernet_cores_grouped_by_connected_chips(device.second->id());
             std::vector<CoreCoord> device_router_cores;
             std::vector<CoreCoord> device_router_phys_cores;
             uint32_t router_mask = 0;
-            for (auto neighbor : neighbors) {
-                if (device_map.contains(neighbor)) {
+            for (const auto& [neighbor_chip, connected_logical_cores] : neighbors) {
+                if (device_map.contains(neighbor_chip)) {
                     if (!router_core_found && device.first == test_device_id_l) {
                         // pick a router so that tx and read in routing tables from this core on the
                         // sender device.
-                        router_logical_core = device.second->get_ethernet_sockets(neighbor)[0];
+                        router_logical_core = connected_logical_cores[0];
                         router_phys_core = device.second->ethernet_core_from_logical_core(router_logical_core);
                         router_core_found = true;
                     }
-                    auto connected_logical_cores = device.second->get_ethernet_sockets(neighbor);
                     for (auto logical_core : connected_logical_cores) {
                         device_router_cores.push_back(logical_core);
                         device_router_phys_cores.push_back(
@@ -333,7 +333,7 @@ int main(int argc, char** argv) {
                         LogTest,
                         "Device {} skiping Neighbor Device {} since it is not in test device map.",
                         device.first,
-                        neighbor);
+                        neighbor_chip);
                 }
             }
 
@@ -342,7 +342,7 @@ int main(int argc, char** argv) {
             device_router_map[device.first] = device_router_phys_cores;
 
             gk_phys_core = (device.second->worker_core_from_logical_core(gk_core));
-            uint32_t gk_noc_offset = tt_metal::hal.noc_xy_encoding(gk_phys_core.x, gk_phys_core.y);
+            uint32_t gk_noc_offset = tt_metal::hal_ref.noc_xy_encoding(gk_phys_core.x, gk_phys_core.y);
 
             std::vector<uint32_t> router_compile_args = {
                 (tunneler_queue_size_bytes >> 4),  // 0: rx_queue_size_words
@@ -441,7 +441,7 @@ int main(int argc, char** argv) {
             };
 
             // setup runtime args
-            uint32_t tx_gk_noc_offset = tt_metal::hal.noc_xy_encoding(tx_gk_phys_core.x, tx_gk_phys_core.y);
+            uint32_t tx_gk_noc_offset = tt_metal::hal_ref.noc_xy_encoding(tx_gk_phys_core.x, tx_gk_phys_core.y);
             std::vector<uint32_t> runtime_args = {
                 time_seed,                                                              // 0: time based seed
                 (device_map[test_device_id_l]->id() << 8) + src_endpoint_start_id + i,  // 1: src_endpoint_id

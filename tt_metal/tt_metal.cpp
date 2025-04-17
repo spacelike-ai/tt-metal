@@ -2,46 +2,65 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include <tt_metal.hpp>
-
-#include <algorithm>
-#include <filesystem>
-#include <mutex>
-#include <optional>
-#include <string>
-#include <unordered_set>
-#include <utility>
-
-#include <dev_msgs.h>
-#include <hal.hpp>
 #include <allocator.hpp>
-#include "dprint_server.hpp"
-#include <command_queue.hpp>
-#include <profiler.hpp>
-
-#include <host_api.hpp>
+#include <circular_buffer.hpp>
 #include <circular_buffer_constants.h>
-#include <trace.hpp>
+#include <dev_msgs.h>
 #include <device_impl.hpp>
 #include <device_pool.hpp>
-#include <kernel.hpp>
-#include <circular_buffer.hpp>
+#include <global_circular_buffer.hpp>
 #include <global_circular_buffer_impl.hpp>
 #include <global_semaphore.hpp>
+#include <host_api.hpp>
+#include <kernel.hpp>
+#include <magic_enum/magic_enum.hpp>
 #include <sub_device_types.hpp>
-#include <global_circular_buffer.hpp>
-#include "tt_metal/impl/dispatch/dispatch_query_manager.hpp"
-#include "tt_metal/include/tt_metal/program.hpp"
-#include "tracy/Tracy.hpp"
+#include <trace.hpp>
+#include <tt_metal.hpp>
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <functional>
+#include <iostream>
+#include <optional>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <variant>
 
-#include <graph_tracking.hpp>
+#include "buffer_constants.hpp"
+#include "circular_buffer_types.hpp"
+#include "data_types.hpp"
+#include "device.hpp"
+#include "dispatch/dispatch_core_manager.hpp"
+#include "dispatch_settings.hpp"
+#include "hal_types.hpp"
+#include "kernel_types.hpp"
 #include "lightmetal/host_api_capture_helpers.hpp"
-
+#include "lightmetal/lightmetal_capture.hpp"
+#include "lightmetal_binary.hpp"
 #include "llrt.hpp"
+#include "llrt/hal.hpp"
+#include "logger.hpp"
+#include "program_impl.hpp"
+#include "semaphore.hpp"
+#include "system_memory_manager.hpp"
+#include "tracy/Tracy.hpp"
+#include "tt_cluster.hpp"
+#include "tt_metal/impl/dispatch/dispatch_query_manager.hpp"
+#include <umd/device/tt_xy_pair.h>
+#include <umd/device/types/xy_pair.h>
+#include "utils.hpp"
 
 namespace tt {
 
 namespace tt_metal {
+enum class FabricConfig : uint32_t;
+struct RuntimeArgsData;
+struct TraceDescriptor;
 
 namespace {
 
@@ -104,8 +123,8 @@ DataMovementConfigStatus CheckDataMovementConfig(
     for (const auto& core_range : core_ranges.ranges()) {
         for (auto x = core_range.start_coord.x; x <= core_range.end_coord.x; x++) {
             for (auto y = core_range.start_coord.y; y <= core_range.end_coord.y; y++) {
-                const KernelGroup* kernel_group =
-                    program.kernels_on_core(CoreCoord(x, y), hal.get_programmable_core_type_index(programmable_core));
+                const KernelGroup* kernel_group = program.kernels_on_core(
+                    CoreCoord(x, y), hal_ref.get_programmable_core_type_index(programmable_core));
                 if (kernel_group != nullptr) {
                     bool local_noc0_in_use = false;
                     bool local_noc1_in_use = false;
@@ -141,7 +160,7 @@ void ConfigureKernelGroup(
     const KernelGroup* kernel_group,
     IDevice* device,
     const CoreCoord& logical_core) {
-    uint32_t kernel_config_base = hal.get_dev_addr(programmable_core_type_index, HalL1MemAddrType::KERNEL_CONFIG);
+    uint32_t kernel_config_base = hal_ref.get_dev_addr(programmable_core_type_index, HalL1MemAddrType::KERNEL_CONFIG);
     for (auto& optional_id : kernel_group->kernel_ids) {
         if (optional_id) {
             // Need the individual offsets of each bin
@@ -351,8 +370,8 @@ bool ReadRegFromDevice(IDevice* device, const CoreCoord& logical_core, uint32_t 
     return true;
 }
 
-void InitializeFabricSetting(detail::FabricSetting fabric_setting) {
-    tt::DevicePool::initialize_fabric_setting(detail::FabricSetting::FABRIC);
+void InitializeFabricConfig(FabricConfig fabric_config) {
+    tt::Cluster::instance().initialize_fabric_config(fabric_config);
 }
 
 std::map<chip_id_t, IDevice*> CreateDevices(
@@ -450,12 +469,25 @@ void WriteToDeviceSharded(Buffer& buffer, tt::stl::Span<const uint8_t> host_buff
         auto data_index = host_page_id * page_size;
         std::memcpy(page.data(), host_buffer.data() + data_index, page_size);
         if (buffer.is_l1()) {
-            auto core_coordinates = device->worker_core_from_logical_core(buffer.logical_core_from_bank_id(bank_id));
+            auto core_coordinates =
+                device->worker_core_from_logical_core(buffer.allocator()->get_logical_core_from_bank_id(bank_id));
             llrt::write_hex_vec_to_core(device->id(), core_coordinates, page, absolute_address);
         } else {
             WriteToDeviceDRAMChannel(device, bank_id, bank_local_address, page);
         }
     }
+}
+
+DeviceAddr CalculateAddressDeviceInterleavedContiguous(const Buffer& buffer, uint32_t bank_index, uint32_t page_index) {
+    DeviceAddr addr = 0;
+    if (buffer.is_dram()) {
+        addr = buffer.bank_local_page_address(bank_index, page_index);
+    } else {
+        TT_ASSERT(buffer.is_l1());
+        addr = buffer.page_address(bank_index, page_index);
+    }
+
+    return addr;
 }
 
 void WriteToDeviceInterleavedContiguous(const Buffer& buffer, tt::stl::Span<const uint8_t> host_buffer) {
@@ -476,19 +508,14 @@ void WriteToDeviceInterleavedContiguous(const Buffer& buffer, tt::stl::Span<cons
     std::vector<uint32_t> page;
     page.resize(page_size / sizeof(uint32_t));
     for (int page_index = 0; page_index < num_pages; page_index++) {
-        auto absolute_address = buffer.page_address(bank_index, page_index);
-        // Get address offset of buffer in bank. Required when writing to DRAM.
-        auto bank_local_address = buffer.bank_local_page_address(bank_index, page_index);
+        const DeviceAddr address = CalculateAddressDeviceInterleavedContiguous(buffer, bank_index, page_index);
         std::memcpy(page.data(), host_buffer.data() + data_index, page_size);
         switch (buffer.buffer_type()) {
-            case BufferType::DRAM:
-                WriteToDeviceDRAMChannel(device, bank_index, bank_local_address, page);
-                break;
+            case BufferType::DRAM: WriteToDeviceDRAMChannel(device, bank_index, address, page); break;
             case BufferType::L1:
             case BufferType::L1_SMALL: {
-                auto core_coordinates =
-                    device->worker_core_from_logical_core(buffer.logical_core_from_bank_id(bank_index));
-                llrt::write_hex_vec_to_core(device->id(), core_coordinates, page, absolute_address);
+                CoreCoord logical_core = buffer.allocator()->get_logical_core_from_bank_id(bank_index);
+                WriteToDeviceL1(device, logical_core, address, page, CoreType::WORKER);
             } break;
             default: TT_THROW("Unsupported buffer type to write to device!");
         }
@@ -530,26 +557,23 @@ void ReadFromDeviceInterleavedContiguous(const Buffer& buffer, uint8_t* host_buf
 
     auto device = buffer.device();
     auto num_banks = device->allocator()->get_num_banks(buffer.buffer_type());
-    size_t host_idx = 0;
 
+    size_t host_idx = 0;
     uint32_t bank_index = 0;
     std::vector<uint32_t> page;
     page.resize(page_size / sizeof(uint32_t));
     for (int page_index = 0; page_index < num_pages; page_index++) {
-        auto absolute_address = buffer.page_address(bank_index, page_index);
-        // Get address offset of buffer in bank. Required when reading from DRAM.
-        auto bank_local_address = buffer.bank_local_page_address(bank_index, page_index);
+        const DeviceAddr address = CalculateAddressDeviceInterleavedContiguous(buffer, bank_index, page_index);
         page.clear();
         switch (buffer.buffer_type()) {
             case BufferType::DRAM:
-            case BufferType::TRACE:
-                ReadFromDeviceDRAMChannel(device, bank_index, bank_local_address, page_size, page);
-                break;
+            case BufferType::TRACE: ReadFromDeviceDRAMChannel(device, bank_index, address, page_size, page); break;
             case BufferType::L1:
             case BufferType::L1_SMALL: {
-                auto core_coordinates =
-                    device->worker_core_from_logical_core(buffer.logical_core_from_bank_id(bank_index));
-                tt::Cluster::instance().read_core(page.data(), page_size, tt_cxy_pair(device->id(), core_coordinates), absolute_address);
+                auto core_coordinates = device->worker_core_from_logical_core(
+                    buffer.allocator()->get_logical_core_from_bank_id(bank_index));
+                tt::Cluster::instance().read_core(
+                    page.data(), page_size, tt_cxy_pair(device->id(), core_coordinates), address);
             } break;
             default: TT_THROW("Unsupported buffer type to read from device!");
         }
@@ -573,7 +597,8 @@ void read_pages_to_host_helper(
     auto absolute_address = dev_buffer.sharded_page_address(bank_id, dev_page_id);
     uint32_t host_buffer_start = host_page_id * page_size;
     if (dev_buffer.is_l1()) {
-        auto core_coordinates = device->worker_core_from_logical_core(dev_buffer.logical_core_from_bank_id(bank_id));
+        auto core_coordinates =
+            device->worker_core_from_logical_core(dev_buffer.allocator()->get_logical_core_from_bank_id(bank_id));
         tt::Cluster::instance().read_core(
             host_buffer + host_buffer_start, page_size, tt_cxy_pair(device->id(), core_coordinates), absolute_address);
     } else {
@@ -696,7 +721,7 @@ void LaunchProgram(IDevice* device, Program& program, bool wait_until_cores_done
         for (uint32_t programmable_core_type_index = 0;
              programmable_core_type_index < logical_cores_used_in_program.size();
              programmable_core_type_index++) {
-            CoreType core_type = hal.get_core_type(programmable_core_type_index);
+            CoreType core_type = hal_ref.get_core_type(programmable_core_type_index);
             for (const auto& logical_core : logical_cores_used_in_program[programmable_core_type_index]) {
                 launch_msg_t* msg = &program.kernels_on_core(logical_core, programmable_core_type_index)->launch_msg;
                 go_msg_t* go_msg = &program.kernels_on_core(logical_core, programmable_core_type_index)->go_msg;
@@ -726,9 +751,9 @@ void WaitProgramDone(IDevice* device, Program& program) {
     auto device_id = device->id();
     std::vector<std::vector<CoreCoord>> logical_cores_used_in_program = program.logical_cores();
     std::unordered_set<CoreCoord> not_done_cores;
-    for (uint32_t index = 0; index < hal.get_programmable_core_type_count(); index++) {
+    for (uint32_t index = 0; index < hal_ref.get_programmable_core_type_count(); index++) {
         const auto& logical_cores = logical_cores_used_in_program[index];
-        CoreType core_type = hal.get_core_type(index);
+        CoreType core_type = hal_ref.get_core_type(index);
         for (const auto& logical_core : logical_cores) {
             auto physical_core = device->virtual_core_from_logical_core(logical_core, core_type);
             not_done_cores.insert(physical_core);
@@ -754,9 +779,9 @@ bool ConfigureDeviceWithProgram(IDevice* device, Program& program, bool fd_bootl
     detail::ValidateCircularBufferRegion(program, device);
 
     std::vector<std::vector<CoreCoord>> logical_cores_used_in_program = program.logical_cores();
-    for (uint32_t index = 0; index < hal.get_programmable_core_type_count(); index++) {
+    for (uint32_t index = 0; index < hal_ref.get_programmable_core_type_count(); index++) {
         const auto& logical_cores = logical_cores_used_in_program[index];
-        CoreType core_type = hal.get_core_type(index);
+        CoreType core_type = hal_ref.get_core_type(index);
         for (const auto& logical_core : logical_cores) {
             KernelGroup* kernel_group = program.kernels_on_core(logical_core, index);
             CoreCoord physical_core = device->virtual_core_from_logical_core(logical_core, core_type);
@@ -791,7 +816,7 @@ bool ConfigureDeviceWithProgram(IDevice* device, Program& program, bool fd_bootl
                             circular_buffer_config_vec[base_index + 1] = circular_buffer->page_size(buffer_index);
                         }
                     }  // PROF_END("CBS")
-                    uint64_t kernel_config_base = hal.get_dev_addr(index, HalL1MemAddrType::KERNEL_CONFIG);
+                    uint64_t kernel_config_base = hal_ref.get_dev_addr(index, HalL1MemAddrType::KERNEL_CONFIG);
                     uint64_t addr = kernel_config_base + program.get_program_config(index).cb_offset;
                     llrt::write_hex_vec_to_core(device_id, physical_core, circular_buffer_config_vec, addr);
                 }
@@ -803,14 +828,14 @@ bool ConfigureDeviceWithProgram(IDevice* device, Program& program, bool fd_bootl
     return pass;
 }
 
-void WriteRuntimeArgsToDevice(IDevice* device, Program& program) {
+void WriteRuntimeArgsToDevice(IDevice* device, Program& program, bool fd_bootloader_mode) {
     ZoneScoped;
     auto device_id = device->id();
-    detail::DispatchStateCheck(false);
+    detail::DispatchStateCheck(fd_bootloader_mode);
 
-    for (uint32_t index = 0; index < hal.get_programmable_core_type_count(); index++) {
-        CoreType core_type = hal.get_core_type(index);
-        uint32_t processor_classes = hal.get_processor_classes_count(index);
+    for (uint32_t index = 0; index < hal_ref.get_programmable_core_type_count(); index++) {
+        CoreType core_type = hal_ref.get_core_type(index);
+        uint32_t processor_classes = hal_ref.get_processor_classes_count(index);
         for (const auto& kg : program.get_kernel_groups(index)) {
             uint32_t kernel_config_base = kg->launch_msg.kernel_config.kernel_config_base[index];
             for (const CoreRange& core_range : kg->core_ranges.ranges()) {
@@ -891,8 +916,6 @@ void SynchronizeWorkerThreads(const std::vector<IDevice*>& workers) {
 }
 
 }  // namespace detail
-
-inline namespace v0 {
 
 size_t GetNumAvailableDevices() { return tt::Cluster::instance().number_of_user_devices(); }
 
@@ -994,13 +1017,13 @@ KernelHandle CreateEthernetKernel(
 
     TT_FATAL(
         utils::underlying_type<DataMovementProcessor>(config.processor) <
-            hal.get_processor_classes_count(eth_core_type),
+            hal_ref.get_processor_classes_count(eth_core_type),
         "EthernetKernel creation failure: {} kernel cannot target processor {} because Ethernet core only has {} "
         "processors. "
         "Update DataMovementProcessor in the config.",
         kernel->name(),
         magic_enum::enum_name(config.processor),
-        hal.get_processor_classes_count(eth_core_type));
+        hal_ref.get_processor_classes_count(eth_core_type));
     TT_FATAL(
         !(are_both_riscv_in_use),
         "EthernetKernel creation failure: Cannot create data movement kernel for {} across specified "
@@ -1216,11 +1239,7 @@ std::shared_ptr<Buffer> CreateBuffer(const ShardedBufferConfig& config, SubDevic
         sub_device_id);
 }
 
-void DeallocateBuffer(Buffer& buffer) {
-    LIGHT_METAL_TRACE_FUNCTION_ENTRY();
-    LIGHT_METAL_TRACE_FUNCTION_CALL(CaptureDeallocateBuffer, buffer);
-    buffer.deallocate();
-}
+void DeallocateBuffer(Buffer& buffer) { buffer.deallocate(); }
 
 void AssignGlobalBufferToProgram(const std::shared_ptr<Buffer>& buffer, Program& program) {
     detail::DispatchStateCheck(not buffer->device()->using_slow_dispatch());
@@ -1370,10 +1389,6 @@ void Synchronize(IDevice* device, const std::optional<uint8_t> cq_id, tt::stl::S
     }
 }
 
-}  // namespace v0
-
-namespace v1 {
-
 namespace experimental {
 
 GlobalCircularBuffer CreateGlobalCircularBuffer(
@@ -1401,8 +1416,6 @@ void UpdateDynamicCircularBufferAddress(
 }
 
 }  // namespace experimental
-
-}  // namespace v1
 
 }  // namespace tt_metal
 

@@ -5,25 +5,26 @@
 #include <algorithm>
 #include <functional>
 #include <random>
+#include <thread>
 
 #include "assert.hpp"
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/tt_align.hpp>
 #include <tt-metalium/tt_metal.hpp>
-#include <tt-metalium/rtoptions.hpp>
-#include <tt-metalium/cq_commands.hpp>
+#include "rtoptions.hpp"
 #include <tt-metalium/command_queue_interface.hpp>
 #include <tt-metalium/dispatch_settings.hpp>
 #include "common.h"
 #include "tt_cluster.hpp"
+#include "tt_metal/impl/dispatch/kernels/cq_commands.hpp"
 #include "tt_metal/impl/dispatch/kernels/packet_queue_ctrl.hpp"
 
-#include <tt-metalium/hal.hpp>
+#include "llrt/hal.hpp"
 #include "llrt.hpp"
 
 #include "test_common.hpp"
 
-#define CQ_PREFETCH_CMD_BARE_MIN_SIZE tt::tt_metal::hal.get_alignment(tt::tt_metal::HalMemType::HOST)
+#define CQ_PREFETCH_CMD_BARE_MIN_SIZE tt::tt_metal::hal_ref.get_alignment(tt::tt_metal::HalMemType::HOST)
 
 constexpr uint32_t DEFAULT_TEST_TYPE = 0;
 constexpr uint32_t DEVICE_DATA_SIZE = 768 * 1024;
@@ -66,6 +67,10 @@ constexpr CoreType DISPATCH_CORE_TYPE = CoreType::WORKER;
 //////////////////////////////////////////////////////////////////////////////////////////
 using std::vector;
 using namespace tt;
+using tt::packet_queue::dispatch_packet_header_t;
+using tt::packet_queue::DispatchRemoteNetworkType;
+using tt::packet_queue::packet_switch_4B_pack;
+using tt::packet_queue::packet_switch_dest_pack;
 
 uint32_t iterations_g = DEFAULT_ITERATIONS;
 
@@ -228,7 +233,7 @@ void dirty_host_completion_buffer(uint32_t* host_hugepage_completion_buffer) {
 }
 
 uint32_t round_cmd_size_up(uint32_t size) {
-    uint32_t align_mask = hal.get_alignment(HalMemType::HOST) - 1;
+    uint32_t align_mask = hal_ref.get_alignment(HalMemType::HOST) - 1;
 
     return (size + align_mask) & ~align_mask;
 }
@@ -485,7 +490,7 @@ void gen_dram_packed_read_cmd(
     int count = 0;
     for (auto length : lengths) {
         TT_ASSERT(length <= num_dram_banks_g * page_size);
-        TT_ASSERT((length & (hal.get_alignment(HalMemType::DRAM) - 1)) == 0);
+        TT_ASSERT((length & (hal_ref.get_alignment(HalMemType::DRAM) - 1)) == 0);
         CQPrefetchRelayPagedPackedSubCmd sub_cmd;
         sub_cmd.start_page = 0;  // TODO: randomize?
         sub_cmd.log_page_size = log_page_size;
@@ -611,9 +616,8 @@ void gen_wait_and_stall_cmd(IDevice* device, vector<uint32_t>& prefetch_cmds, ve
 
     CQDispatchCmd wait;
     wait.base.cmd_id = CQ_DISPATCH_CMD_WAIT;
-    wait.wait.barrier = true;
-    wait.wait.notify_prefetch = true;
-    wait.wait.wait = true;
+    wait.wait.flags = CQ_DISPATCH_CMD_WAIT_FLAG_BARRIER | CQ_DISPATCH_CMD_WAIT_FLAG_NOTIFY_PREFETCH |
+                      CQ_DISPATCH_CMD_WAIT_FLAG_WAIT_MEMORY;
     wait.wait.addr = dispatch_wait_addr_g;
     wait.wait.count = 0;
     add_bare_dispatcher_cmd(dispatch_cmds, wait);
@@ -655,7 +659,7 @@ void gen_linear_read_cmd(
     for (uint32_t i = 0; i < length_words; i++) {
         device_data.push_one(worker_core, device_data.at(worker_core, bank_id, offset + i));
     }
-    device_data.pad(worker_core, bank_id, hal.get_alignment(HalMemType::L1));
+    device_data.pad(worker_core, bank_id, hal_ref.get_alignment(HalMemType::L1));
 }
 
 void gen_dispatcher_delay_cmd(
@@ -868,7 +872,7 @@ void gen_rnd_dram_paged_cmd(
     CoreCoord worker_core) {
     vector<uint32_t> dispatch_cmds;
 
-    const uint32_t dram_alignment = hal.get_alignment(HalMemType::DRAM);
+    const uint32_t dram_alignment = hal_ref.get_alignment(HalMemType::DRAM);
     uint32_t start_page = std::rand() % num_dram_banks_g;
     uint32_t max_page_size = big_g ? MAX_PAGE_SIZE : 4096;
     uint32_t page_size = (std::rand() % (max_page_size + 1)) & ~(dram_alignment - 1);
@@ -966,7 +970,7 @@ void gen_packed_read_test(
         uint32_t n_sub_cmds =
             relay_max_packed_paged_submcds ? CQ_PREFETCH_CMD_RELAY_PAGED_PACKED_MAX_SUB_CMDS : (std::rand() % 7) + 1;
         uint32_t max_read_size = (1 << packed_read_page_size) * num_dram_banks_g;
-        auto dram_alignment = hal.get_alignment(HalMemType::DRAM);
+        auto dram_alignment = hal_ref.get_alignment(HalMemType::DRAM);
         vector<uint32_t> lengths;
         uint32_t total_length = 0;
         for (uint32_t i = 0; i < n_sub_cmds; i++) {
@@ -1086,7 +1090,7 @@ void gen_smoke_test(
     CoreCoord another_worker_core) {
     vector<uint32_t> empty_payload;  // don't give me grief, it is just a test
     vector<uint32_t> dispatch_cmds;
-    const uint32_t dram_alignment = hal.get_alignment(HalMemType::DRAM);
+    const uint32_t dram_alignment = hal_ref.get_alignment(HalMemType::DRAM);
 
     if (!use_dram_exec_buf_g) {
         add_prefetcher_cmd(prefetch_cmds, cmd_sizes, CQ_PREFETCH_CMD_DEBUG, empty_payload);
@@ -1741,12 +1745,12 @@ void configure_for_single_chip(
     uint32_t dispatch_buffer_base = l1_buf_base_g;
     uint32_t prefetch_d_buffer_base = l1_buf_base_g;
     uint32_t prefetch_d_buffer_pages = prefetch_d_buffer_size_g >> DispatchSettings::PREFETCH_D_BUFFER_LOG_PAGE_SIZE;
-    dispatch_wait_addr_g = l1_unreserved_base_aligned + hal.get_alignment(HalMemType::L1);
+    dispatch_wait_addr_g = l1_unreserved_base_aligned + hal_ref.get_alignment(HalMemType::L1);
     vector<uint32_t> zero_data(0);
     llrt::write_hex_vec_to_core(device->id(), phys_dispatch_core, zero_data, dispatch_wait_addr_g);
 
     uint32_t prefetch_q_size = prefetch_q_entries_g * sizeof(DispatchSettings::prefetch_q_entry_type);
-    uint32_t noc_read_alignment = hal.get_alignment(HalMemType::HOST);
+    uint32_t noc_read_alignment = hal_ref.get_alignment(HalMemType::HOST);
     uint32_t cmddat_q_base =
         prefetch_q_base + ((prefetch_q_size + noc_read_alignment - 1) / noc_read_alignment * noc_read_alignment);
 
@@ -1839,11 +1843,11 @@ void configure_for_single_chip(
     const uint32_t dispatch_h_cb_sem = dispatch_h_core_sem_0_id;
 
     std::vector<uint32_t> prefetch_compile_args = {
-        dispatch_buffer_base,                              // overridden below for prefetch_h
+        dispatch_buffer_base,                             // overridden below for prefetch_h
         DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE,  // overridden below for prefetch_h
-        dispatch_buffer_pages,                             // overridden below for prefetch_h
-        prefetch_downstream_cb_sem,                        // overridden below for prefetch_d
-        dispatch_cb_sem,                                   // overridden below for prefetch_h
+        dispatch_buffer_pages,                            // overridden below for prefetch_h
+        prefetch_downstream_cb_sem,                       // overridden below for prefetch_d
+        dispatch_cb_sem,                                  // overridden below for prefetch_h
         dev_hugepage_base_g,
         hugepage_issue_buffer_size_g,
         prefetch_q_base,
@@ -1860,11 +1864,17 @@ void configure_for_single_chip(
         prefetch_downstream_cb_sem,  // prefetch_d only
         DispatchSettings::PREFETCH_D_BUFFER_LOG_PAGE_SIZE,
         DispatchSettings::PREFETCH_D_BUFFER_BLOCKS,  // prefetch_d only
-        0,                                            // unused: for prefetch_hd <--> dispatch_hd
-        0,                                            // unused: for prefetch_hd <--> dispatch_hd
-        0,                                            // unused: for prefetch_hd <--> dispatch_hd
-        0,                                            // unused: for prefetch_hd <--> dispatch_hd
-        0,                                            // unused: for prefetch_hd <--> dispatch_hd
+        0,                                           // unused: for prefetch_hd <--> dispatch_hd
+        0,                                           // unused: for prefetch_hd <--> dispatch_hd
+        0,                                           // unused: for prefetch_hd <--> dispatch_hd
+        0,                                           // unused: for prefetch_hd <--> dispatch_hd
+        0,                                           // unused: for prefetch_hd <--> dispatch_hd
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
     };
 
     constexpr NOC my_noc_index = NOC::NOC_0;
@@ -2146,7 +2156,15 @@ void configure_for_single_chip(
         0,
         host_completion_queue_wr_ptr,
         dev_completion_queue_wr_ptr,
-        dev_completion_queue_rd_ptr};
+        dev_completion_queue_rd_ptr,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        DispatchMemMap::get(DISPATCH_CORE_TYPE).get_dispatch_stream_index(0),
+    };
 
     CoreCoord phys_upstream_from_dispatch_core = split_prefetcher_g ? phys_prefetch_d_core : phys_prefetch_core_g;
     if (split_dispatcher_g) {
@@ -2452,12 +2470,12 @@ void configure_for_multi_chip(
     uint32_t prefetch_d_buffer_pages = prefetch_d_buffer_size_g >> DispatchSettings::PREFETCH_D_BUFFER_LOG_PAGE_SIZE;
     prefetch_q_base = l1_buf_base_g;
     prefetch_q_rd_ptr_addr = l1_unreserved_base_aligned;
-    dispatch_wait_addr_g = l1_unreserved_base_aligned + hal.get_alignment(HalMemType::L1);
+    dispatch_wait_addr_g = l1_unreserved_base_aligned + hal_ref.get_alignment(HalMemType::L1);
     vector<uint32_t> zero_data(0);
     llrt::write_hex_vec_to_core(device_r->id(), phys_dispatch_core, zero_data, dispatch_wait_addr_g);
 
     uint32_t prefetch_q_size = prefetch_q_entries_g * sizeof(DispatchSettings::prefetch_q_entry_type);
-    uint32_t noc_read_alignment = hal.get_alignment(HalMemType::HOST);
+    uint32_t noc_read_alignment = hal_ref.get_alignment(HalMemType::HOST);
     uint32_t cmddat_q_base =
         prefetch_q_base + ((prefetch_q_size + noc_read_alignment - 1) / noc_read_alignment * noc_read_alignment);
 
@@ -3505,6 +3523,10 @@ int main(int argc, char** argv) {
         }
 
         if (packetized_path_en_g) {
+            using tt::packet_queue::PACKET_QUEUE_TEST_PASS;
+            using tt::packet_queue::packet_queue_test_status_to_string;
+            using tt::packet_queue::PQ_TEST_STATUS_INDEX;
+
             vector<uint32_t> prefetch_relay_mux_results = tt::llrt::read_hex_vec_from_core(
                 device_r->id(),
                 phys_prefetch_relay_mux_core,

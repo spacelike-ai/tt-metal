@@ -6,11 +6,13 @@
 #include "gtest/gtest.h"
 #include <tt-metalium/tt_metal.hpp>
 #include <tt-metalium/host_api.hpp>
+#include <tt-metalium/allocator.hpp>
 #include <tt-metalium/device.hpp>
+
+namespace tt::tt_metal {
 
 using std::vector;
 using namespace tt;
-using namespace tt::tt_metal;
 
 void RunTest(IDevice* device) {
     // Set up program
@@ -125,3 +127,5 @@ TEST(DispatchStress, TensixRunManyTimes) {
         tt::tt_metal::detail::CloseDevices(reserved_devices_);
     }
 }
+
+}  // namespace tt::tt_metal

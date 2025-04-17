@@ -6,15 +6,10 @@
 import ttnn
 import torch
 from typing import Optional
-import torch.nn as nn
-from tt_lib.fallback_ops import fallback_ops
-from models.utility_functions import torch_to_tt_tensor_rm, tt_to_torch_tensor
 from models.demos.wormhole.stable_diffusion.tt.ttnn_functional_utility_functions import (
     conv_cache,
     get_default_compute_config,
 )
-
-import math
 
 
 def permute_conv_parameters(weight, bias):
@@ -97,7 +92,6 @@ class downsample_2d:
                 compute_grid_size=self.device.compute_with_storage_grid_size(),
                 block_shard_orientation=ttnn.ShardOrientation.ROW_MAJOR,
                 enable_channels_padding=False,
-                is_out_tiled=True,
             ),
             tile_size=32,
         )

@@ -3,17 +3,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "fd_kernel.hpp"
-#include <host_api.hpp>
-#include <tt_metal.hpp>
-#include "dprint_server.hpp"
 
-#include "prefetch.hpp"
-#include "dispatch.hpp"
-#include "dispatch_s.hpp"
-#include "mux.hpp"
+#include <host_api.hpp>
+#include <utility>
+#include <variant>
+
+#include "data_types.hpp"
 #include "demux.hpp"
+#include "device.hpp"
+#include "dispatch.hpp"
+#include "dispatch/kernel_config/fabric_router_vc.hpp"
+#include "dispatch_core_common.hpp"
+#include "dispatch_s.hpp"
+#include "dprint_server.hpp"
 #include "eth_router.hpp"
 #include "eth_tunneler.hpp"
+#include "hal.hpp"
+#include "hal_types.hpp"
+#include "kernel_types.hpp"
+#include "mux.hpp"
+#include "prefetch.hpp"
+#include "rtoptions.hpp"
+#include <umd/device/tt_core_coordinates.h>
 
 using namespace tt::tt_metal;
 
@@ -92,6 +103,7 @@ FDKernel* FDKernel::Generate(
             return new EthRouterKernel(node_id, device_id, servicing_device_id, cq_id, noc_selection, true);
         case PACKET_ROUTER_DEMUX:
             return new EthRouterKernel(node_id, device_id, servicing_device_id, cq_id, noc_selection, false);
+        case FABRIC_ROUTER_VC: return new tt::tt_metal::FabricRouterVC(node_id, device_id, servicing_device_id, cq_id);
         default: TT_FATAL(false, "Unrecognized dispatch kernel type: {}.", type); return nullptr;
     }
 }
@@ -105,9 +117,9 @@ void FDKernel::configure_kernel_variant(
     bool force_watcher_no_inline) {
     // TODO: just pass in the programmable index
     uint32_t programmable_core_type_index =
-        (GetCoreType() == CoreType::WORKER) ? hal.get_programmable_core_type_index(HalProgrammableCoreType::TENSIX)
-        : is_active_eth_core                ? hal.get_programmable_core_type_index(HalProgrammableCoreType::ACTIVE_ETH)
-                                            : hal.get_programmable_core_type_index(HalProgrammableCoreType::IDLE_ETH);
+        (GetCoreType() == CoreType::WORKER) ? hal_ref.get_programmable_core_type_index(HalProgrammableCoreType::TENSIX)
+        : is_active_eth_core ? hal_ref.get_programmable_core_type_index(HalProgrammableCoreType::ACTIVE_ETH)
+                             : hal_ref.get_programmable_core_type_index(HalProgrammableCoreType::IDLE_ETH);
 
     std::map<string, string> defines = {
         {"DISPATCH_KERNEL", "1"},
@@ -119,7 +131,7 @@ void FDKernel::configure_kernel_variant(
     if (tt::llrt::RunTimeOptions::get_instance().watcher_dispatch_disabled()) {
         defines["FORCE_WATCHER_OFF"] = "1";
     }
-    if (!tt::DPrintServerReadsDispatchCores(device_)) {
+    if (!DPrintServerReadsDispatchCores(device_->id())) {
         defines["FORCE_DPRINT_OFF"] = "1";
     }
     defines.insert(defines_in.begin(), defines_in.end());
@@ -134,7 +146,8 @@ void FDKernel::configure_kernel_variant(
                                            : tt::tt_metal::DataMovementProcessor::RISCV_1,
                 .noc = noc_selection_.non_dispatch_noc,
                 .compile_args = compile_args,
-                .defines = defines});
+                .defines = defines,
+                .opt_level = KernelBuildOptLevel::Os});
     } else {
         tt::tt_metal::CreateKernel(
             *program_,
@@ -144,6 +157,7 @@ void FDKernel::configure_kernel_variant(
                 .eth_mode = is_active_eth_core ? Eth::SENDER : Eth::IDLE,
                 .noc = noc_selection_.non_dispatch_noc,
                 .compile_args = compile_args,
-                .defines = defines});
+                .defines = defines,
+                .opt_level = KernelBuildOptLevel::Os});
     }
 }

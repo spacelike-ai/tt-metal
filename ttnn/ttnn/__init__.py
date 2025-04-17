@@ -99,10 +99,15 @@ from ttnn._ttnn.multi_device import (
     get_device_tensors,
     aggregate_as_tensor,
     get_t3k_physical_device_ids_ring,
-    DefaultMeshCommandQueueId,
 )
 
-from ttnn._ttnn.events import create_event, record_event, wait_for_event
+from ttnn._ttnn.events import (
+    MeshEvent,
+    record_event,
+    wait_for_event,
+    record_mesh_event,
+    wait_for_mesh_event,
+)
 
 from ttnn._ttnn.operations.trace import (
     MeshTraceId,
@@ -119,6 +124,8 @@ from ttnn._ttnn.operations.trace import (
 from ttnn._ttnn.global_circular_buffer import (
     create_global_circular_buffer,
 )
+
+from ttnn._ttnn.fabric import FabricConfig, initialize_fabric_config
 
 from ttnn._ttnn.global_semaphore import (
     create_global_semaphore,
@@ -170,6 +177,8 @@ from ttnn.types import (
     GrayskullComputeKernelConfig,
     MeshShape,
     MeshCoordinate,
+    MeshCoordinateRange,
+    QueueId,
     UnaryWithParam,
     UnaryOpType,
     BinaryOpType,
@@ -188,6 +197,7 @@ from ttnn.device import (
     disable_and_clear_program_cache,
     manage_device,
     synchronize_device,
+    synchronize_mesh_device,
     dump_device_memory_state,
     get_memory_view,
     GetPCIeDeviceID,
@@ -224,6 +234,7 @@ from ttnn.core import (
     get_memory_config,
     light_metal_begin_capture,
     light_metal_end_capture,
+    LightMetalReplay,
     create_sharded_memory_config,
     create_sharded_memory_config_,
     dump_memory_config,
@@ -331,6 +342,7 @@ from ttnn.operations.conv2d import (
     prepare_conv_weights,
     prepare_conv_bias,
 )
+from ttnn._ttnn.operations.experimental import Conv3dConfig
 from ttnn.operations.conv1d import Conv1d, Conv1dConfig
 
 from ttnn.operations.transformer import SDPAProgramConfig

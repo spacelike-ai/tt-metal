@@ -4,12 +4,14 @@
 
 #pragma once
 
+#include <cstdint>
+#include <map>
+#include <string>
+#include <vector>
+
 #include "base_types.hpp"
 #include "data_types.hpp"
 #include "util.hpp"
-#include <map>
-#include <vector>
-#include <string>
 
 namespace tt::tt_metal {
 
@@ -36,15 +38,21 @@ struct DataMovementConfig {
     // This file is then automatically included in the generated compiled kernel files
     std::map<std::string, std::string> defines;
     // Set the compiler and linker optimization level
-    KernelBuildOptLevel opt_level = KernelBuildOptLevel::Os;
+    KernelBuildOptLevel opt_level = KernelBuildOptLevel::O2;
 };
 
 struct ReaderDataMovementConfig : public DataMovementConfig {
-    ReaderDataMovementConfig(std::vector<uint32_t> compile_args = {}, std::map<std::string, std::string> defines = {});
+    ReaderDataMovementConfig(
+        std::vector<uint32_t> compile_args = {},
+        std::map<std::string, std::string> defines = {},
+        KernelBuildOptLevel opt_level = KernelBuildOptLevel::O2);
 };
 
 struct WriterDataMovementConfig : public DataMovementConfig {
-    WriterDataMovementConfig(std::vector<uint32_t> compile_args = {}, std::map<std::string, std::string> defines = {});
+    WriterDataMovementConfig(
+        std::vector<uint32_t> compile_args = {},
+        std::map<std::string, std::string> defines = {},
+        KernelBuildOptLevel opt_level = KernelBuildOptLevel::O2);
 };
 
 struct ComputeConfig {
