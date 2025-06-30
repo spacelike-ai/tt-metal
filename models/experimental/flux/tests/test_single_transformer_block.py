@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,7 +18,6 @@ from ..tt.utils import allocate_tensor_on_device_like, assert_quality
 
 if TYPE_CHECKING:
     from ..reference import FluxTransformer as FluxTransformerReference
-    from ..reference.transformer_block import SingleTransformerBlock as SingleTransformerBlockReference
 
 
 @pytest.mark.parametrize(
@@ -26,9 +26,16 @@ if TYPE_CHECKING:
         (0, 4096 + 512),
     ],
 )
+@pytest.mark.parametrize(
+    "mesh_device",
+    [
+        {"N150": (1, 1), "N300": (1, 2), "T3K": (1, 8), "TG": (8, 4)}.get(
+            os.environ.get("MESH_DEVICE"), len(ttnn.get_device_ids())
+        )
+    ],
+    indirect=True,
+)
 @pytest.mark.parametrize("device_params", [{"trace_region_size": 716800}], indirect=True)
-@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2), (2, 2)], indirect=True)
-@pytest.mark.usefixtures("use_program_cache")
 @pytest.mark.parametrize("use_tracing", [False])  # Tracing currently causes a mesh device to hang.
 def test_single_transformer_block(
     *,

@@ -85,7 +85,13 @@ class LinearParameters:
             output_sharding = False
         elif mesh_sharding_dim == 0:
             weight_mm = ttnn.ShardTensor2dMesh(device, tuple(device.shape), (None, -2))
-            bias_mm = _ShardBias(device)
+            if bias is not None:
+                mesh_height, mesh_width = device.shape
+                zeros = torch.zeros_like(bias)
+                bias = torch.cat([bias] + [zeros] * (mesh_width - 1), dim=-1)
+                bias_mm = ttnn.ShardTensor2dMesh(device, mesh_shape=(mesh_height, mesh_width), dims=(None, -1))
+            else:
+                bias_mm = None
             output_sharding = True
         else:
             msg = "mesh_sharding_dim must be in the range from -2 to 1, or None"
@@ -200,7 +206,7 @@ class Linear:
         )
 
 
-class _ShardBias(ttnn.TensorToMesh):
+class _ShardBias:
     """A mesh mapper for sharding the bias of a linear operation.
 
     This mesh mapper is intended for sharding the bias of a linear operation on the first dimension.
@@ -213,7 +219,7 @@ class _ShardBias(ttnn.TensorToMesh):
     """
 
     def __init__(self, mesh_device: ttnn.MeshDevice) -> None:
-        super().__init__(mesh_device)
+        self.mesh_device = mesh_device
 
     def map(self, tensor: torch.Tensor) -> dict[int, ttnn.Tensor]:
         mesh_height, mesh_width = self.mesh_device.shape

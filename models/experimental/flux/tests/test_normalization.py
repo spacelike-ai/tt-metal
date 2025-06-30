@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 import torch
 import ttnn
@@ -19,9 +21,16 @@ from ..tt.utils import assert_quality
         [4096, 3072],
     ],
 )
-@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2), (2, 2)], indirect=True)
+@pytest.mark.parametrize(
+    "mesh_device",
+    [
+        {"N150": (1, 1), "N300": (1, 2), "T3K": (1, 8), "TG": (8, 4)}.get(
+            os.environ.get("MESH_DEVICE"), len(ttnn.get_device_ids())
+        )
+    ],
+    indirect=True,
+)
 @pytest.mark.parametrize("affine", [True, False], ids=["affine", "noaffine"])
-@pytest.mark.usefixtures("use_program_cache")
 def test_layer_norm(
     *,
     mesh_device: ttnn.MeshDevice,
@@ -68,8 +77,15 @@ def test_layer_norm(
         [2, 24, 4096, 64],
     ],
 )
-@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
-@pytest.mark.usefixtures("use_program_cache")
+@pytest.mark.parametrize(
+    "mesh_device",
+    [
+        {"N150": (1, 1), "N300": (1, 2), "T3K": (1, 8), "TG": (8, 4)}.get(
+            os.environ.get("MESH_DEVICE"), len(ttnn.get_device_ids())
+        )
+    ],
+    indirect=True,
+)
 def test_rms_norm(
     *,
     mesh_device: ttnn.MeshDevice,

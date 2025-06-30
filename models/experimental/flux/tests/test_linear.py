@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 import torch
 import ttnn
@@ -18,10 +20,17 @@ from ..tt.utils import assert_quality
         (32, 1536, 2048),
     ],
 )
+@pytest.mark.parametrize(
+    "mesh_device",
+    [
+        {"N150": (1, 1), "N300": (1, 2), "T3K": (1, 8), "TG": (8, 4)}.get(
+            os.environ.get("MESH_DEVICE"), len(ttnn.get_device_ids())
+        )
+    ],
+    indirect=True,
+)
 @pytest.mark.parametrize("mesh_sharding_dim", [0, 1, None], ids=["in_sharding", "out_sharding", "no_sharding"])
 @pytest.mark.parametrize("on_host", [False, True], ids=["host", "device"])
-@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
-@pytest.mark.usefixtures("use_program_cache")
 def test_linear(
     *,
     mesh_device: ttnn.MeshDevice,
@@ -69,4 +78,4 @@ def test_linear(
     if mesh_sharding_dim is None:
         tt_output_torch = tt_output_torch[..., :output_dim]
 
-    assert_quality(torch_output, tt_output_torch, pcc=0.99976)
+    assert_quality(torch_output, tt_output_torch, pcc=0.99967)

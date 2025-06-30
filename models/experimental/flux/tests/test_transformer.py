@@ -1,8 +1,10 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
 
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
+
+import os
 
 import pytest
 import torch
@@ -11,9 +13,18 @@ from loguru import logger
 
 from ..reference.transformer import FluxTransformer as FluxTransformerReference
 from ..tt.transformer import FluxTransformer, FluxTransformerParameters
-from ..tt.utils import allocate_tensor_on_device_like, assert_quality
+from ..tt.utils import assert_quality
 
 
+@pytest.mark.parametrize(
+    "mesh_device",
+    [
+        {"N150": (1, 1), "N300": (1, 2), "T3K": (1, 8), "TG": (8, 4)}.get(
+            os.environ.get("MESH_DEVICE"), len(ttnn.get_device_ids())
+        )
+    ],
+    indirect=True,
+)
 @pytest.mark.parametrize(
     ("spatial_sequence_length", "prompt_sequence_length", "block_count", "pcc", "mse"),
     [
@@ -22,23 +33,10 @@ from ..tt.utils import allocate_tensor_on_device_like, assert_quality
         # (4096, 512, 1, 0.992, 320),
     ],
 )
-@pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 18006016}], indirect=True)
-@pytest.mark.usefixtures("use_program_cache")
-@pytest.mark.parametrize(
-    ("mesh_device", "use_tracing"),
-    [
-        # Tracing is not supported on single devices, since not all weights fit on the device.
-        ((1, 1), False),
-        # Tracing on multiple devices currently causes hangs.
-        ((1, 2), False),
-        ((2, 2), False),
-    ],
-    indirect=["mesh_device"],
-)
-def test_transformer(  # noqa: PLR0915
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 15157248}], indirect=True)
+def test_transformer(
     *,
     mesh_device: ttnn.MeshDevice,
-    use_tracing: bool,
     prompt_sequence_length: int,
     spatial_sequence_length: int,
     block_count: int | None,
@@ -46,7 +44,7 @@ def test_transformer(  # noqa: PLR0915
     mse: float,
 ) -> None:
     mesh_height, _ = mesh_device.shape
-    batch_size = mesh_height
+    batch_size = 1
 
     torch.manual_seed(0)
 
@@ -90,76 +88,54 @@ def test_transformer(  # noqa: PLR0915
     batch_sharded = ttnn.ShardTensor2dMesh(mesh_device, tuple(mesh_device.shape), (0, None))
     unsharded = ttnn.ReplicateTensorToMesh(mesh_device)
 
-    tt_spatial_host = ttnn.from_torch(
+    tt_timestep = ttnn.allocate_tensor_on_device([1, 1], ttnn.float32, ttnn.TILE_LAYOUT, mesh_device)
+
+    tt_imagerot1 = ttnn.allocate_tensor_on_device(imagerot1.shape, ttnn.float32, ttnn.TILE_LAYOUT, mesh_device)
+    tt_imagerot2 = ttnn.allocate_tensor_on_device(imagerot2.shape, ttnn.float32, ttnn.TILE_LAYOUT, mesh_device)
+
+    tt_pooled_prompt_embeds = ttnn.from_torch(
+        pooled_projection,
+        device=mesh_device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=ttnn.bfloat16,
+        mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, tuple(mesh_device.shape), (0, None)),
+    )
+
+    tt_spatial = ttnn.from_torch(
         spatial,
+        device=mesh_device,
         layout=ttnn.TILE_LAYOUT,
         dtype=ttnn.bfloat16,
         mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, tuple(mesh_device.shape), (0, -2)),
     )
-    tt_prompt_host = ttnn.from_torch(
+    tt_prompt = ttnn.from_torch(
         prompt,
+        device=mesh_device,
         layout=ttnn.TILE_LAYOUT,
         dtype=ttnn.bfloat8_b,
         mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, tuple(mesh_device.shape), (0, -1)),
     )
-    tt_pooled_projection_host = ttnn.from_torch(
-        pooled_projection, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=batch_sharded
-    )
-    tt_timestep_host = ttnn.from_torch(
-        timestep.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded
-    )
-    tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded)
-    tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded)
 
-    tt_spatial = allocate_tensor_on_device_like(tt_spatial_host, device=mesh_device)
-    tt_prompt = allocate_tensor_on_device_like(tt_prompt_host, device=mesh_device)
-    tt_pooled_projection = allocate_tensor_on_device_like(tt_pooled_projection_host, device=mesh_device)
-    tt_timestep = allocate_tensor_on_device_like(tt_timestep_host, device=mesh_device)
-    tt_imagerot1 = allocate_tensor_on_device_like(tt_imagerot1_host, device=mesh_device)
-    tt_imagerot2 = allocate_tensor_on_device_like(tt_imagerot2_host, device=mesh_device)
+    tt_timestep = ttnn.from_torch(
+        timestep.unsqueeze(1), device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded
+    )
+    tt_imagerot1 = ttnn.from_torch(
+        imagerot1, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded
+    )
+    tt_imagerot2 = ttnn.from_torch(
+        imagerot2, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded
+    )
 
     model_args = dict(  # noqa: C408
         spatial=tt_spatial,
         prompt=tt_prompt,
-        pooled_projection=tt_pooled_projection,
+        pooled_projection=tt_pooled_prompt_embeds,
         timestep=tt_timestep,
         image_rotary_emb=(tt_imagerot1, tt_imagerot2),
     )
 
-    if use_tracing:
-        # cache
-        logger.info("caching...")
-        tt_model.forward(**model_args)
-
-        # trace
-        logger.info("tracing...")
-        tid = ttnn.begin_trace_capture(mesh_device)
-        tt_output = tt_model.forward(**model_args)
-        ttnn.end_trace_capture(mesh_device, tid)
-
-        # execute
-        logger.info("executing...")
-        ttnn.copy_host_to_device_tensor(tt_spatial_host, tt_spatial)
-        ttnn.copy_host_to_device_tensor(tt_prompt_host, tt_prompt)
-        ttnn.copy_host_to_device_tensor(tt_pooled_projection_host, tt_pooled_projection)
-        ttnn.copy_host_to_device_tensor(tt_timestep_host, tt_timestep)
-        ttnn.copy_host_to_device_tensor(tt_imagerot1_host, tt_imagerot1)
-        ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
-        ttnn.execute_trace(mesh_device, tid)
-    else:
-        # compile
-        logger.info("compiling...")
-        tt_model.forward(**model_args)
-
-        # execute
-        logger.info("executing...")
-        ttnn.copy_host_to_device_tensor(tt_spatial_host, tt_spatial)
-        ttnn.copy_host_to_device_tensor(tt_prompt_host, tt_prompt)
-        ttnn.copy_host_to_device_tensor(tt_pooled_projection_host, tt_pooled_projection)
-        ttnn.copy_host_to_device_tensor(tt_timestep_host, tt_timestep)
-        ttnn.copy_host_to_device_tensor(tt_imagerot1_host, tt_imagerot1)
-        ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
-        tt_output = tt_model.forward(**model_args)
+    logger.info("forward pass...")
+    tt_output = tt_model.forward(**model_args)
 
     composer = ttnn.ConcatMesh2dToTensor(mesh_device, tuple(mesh_device.shape), (0, -2))
     assert_quality(torch_output, tt_output, pcc=pcc, mse=mse, mesh_composer=composer)

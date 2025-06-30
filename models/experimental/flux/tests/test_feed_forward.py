@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 import torch
 import ttnn
@@ -19,10 +21,17 @@ from ..tt.utils import assert_quality
         (4096, 3072, 3072),
     ],
 )
+@pytest.mark.parametrize(
+    "mesh_device",
+    [
+        {"N150": (1, 1), "N300": (1, 2), "T3K": (1, 8), "TG": (8, 4)}.get(
+            os.environ.get("MESH_DEVICE"), len(ttnn.get_device_ids())
+        )
+    ],
+    indirect=True,
+)
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
-@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2), (2, 2)], indirect=True)
 @pytest.mark.parametrize("linear_on_host", [False, True])
-@pytest.mark.usefixtures("use_program_cache")
 def test_feed_forward(
     *,
     mesh_device: ttnn.MeshDevice,

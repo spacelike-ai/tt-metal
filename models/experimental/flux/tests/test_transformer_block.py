@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+import os
 
 import pytest
 import torch
@@ -13,13 +14,21 @@ from loguru import logger
 
 from ..tt import utils
 from ..tt.transformer_block import TransformerBlock, TransformerBlockParameters
-from ..tt.utils import allocate_tensor_on_device_like, assert_quality
+from ..tt.utils import assert_quality
 
 if TYPE_CHECKING:
-    from ..reference import FluxTransformer
     from ..reference.transformer_block import TransformerBlock as TransformerBlockReference
 
 
+@pytest.mark.parametrize(
+    "mesh_device",
+    [
+        {"N150": (1, 1), "N300": (1, 2), "T3K": (1, 8), "TG": (8, 4)}.get(
+            os.environ.get("MESH_DEVICE"), len(ttnn.get_device_ids())
+        )
+    ],
+    indirect=True,
+)
 @pytest.mark.parametrize(
     ("block_index", "spatial_sequence_length", "prompt_sequence_length"),
     [
@@ -27,8 +36,6 @@ if TYPE_CHECKING:
     ],
 )
 @pytest.mark.parametrize("device_params", [{"trace_region_size": 716800}], indirect=True)
-@pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2), (2, 2)], indirect=True)
-@pytest.mark.usefixtures("use_program_cache")
 @pytest.mark.parametrize("use_tracing", [False])  # Tracing currently causes a mesh device to hang.
 def test_transformer_block(
     *,
@@ -63,24 +70,26 @@ def test_transformer_block(
     batch_sharded = ttnn.ShardTensor2dMesh(mesh_device, tuple(mesh_device.shape), (0, None))
     unsharded = ttnn.ReplicateTensorToMesh(mesh_device)
 
-    tt_spatial_host = ttnn.from_torch(spatial, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=sharded)
-    tt_prompt_host = ttnn.from_torch(prompt, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=sharded)
-    tt_time_host = ttnn.from_torch(
-        time.unsqueeze(1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=batch_sharded
+    tt_spatial = ttnn.from_torch(
+        spatial, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=sharded
     )
-    tt_imagerot1_host = ttnn.from_torch(imagerot1, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded)
-    tt_imagerot2_host = ttnn.from_torch(imagerot2, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded)
+    tt_prompt = ttnn.from_torch(
+        prompt, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, mesh_mapper=sharded
+    )
+    tt_time = ttnn.from_torch(
+        time.unsqueeze(1), device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, mesh_mapper=batch_sharded
+    )
+    tt_imagerot1 = ttnn.from_torch(
+        imagerot1, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded
+    )
+    tt_imagerot2 = ttnn.from_torch(
+        imagerot2, device=mesh_device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.float32, mesh_mapper=unsharded
+    )
 
     with torch.no_grad():
         spatial_output, prompt_output = torch_model(
             spatial=spatial, prompt=prompt, time_embed=time, image_rotary_emb=(imagerot1, imagerot2)
         )
-
-    tt_spatial = allocate_tensor_on_device_like(tt_spatial_host, device=mesh_device)
-    tt_prompt = allocate_tensor_on_device_like(tt_prompt_host, device=mesh_device)
-    tt_time = allocate_tensor_on_device_like(tt_time_host, device=mesh_device)
-    tt_imagerot1 = allocate_tensor_on_device_like(tt_imagerot1_host, device=mesh_device)
-    tt_imagerot2 = allocate_tensor_on_device_like(tt_imagerot2_host, device=mesh_device)
 
     model_args = dict(  # noqa: C408
         spatial=tt_spatial,
@@ -89,40 +98,16 @@ def test_transformer_block(
         image_rotary_emb=(tt_imagerot1, tt_imagerot2),
     )
 
-    if use_tracing:
-        # cache
-        logger.debug("caching...")
-        tt_model.forward(**model_args)
+    # compile
+    logger.debug("compiling...")
+    tt_model.forward(**model_args)
 
-        # trace
-        logger.debug("tracing...")
-        tid = ttnn.begin_trace_capture(mesh_device)
-        tt_spatial_output, tt_prompt_output = tt_model.forward(**model_args)
-        ttnn.end_trace_capture(mesh_device, tid)
+    # execute
+    logger.debug("executing...")
 
-        # execute
-        logger.debug("executing...")
-        ttnn.copy_host_to_device_tensor(tt_spatial_host, tt_spatial)
-        ttnn.copy_host_to_device_tensor(tt_prompt_host, tt_prompt)
-        ttnn.copy_host_to_device_tensor(tt_time_host, tt_time)
-        ttnn.copy_host_to_device_tensor(tt_imagerot1_host, tt_imagerot1)
-        ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
-        ttnn.execute_trace(mesh_device, tid)
-    else:
-        # compile
-        logger.debug("compiling...")
-        tt_model.forward(**model_args)
-
-        # execute
-        logger.debug("executing...")
-        ttnn.copy_host_to_device_tensor(tt_spatial_host, tt_spatial)
-        ttnn.copy_host_to_device_tensor(tt_prompt_host, tt_prompt)
-        ttnn.copy_host_to_device_tensor(tt_time_host, tt_time)
-        ttnn.copy_host_to_device_tensor(tt_imagerot1_host, tt_imagerot1)
-        ttnn.copy_host_to_device_tensor(tt_imagerot2_host, tt_imagerot2)
-        utils.signpost("start")
-        tt_spatial_output, tt_prompt_output = tt_model.forward(**model_args)
-        utils.signpost("end")
+    utils.signpost("start")
+    tt_spatial_output, tt_prompt_output = tt_model.forward(**model_args)
+    utils.signpost("end")
 
     assert (prompt_output is None) == (tt_prompt_output is None)
 

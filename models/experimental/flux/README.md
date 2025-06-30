@@ -17,5 +17,5 @@ pytest models/experimental/flux/tests
 The demo is executed using the following command:
 
 ```sh
-python models/experimental/flux/demo.py
+pytest models/experimental/flux/demo.py
 ```
