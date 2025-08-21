@@ -2,21 +2,44 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <chrono>
+#include <fmt/base.h>
 #include <gtest/gtest.h>
-
-#include <algorithm>
-#include <functional>
-#include <random>
-
-#include <tt-metalium/tilize_utils.hpp>  // FIXME: Remove dependency on this or move to test_utils like tilize/untilize
-#include "device_fixture.hpp"
-#include <tt-metalium/tt_metal.hpp>
+#include <stdint.h>
 #include <tt-metalium/host_api.hpp>
+#include <tt-metalium/tt_metal.hpp>
+#include <unistd.h>
+#include <functional>
+#include <map>
+#include <memory>
+#include <ostream>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <tt-metalium/bfloat16.hpp>
+#include <tt-metalium/buffer.hpp>
+#include <tt-metalium/buffer_types.hpp>
+#include <tt-metalium/circular_buffer_config.hpp>
+#include <tt-metalium/core_coord.hpp>
+#include <tt-metalium/data_types.hpp>
+#include "device_fixture.hpp"
+#include <tt-metalium/kernel_types.hpp>
+#include <tt-logger/tt-logger.hpp>
+#include <tt-metalium/program.hpp>
+#include <tt_stl/span.hpp>
+#include <tt-metalium/tt_backend_api_types.hpp>
 #include "tt_metal/test_utils/comparison.hpp"
-#include "tt_metal/test_utils/df/df.hpp"
+#include "tt_metal/test_utils/df/float32.hpp"
+#include "tt_metal/test_utils/packing.hpp"
 #include "tt_metal/test_utils/print_helpers.hpp"
 #include "tt_metal/test_utils/stimulus.hpp"
-#include "tt_metal/test_utils/tilization.hpp"
+
+namespace tt {
+namespace tt_metal {
+class IDevice;
+}  // namespace tt_metal
+}  // namespace tt
 
 namespace tt::tt_metal {
 
@@ -54,26 +77,26 @@ void create_CBs_for_fused_matmul(
     tt_metal::CircularBufferConfig l1_input0_cb_config =
         tt_metal::CircularBufferConfig(cb0_tiles * single_tile_size, {{in0_cb, tt::DataFormat::Float16_b}})
             .set_page_size(in0_cb, single_tile_size);
-    auto l1_input0_cb = tt_metal::CreateCircularBuffer(program, core, l1_input0_cb_config);
+    tt_metal::CreateCircularBuffer(program, core, l1_input0_cb_config);
 
     uint32_t cb1_tiles = N * in0_block_w * 2;
     tt_metal::CircularBufferConfig cb_in1_config =
         tt_metal::CircularBufferConfig(cb1_tiles * single_tile_size, {{in1_cb, tt::DataFormat::Float16_b}})
             .set_page_size(in1_cb, single_tile_size);
-    auto cb_in1 = tt_metal::CreateCircularBuffer(program, core, cb_in1_config);
+    tt_metal::CreateCircularBuffer(program, core, cb_in1_config);
 
     if (not activations_rm and not output_rm) {  // no tilize, no untilize
         tt_metal::CircularBufferConfig cb_matmul_partials_config =
             tt_metal::CircularBufferConfig(
                 num_output_tiles * single_tile_size, {{matmul_partials_cb, tt::DataFormat::Float16_b}})
                 .set_page_size(matmul_partials_cb, single_tile_size);
-        auto cb_matmul_partials = tt_metal::CreateCircularBuffer(program, core, cb_matmul_partials_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_matmul_partials_config);
 
         // Partials share same L1 address space as output
         tt_metal::CircularBufferConfig cb_output_config =
             tt_metal::CircularBufferConfig(num_output_tiles * single_tile_size, {{out0_cb, tt::DataFormat::Float16_b}})
                 .set_page_size(out0_cb, single_tile_size);
-        auto cb_output = tt_metal::CreateCircularBuffer(program, core, cb_output_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_output_config);
 
     } else if (not activations_rm and output_rm) {  // no tilize, just untilize
 
@@ -81,7 +104,7 @@ void create_CBs_for_fused_matmul(
             tt_metal::CircularBufferConfig(
                 num_output_tiles * single_tile_size, {{matmul_partials_cb, tt::DataFormat::Float16_b}})
                 .set_page_size(matmul_partials_cb, single_tile_size);
-        auto cb_matmul_partials = tt_metal::CreateCircularBuffer(program, core, cb_matmul_partials_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_matmul_partials_config);
 
         // Need a new CB to push output block to since other
         // intermediate read pointer changes in enable reload
@@ -90,7 +113,7 @@ void create_CBs_for_fused_matmul(
             tt_metal::CircularBufferConfig(
                 num_output_tiles * single_tile_size, {{untilize_mode_reblock_cb, tt::DataFormat::Float16_b}})
                 .set_page_size(untilize_mode_reblock_cb, single_tile_size);
-        auto cb_final_matmul_partials = tt_metal::CreateCircularBuffer(program, core, cb_final_matmul_partials_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_final_matmul_partials_config);
 
         // Supposed to be a small CB only responsible for reorganizing
         // the output blocks to fill the whole "per core output block width"
@@ -99,12 +122,12 @@ void create_CBs_for_fused_matmul(
             tt_metal::CircularBufferConfig(
                 reblock_cb_tiles * single_tile_size, {{untilize_mode_reblock_cb, tt::DataFormat::Float16_b}})
                 .set_page_size(untilize_mode_reblock_cb, single_tile_size);
-        auto cb_reblock = tt_metal::CreateCircularBuffer(program, core, cb_reblock_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_reblock_config);
 
         tt_metal::CircularBufferConfig cb_output_config =
             tt_metal::CircularBufferConfig(num_output_tiles * single_tile_size, {{out0_cb, tt::DataFormat::Float16_b}})
                 .set_page_size(out0_cb, single_tile_size);
-        auto cb_output = tt_metal::CreateCircularBuffer(program, core, cb_output_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_output_config);
 
     } else if (activations_rm and not output_rm) {  // just tilize, no untilize
 
@@ -112,18 +135,18 @@ void create_CBs_for_fused_matmul(
             tt_metal::CircularBufferConfig(
                 cb0_tiles * single_tile_size, {{tilize_mode_tilized_in0_cb, tt::DataFormat::Float16_b}})
                 .set_page_size(tilize_mode_tilized_in0_cb, single_tile_size);
-        auto cb_src0_tilized = tt_metal::CreateCircularBuffer(program, core, cb_src0_tilized_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_src0_tilized_config);
 
         tt_metal::CircularBufferConfig cb_matmul_partials_config =
             tt_metal::CircularBufferConfig(
                 num_output_tiles * single_tile_size, {{matmul_partials_cb, tt::DataFormat::Float16_b}})
                 .set_page_size(matmul_partials_cb, single_tile_size);
-        auto cb_matmul_partials = tt_metal::CreateCircularBuffer(program, core, cb_matmul_partials_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_matmul_partials_config);
 
         tt_metal::CircularBufferConfig cb_output_config =
             tt_metal::CircularBufferConfig(num_output_tiles * single_tile_size, {{out0_cb, tt::DataFormat::Float16_b}})
                 .set_page_size(out0_cb, single_tile_size);
-        auto cb_output = tt_metal::CreateCircularBuffer(program, core, cb_output_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_output_config);
 
     } else {  // tilize activations and untilize output
 
@@ -132,13 +155,13 @@ void create_CBs_for_fused_matmul(
             tt_metal::CircularBufferConfig(
                 num_output_tiles * single_tile_size, {{tilize_mode_tilized_in0_cb, tt::DataFormat::Float16_b}})
                 .set_page_size(tilize_mode_tilized_in0_cb, single_tile_size);
-        auto cb_src0_tilized = tt_metal::CreateCircularBuffer(program, core, cb_src0_tilized_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_src0_tilized_config);
 
         tt_metal::CircularBufferConfig cb_matmul_partials_config =
             tt_metal::CircularBufferConfig(
                 num_output_tiles * single_tile_size, {{matmul_partials_cb, tt::DataFormat::Float16_b}})
                 .set_page_size(matmul_partials_cb, single_tile_size);
-        auto cb_matmul_partials = tt_metal::CreateCircularBuffer(program, core, cb_matmul_partials_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_matmul_partials_config);
 
         // Shares same address space as matmul partials
         tt_metal::CircularBufferConfig cb_final_matmul_partials_config =
@@ -146,7 +169,7 @@ void create_CBs_for_fused_matmul(
                 num_output_tiles * single_tile_size,
                 {{untilize_mode_final_matmul_partials_cb, tt::DataFormat::Float16_b}})
                 .set_page_size(untilize_mode_final_matmul_partials_cb, single_tile_size);
-        auto cb_final_matmul_partials = tt_metal::CreateCircularBuffer(program, core, cb_final_matmul_partials_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_final_matmul_partials_config);
 
         // Supposed to be a small CB only responsible for reorganizing
         // the output blocks to fill the whole "per core output block width"
@@ -155,12 +178,12 @@ void create_CBs_for_fused_matmul(
             tt_metal::CircularBufferConfig(
                 reblock_cb_tiles * single_tile_size, {{untilize_mode_reblock_cb, tt::DataFormat::Float16_b}})
                 .set_page_size(untilize_mode_reblock_cb, single_tile_size);
-        auto cb_reblock = tt_metal::CreateCircularBuffer(program, core, cb_reblock_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_reblock_config);
 
         tt_metal::CircularBufferConfig cb_output_config =
             tt_metal::CircularBufferConfig(num_output_tiles * single_tile_size, {{out0_cb, tt::DataFormat::Float16_b}})
                 .set_page_size(out0_cb, single_tile_size);
-        auto cb_output = tt_metal::CreateCircularBuffer(program, core, cb_output_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_output_config);
     }
 }
 
@@ -189,17 +212,17 @@ bool single_tile_matmul(tt_metal::IDevice* device) {
     tt_metal::CircularBufferConfig l1_input0_cb_config =
         tt_metal::CircularBufferConfig(byte_size, {{in0_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(in0_cb_index, byte_size);
-    auto l1_input0_cb = tt_metal::CreateCircularBuffer(program, core, l1_input0_cb_config);
+    tt_metal::CreateCircularBuffer(program, core, l1_input0_cb_config);
 
     tt_metal::CircularBufferConfig l1_input1_cb_config =
         tt_metal::CircularBufferConfig(byte_size, {{in1_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(in1_cb_index, byte_size);
-    auto l1_input1_cb = tt_metal::CreateCircularBuffer(program, core, l1_input1_cb_config);
+    tt_metal::CreateCircularBuffer(program, core, l1_input1_cb_config);
 
     tt_metal::CircularBufferConfig l1_output_cb_config =
         tt_metal::CircularBufferConfig(byte_size, {{out_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(out_cb_index, byte_size);
-    auto l1_output_cb = tt_metal::CreateCircularBuffer(program, core, l1_output_cb_config);
+    tt_metal::CreateCircularBuffer(program, core, l1_output_cb_config);
 
     auto reader_kernel = tt_metal::CreateKernel(
         program,
@@ -219,7 +242,7 @@ bool single_tile_matmul(tt_metal::IDevice* device) {
             .noc = tt_metal::NOC::RISCV_0_default,
             .compile_args = {out_cb_index}});
 
-    auto simple_matmul_kernel = tt_metal::CreateKernel(
+    tt_metal::CreateKernel(
         program,
         "tests/tt_metal/tt_metal/test_kernels/compute/unit_tests/matmul/single_tile_compute.cpp",
         core,
@@ -240,6 +263,7 @@ bool single_tile_matmul(tt_metal::IDevice* device) {
     ////////////////////////////////////////////////////////////////////////////
     //                      Golden Generation
     ////////////////////////////////////////////////////////////////////////////
+    // NOLINTNEXTLINE(performance-unnecessary-copy-initialization)
     auto packed_golden = packed_input0;
 
     ////////////////////////////////////////////////////////////////////////////
@@ -327,17 +351,17 @@ bool single_block_matmul(tt_metal::IDevice* device, uint32_t M, uint32_t K, uint
     tt_metal::CircularBufferConfig l1_input0_cb_config =
         tt_metal::CircularBufferConfig(in0_byte_size, {{in0_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(in0_cb_index, cb_page_size);
-    auto l1_input0_cb = tt_metal::CreateCircularBuffer(program, core, l1_input0_cb_config);
+    tt_metal::CreateCircularBuffer(program, core, l1_input0_cb_config);
 
     tt_metal::CircularBufferConfig l1_input1_cb_config =
         tt_metal::CircularBufferConfig(in1_byte_size, {{in1_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(in1_cb_index, cb_page_size);
-    auto l1_input1_cb = tt_metal::CreateCircularBuffer(program, core, l1_input1_cb_config);
+    tt_metal::CreateCircularBuffer(program, core, l1_input1_cb_config);
 
     tt_metal::CircularBufferConfig l1_output_cb_config =
         tt_metal::CircularBufferConfig(out_byte_size, {{out_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(out_cb_index, cb_page_size);
-    auto l1_output_cb = tt_metal::CreateCircularBuffer(program, core, l1_output_cb_config);
+    tt_metal::CreateCircularBuffer(program, core, l1_output_cb_config);
 
     auto reader_kernel = tt_metal::CreateKernel(
         program,
@@ -357,7 +381,7 @@ bool single_block_matmul(tt_metal::IDevice* device, uint32_t M, uint32_t K, uint
             .noc = tt_metal::NOC::RISCV_0_default,
             .compile_args = {out_cb_index}});
 
-    auto simple_matmul_kernel = tt_metal::CreateKernel(
+    tt_metal::CreateKernel(
         program,
         "tests/tt_metal/tt_metal/test_kernels/compute/unit_tests/matmul/multi_tile_compute.cpp",
         core,
@@ -429,7 +453,7 @@ bool single_block_matmul(tt_metal::IDevice* device, uint32_t M, uint32_t K, uint
         [&](const bfloat16& a, const bfloat16& b) { return is_close(a, b, 0.015f); },
         &failed_index);
     if (not pass) {
-        log_info("Failed Index={}", failed_index);
+        log_info(tt::LogTest, "Failed Index={}", failed_index);
         print_vector_fixed_numel_per_row(unpack_vector<bfloat16, uint32_t>(dest_buffer_data), 32);
     }
     return pass;
@@ -480,22 +504,22 @@ bool blocked_matmul(tt_metal::IDevice* device, uint32_t M, uint32_t K, uint32_t 
 
     tt_metal::CircularBufferConfig l1_input0_cb_config = tt_metal::CircularBufferConfig(in0_byte_size, {{in0_cb_index, tt::DataFormat::Float16_b}})
         .set_page_size(in0_cb_index, cb_page_size);
-    auto l1_input0_cb = tt_metal::CreateCircularBuffer(program, core, l1_input0_cb_config);
+    tt_metal::CreateCircularBuffer(program, core, l1_input0_cb_config);
 
     tt_metal::CircularBufferConfig l1_input1_cb_config =
         tt_metal::CircularBufferConfig(in1_byte_size, {{in1_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(in1_cb_index, cb_page_size);
-    auto l1_input1_cb = tt_metal::CreateCircularBuffer(program, core, l1_input1_cb_config);
+    tt_metal::CreateCircularBuffer(program, core, l1_input1_cb_config);
 
     tt_metal::CircularBufferConfig l1_output_cb_config =
         tt_metal::CircularBufferConfig(out_byte_size, {{out_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(out_cb_index, cb_page_size);
-    auto l1_output_cb = tt_metal::CreateCircularBuffer(program, core, l1_output_cb_config);
+    tt_metal::CreateCircularBuffer(program, core, l1_output_cb_config);
 
     tt_metal::CircularBufferConfig l1_partials_cb_config =
         tt_metal::CircularBufferConfig(out_byte_size, {{partials_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(partials_cb_index, cb_page_size);
-    auto l1_partials_cb = tt_metal::CreateCircularBuffer(program, core, l1_partials_cb_config);
+    tt_metal::CreateCircularBuffer(program, core, l1_partials_cb_config);
 
     auto reader_kernel = tt_metal::CreateKernel(
         program,
@@ -515,7 +539,7 @@ bool blocked_matmul(tt_metal::IDevice* device, uint32_t M, uint32_t K, uint32_t 
             .noc = tt_metal::NOC::RISCV_0_default,
             .compile_args = {out_cb_index}});
 
-    auto simple_matmul_kernel = tt_metal::CreateKernel(
+    tt_metal::CreateKernel(
         program,
         "tests/tt_metal/tt_metal/test_kernels/compute/unit_tests/matmul/multi_block_compute.cpp",
         core,
@@ -598,7 +622,7 @@ bool blocked_matmul(tt_metal::IDevice* device, uint32_t M, uint32_t K, uint32_t 
         [&](const bfloat16& a, const bfloat16& b) { return is_close(a, b, 0.015f); },
         &failed_index);
     if (not pass) {
-        log_info("Failed Index={}", failed_index);
+        log_info(tt::LogTest, "Failed Index={}", failed_index);
         print_vector_fixed_numel_per_row(unpack_vector<bfloat16, uint32_t>(dest_buffer_data), 32);
     }
     return pass;

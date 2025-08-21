@@ -2,12 +2,33 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include "device_fixture.hpp"
-#include "gtest/gtest.h"
-#include "buffer_test_utils.hpp"
+#include <fmt/base.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <tt-metalium/allocator.hpp>
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/tt_metal.hpp>
-#include <tt-metalium/allocator.hpp>
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <tt-metalium/assert.hpp>
+#include <tt-metalium/buffer_types.hpp>
+#include "buffer_test_utils.hpp"
+#include <tt-metalium/circular_buffer_config.hpp>
+#include <tt-metalium/core_coord.hpp>
+#include <tt-metalium/data_types.hpp>
+#include <tt-metalium/device.hpp>
+#include "device_fixture.hpp"
+#include "gtest/gtest.h"
+#include <tt-metalium/kernel_types.hpp>
+#include <tt-logger/tt-logger.hpp>
+#include <tt-metalium/program.hpp>
+#include <tt_stl/span.hpp>
+#include <tt-metalium/tt_backend_api_types.hpp>
 #include "tt_metal/test_utils/stimulus.hpp"
 
 using tt::tt_metal::IDevice;
@@ -24,7 +45,7 @@ bool SimpleL1ReadOnly(IDevice* device, size_t local_address, size_t byte_size) {
     readL1Backdoor(device, bank0_logical_core, local_address, byte_size, outputs);
     bool pass = (inputs == outputs);
     if (not pass) {
-        tt::log_info("Mismatch at Core={}, Packet Size(in Bytes)={}", bank0_logical_core.str(), byte_size);
+        log_info(tt::LogTest, "Mismatch at Core={}, Packet Size(in Bytes)={}", bank0_logical_core.str(), byte_size);
     }
     return pass;
 }
@@ -37,7 +58,7 @@ bool SimpleL1WriteOnly(IDevice* device, size_t local_address, size_t byte_size) 
     readL1Backdoor(device, bank0_logical_core, local_address, byte_size, outputs);
     bool pass = (inputs == outputs);
     if (not pass) {
-        tt::log_info("Mismatch at Core={}, Packet Size(in Bytes)={}", bank0_logical_core.str(), byte_size);
+        log_info(tt::LogTest, "Mismatch at Core={}, Packet Size(in Bytes)={}", bank0_logical_core.str(), byte_size);
     }
     return pass;
 }
@@ -56,13 +77,12 @@ bool SimpleTiledL1WriteCBRead(
 
     tt_metal::Program program = tt_metal::CreateProgram();
     const uint32_t cb_index = 0;
-    const uint32_t output_cb_index = 16;
     const CoreCoord phys_core = device->worker_core_from_logical_core(core);
 
     tt_metal::CircularBufferConfig l1_cb_config =
         tt_metal::CircularBufferConfig(byte_size, {{cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(cb_index, page_size);
-    auto l1_cb = tt_metal::CreateCircularBuffer(program, core, l1_cb_config);
+    tt_metal::CreateCircularBuffer(program, core, l1_cb_config);
     std::map<std::string, std::string> defines = {{"INTERFACE_WITH_L1", "1"}};
     uint32_t bank_id = device->allocator()->get_bank_ids_from_logical_core(tt_metal::BufferType::L1, core)[0];
     auto reader_kernel = tt_metal::CreateKernel(
@@ -106,13 +126,17 @@ bool SimpleTiledL1WriteCBRead(
     writeL1Backdoor(device, core, input_local_address, inputs);
     tt_metal::detail::LaunchProgram(device, program);
     readL1Backdoor(device, core, input_local_address, byte_size, outputs);
-    tt::log_debug("input readback inputs[0]={} == readback[0]={}", inputs[0], outputs[0]);
+    log_debug(tt::LogTest, "input readback inputs[0]={} == readback[0]={}", inputs[0], outputs[0]);
     readL1Backdoor(device, core, output_local_address, byte_size, outputs);
-    tt::log_debug("inputs[0]={} == outputs[0]={}", inputs[0], outputs[0]);
+    log_debug(tt::LogTest, "inputs[0]={} == outputs[0]={}", inputs[0], outputs[0]);
     bool pass = (inputs == outputs);
     if (not pass) {
-        tt::log_info(
-            "Mismatch at Core={}, phys_core={}, Packet Size(in Bytes)={}", core.str(), phys_core.str(), byte_size);
+        log_info(
+            tt::LogTest,
+            "Mismatch at Core={}, phys_core={}, Packet Size(in Bytes)={}",
+            core.str(),
+            phys_core.str(),
+            byte_size);
     }
     return pass;
 }

@@ -57,11 +57,57 @@ def main():
         default=False,
     )
     parser.add_option(
+        "--profile-dispatch-cores",
+        dest="profile_dispatch_cores",
+        action="store_true",
+        help="Collect dispatch cores profiling data",
+        default=False,
+    )
+    parser.add_option(
+        "--sync-host-device",
+        dest="sync_host_device",
+        action="store_true",
+        help="Sync host with all devices",
+        default=False,
+    )
+    parser.add_option(
+        "--device-trace-profiler",
+        dest="device_trace_profiler",
+        action="store_true",
+        help="Profile device side trace durations",
+        default=[],
+    )
+    parser.add_option(
+        "--push-device-data-mid-run",
+        dest="mid_run_device_data",
+        action="store_true",
+        help="Push collected device data to Tracy GUI mid-run",
+        default=False,
+    )
+    parser.add_option(
         "--collect-noc-traces",
         dest="collect_noc_traces",
         action="store_true",
         help="Collect noc event traces when profiling",
         default=False,
+    )
+    parser.add_option(
+        "--check-exit-code",
+        dest="check_exit_code",
+        action="store_true",
+        help="Exit the run and do not attempt post processing if the test command fails",
+        default=False,
+    )
+    parser.add_option(
+        "-a",
+        "--device-analysis-types",
+        dest="device_analysis_types",
+        action="append",
+        help="List of device analysis types",
+        default=[],
+    )
+    parser.add_option(
+        "--tracy-tools-folder", dest="binary_folder", action="store", help="Tracy tools folder", type="string"
     )
 
     if not sys.argv[1:]:
@@ -81,8 +127,16 @@ def main():
         os.environ["TT_METAL_PROFILER_DIR"] = options.output_folder
         outputFolder = Path(options.output_folder)
 
+    binaryFolder = PROFILER_BIN_DIR
+    if options.binary_folder:
+        logger.info(f"Setting tracy tool folder to {options.binary_folder}")
+        binaryFolder = Path(options.binary_folder)
+        if not binaryFolder.exists():
+            logger.error(f"Tracy tools folder {options.binary_folder} does not exist")
+            sys.exit(1)
+
     if options.processLogsOnly:
-        generate_report(generate_logs_folder(outputFolder), "", None, options.collect_noc_traces)
+        generate_report(generate_logs_folder(outputFolder), binaryFolder, "", None, options.collect_noc_traces)
         sys.exit(0)
 
     if options.port:
@@ -97,6 +151,18 @@ def main():
     else:
         os.environ[opInfoCacheStr] = "1"
 
+    if options.profile_dispatch_cores:
+        os.environ["TT_METAL_DEVICE_PROFILER_DISPATCH"] = "1"
+
+    if options.mid_run_device_data:
+        os.environ["TT_METAL_TRACY_MID_RUN_PUSH"] = "1"
+
+    if options.sync_host_device:
+        os.environ["TT_METAL_PROFILER_SYNC"] = "1"
+
+    if options.device_trace_profiler:
+        os.environ["TT_METAL_TRACE_PROFILER"] = "1"
+
     if options.collect_noc_traces:
         os.environ["TT_METAL_DEVICE_PROFILER_NOC_EVENTS"] = "1"
         os.environ["TT_METAL_DEVICE_PROFILER_NOC_EVENTS_RPT_PATH"] = str(
@@ -110,7 +176,7 @@ def main():
                 logger.error("No available port found")
                 sys.exit(1)
             logger.info(f"Using port {port}")
-            doReport, captureProcess = run_report_setup(options.verbose, outputFolder, port)
+            doReport, captureProcess = run_report_setup(options.verbose, outputFolder, binaryFolder, port)
 
         if not doReport:
             code = None
@@ -162,8 +228,6 @@ def main():
             testCommand = f"python3 -m tracy {osCmd}"
 
             envVars = dict(os.environ)
-            # No Dispatch cores for op_report
-            envVars["TT_METAL_DEVICE_PROFILER_DISPATCH"] = "0"
             if options.device:
                 envVars["TT_METAL_DEVICE_PROFILER"] = "1"
             else:
@@ -186,10 +250,20 @@ def main():
             signal.signal(signal.SIGTERM, signal_handler)
 
             testProcess.communicate()
+            if options.check_exit_code and testProcess.returncode != 0:
+                logger.error(f"{testCommand} exited with a non-zero return code")
+                sys.exit(4)
 
             try:
                 captureProcess.communicate(timeout=15)
-                generate_report(outputFolder, options.name_append, options.child_functions, options.collect_noc_traces)
+                generate_report(
+                    outputFolder,
+                    binaryFolder,
+                    options.name_append,
+                    options.child_functions,
+                    options.collect_noc_traces,
+                    options.device_analysis_types,
+                )
             except subprocess.TimeoutExpired as e:
                 captureProcess.terminate()
                 captureProcess.communicate()

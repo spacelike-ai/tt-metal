@@ -2,20 +2,48 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <chrono>
+#include <errno.h>
+#include <fmt/base.h>
+#include <math.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <tt-metalium/bfloat16.hpp>
+#include <tt-metalium/host_api.hpp>
+#include <tt-metalium/tilize_utils.hpp>
+#include <tt-metalium/tt_metal.hpp>
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <exception>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
-#include <random>
+#include <utility>
+#include <variant>
 #include <vector>
 
-#include <tt-metalium/host_api.hpp>
-#include <tt-metalium/tt_metal.hpp>
-#include <tt-metalium/bfloat16.hpp>
-
-#include <tt-metalium/tilize_utils.hpp>
+#include <tt-metalium/assert.hpp>
+#include <tt-metalium/buffer.hpp>
+#include <tt-metalium/buffer_types.hpp>
+#include <tt-metalium/circular_buffer_config.hpp>
+#include <tt-metalium/constants.hpp>
+#include <tt-metalium/core_coord.hpp>
+#include <tt-metalium/data_types.hpp>
+#include "hostdevcommon/kernel_structs.h"
+#include <tt-metalium/kernel_types.hpp>
+#include <tt-logger/tt-logger.hpp>
+#include <tt-metalium/program.hpp>
+#include <tt_stl/span.hpp>
 #include "test_gold_impls.hpp"
-#include "constants.hpp"
+#include <tt-metalium/tt_backend_api_types.hpp>
+
+namespace tt {
+namespace tt_metal {
+class IDevice;
+}  // namespace tt_metal
+}  // namespace tt
 
 using std::vector;
 using namespace tt;
@@ -98,7 +126,6 @@ int main(int argc, char** argv) {
 
                 vector<uint32_t> shape = {2, 4, 2 * TILE_HEIGHT, 3 * TILE_WIDTH};
                 uint32_t W = shape[3], H = shape[2], NC = shape[1] * shape[0], N = shape[0], C = shape[1];
-                uint32_t HW = H * W;
                 TT_FATAL(W % TILE_WIDTH == 0 && H % TILE_HEIGHT == 0, "Error");
                 TT_FATAL(H > 0 && W > 0 && NC > 0, "Error");
                 uint32_t Wt = W / TILE_WIDTH;
@@ -133,14 +160,14 @@ int main(int argc, char** argv) {
                     tt_metal::CircularBufferConfig(
                         num_buffer_tiles * single_tile_bytes, {{src0_cb_index, tt::DataFormat::Float16_b}})
                         .set_page_size(src0_cb_index, single_tile_bytes);
-                auto cb_src0 = tt_metal::CreateCircularBuffer(program, core, cb_src0_config);
+                tt_metal::CreateCircularBuffer(program, core, cb_src0_config);
 
                 uint32_t src1_cb_index = 1;
                 tt_metal::CircularBufferConfig cb_src1_config =
                     tt_metal::CircularBufferConfig(
                         num_buffer_tiles * single_tile_bytes, {{src1_cb_index, tt::DataFormat::Float16_b}})
                         .set_page_size(src1_cb_index, single_tile_bytes);
-                auto cb_src1 = tt_metal::CreateCircularBuffer(program, core, cb_src1_config);
+                tt_metal::CreateCircularBuffer(program, core, cb_src1_config);
 
                 uint32_t ouput_cb_index = tt::CBIndex::c_16;
                 uint32_t num_output_buffer_tiles = 2;
@@ -149,7 +176,7 @@ int main(int argc, char** argv) {
                     tt_metal::CircularBufferConfig(
                         num_output_buffer_tiles * single_tile_bytes, {{ouput_cb_index, tt::DataFormat::Float16_b}})
                         .set_page_size(ouput_cb_index, single_tile_bytes);
-                auto cb_output = tt_metal::CreateCircularBuffer(program, core, cb_output_config);
+                tt_metal::CreateCircularBuffer(program, core, cb_output_config);
 
                 vector<uint16_t> tiled_bcast_values;
                 vector<uint16_t> ref_bcast_values;
@@ -172,8 +199,8 @@ int main(int argc, char** argv) {
                     tiled_bcast_values = convert_layout<uint16_t>(
                         ref_bcast_values_with_tile_padding,
                         ref_bcast_shape_with_tile_padding,
-                        tests::utils::TensorLayoutType::LIN_ROW_MAJOR,
-                        tests::utils::TensorLayoutType::TILED_NFACES);
+                        TensorLayoutType::LIN_ROW_MAJOR,
+                        TensorLayoutType::TILED_NFACES);
                     TT_FATAL(tiled_bcast_values[0] == bcast_1value16, "Error");
                     num_bcast_tiles = NC;
                     // restore ref values and shape to 1
@@ -198,8 +225,8 @@ int main(int argc, char** argv) {
                     tiled_bcast_values = convert_layout<uint16_t>(
                         ref_bcast_values_with_tile_padding,
                         ref_bcast_shape_with_tile_padding,
-                        tests::utils::TensorLayoutType::LIN_ROW_MAJOR,
-                        tests::utils::TensorLayoutType::TILED_NFACES);
+                        TensorLayoutType::LIN_ROW_MAJOR,
+                        TensorLayoutType::TILED_NFACES);
                     num_bcast_tiles = NC * Wt;
                     // restore values and shape to W
                 } else if (bcast_dim == BcastDim::W) {
@@ -217,8 +244,8 @@ int main(int argc, char** argv) {
                     tiled_bcast_values = convert_layout<uint16_t>(
                         ref_bcast_values_with_tile_padding,
                         ref_bcast_shape_with_tile_padding,
-                        tests::utils::TensorLayoutType::LIN_ROW_MAJOR,
-                        tests::utils::TensorLayoutType::TILED_NFACES);
+                        TensorLayoutType::LIN_ROW_MAJOR,
+                        TensorLayoutType::TILED_NFACES);
                     num_bcast_tiles = NC * Ht;
                 }
 
@@ -296,7 +323,6 @@ int main(int argc, char** argv) {
                 ////////////////////////////////////////////////////////////////////////////
                 //                      Execute Application
                 ////////////////////////////////////////////////////////////////////////////
-                auto seed = std::chrono::system_clock::now().time_since_epoch().count();
                 vector<uint32_t> src0_vec = create_random_vector_of_bfloat16(dram_buffer_bytes, 10.0f, 0x1234);
                 tt_metal::detail::WriteToBuffer(src0_dram_buffer, src0_vec);
 
@@ -323,20 +349,14 @@ int main(int argc, char** argv) {
                 // recover a linear view of input vector for consumption by gold_ function
                 auto u16_src0_vec = u16_from_u32_vector(src0_vec);
                 vector<uint16_t> src_linear = convert_layout<uint16_t>(
-                    u16_src0_vec,
-                    shape,
-                    tests::utils::TensorLayoutType::TILED_NFACES,
-                    tests::utils::TensorLayoutType::LIN_ROW_MAJOR);
+                    u16_src0_vec, shape, TensorLayoutType::TILED_NFACES, TensorLayoutType::LIN_ROW_MAJOR);
                 vector<uint16_t> gold_added = gold_bcast_op(
                     src_linear, shape, ref_bcast_values, bcast_dim, bcast_op);  // result is uint16_t untilized
 
                 // Tilize from row major and convert to pairs (uint32_t)
                 vector<uint32_t> shapeR{shape[0], shape[1], shape[2], shape[3]};
                 auto gold_4f_u32 = u32_from_u16_vector(convert_layout<uint16_t>(
-                    gold_added,
-                    shapeR,
-                    tests::utils::TensorLayoutType::LIN_ROW_MAJOR,
-                    tests::utils::TensorLayoutType::TILED_NFACES));
+                    gold_added, shapeR, TensorLayoutType::LIN_ROW_MAJOR, TensorLayoutType::TILED_NFACES));
 
                 pass &= packed_uint32_t_vector_comparison(result_vec, gold_4f_u32, comparison_function, &argfail);
                 if (!pass) {

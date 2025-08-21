@@ -70,7 +70,7 @@ def test_add_2D_tensors(device, hw):
 
 
 @pytest.mark.parametrize("hw", [(32, 64), (1, 1), (0, 0)])
-def test_add_2D_tensors_with_program_cache(device, hw, use_program_cache):
+def test_add_2D_tensors_with_program_cache(device, hw):
     torch_input_tensor_a = torch.rand(hw, dtype=torch.bfloat16)
     torch_input_tensor_b = torch.rand(hw, dtype=torch.bfloat16)
     torch_output_tensor = torch.add(torch_input_tensor_a, torch_input_tensor_b)
@@ -232,17 +232,17 @@ def test_add_dram_and_l1_tensor(device, shape_a, shape_b):
 
 
 @pytest.mark.parametrize("shape", [(1, 1, 32, 32)])
-@pytest.mark.parametrize("activations", [None, [ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)]])
+@pytest.mark.parametrize("activations", [[], [ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)]])
 def test_add_and_apply_activations(device, shape, activations):
     torch.manual_seed(0)
 
     torch_input_tensor_a = torch.rand(shape, dtype=torch.bfloat16)
     torch_input_tensor_b = torch.rand(shape, dtype=torch.bfloat16)
     torch_output_tensor = torch_input_tensor_a + torch_input_tensor_b
-    if activations is not None:
-        for activation in activations:
-            if activation == "relu":
-                torch_output_tensor = torch.relu(torch_output_tensor)
+
+    for activation in activations:
+        if activation == "relu":
+            torch_output_tensor = torch.relu(torch_output_tensor)
 
     input_tensor_a = ttnn.from_torch(torch_input_tensor_a, layout=ttnn.TILE_LAYOUT, device=device)
     input_tensor_b = ttnn.from_torch(torch_input_tensor_b, layout=ttnn.TILE_LAYOUT, device=device)
@@ -253,17 +253,17 @@ def test_add_and_apply_activations(device, shape, activations):
 
 
 @pytest.mark.parametrize("shape", [(1, 1, 32, 32)])
-@pytest.mark.parametrize("activations", [None, [ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)]])
+@pytest.mark.parametrize("activations", [[], [ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)]])
 def test_in_place_add_and_apply_activations(device, shape, activations):
     torch.manual_seed(0)
 
     torch_input_tensor_a = torch.rand(shape, dtype=torch.bfloat16)
     torch_input_tensor_b = torch.rand(shape, dtype=torch.bfloat16)
     torch_output_tensor = torch_input_tensor_a + torch_input_tensor_b
-    if activations is not None:
-        for activation in activations:
-            if activation == "relu":
-                torch_output_tensor = torch.relu(torch_output_tensor)
+
+    for activation in activations:
+        if activation == "relu":
+            torch_output_tensor = torch.relu(torch_output_tensor)
 
     input_tensor_a = ttnn.from_torch(torch_input_tensor_a, layout=ttnn.TILE_LAYOUT, device=device)
     input_tensor_b = ttnn.from_torch(torch_input_tensor_b, layout=ttnn.TILE_LAYOUT, device=device)

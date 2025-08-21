@@ -16,10 +16,15 @@ TTMETALIUM_OR_TTNN_TESTS_CHANGED=false
 TTTRAIN_CHANGED=false
 ANY_CODE_CHANGED=false
 DOCS_CHANGED=false
+MODEL_CHARTS_CHANGED=false
 
 while IFS= read -r FILE; do
     case "$FILE" in
         CMakeLists.txt|**/CMakeLists.txt|**/*.cmake)
+            CMAKE_CHANGED=true
+            ;;
+	tt_metal/sfpi-version.sh)
+	    # Read in by a cmake file
             CMAKE_CHANGED=true
             ;;
         .clang-tidy|**/.clang-tidy)
@@ -46,8 +51,11 @@ while IFS= read -r FILE; do
             TTTRAIN_CHANGED=true
             ANY_CODE_CHANGED=true
             ;;
-        docs/**)
+        docs/**|**/*.rst|**/*.md)
             DOCS_CHANGED=true
+            if [[ "$FILE" == "README.md" || "$FILE" == "models/README.md" ]]; then
+               MODEL_CHARTS_CHANGED=true
+            fi
             ;;
     esac
 done <<< "$CHANGED_FILES"
@@ -80,6 +88,7 @@ declare -A changes=(
     [submodule-changed]=$SUBMODULE_CHANGED
     [any-code-changed]=$ANY_CODE_CHANGED
     [docs-changed]=$DOCS_CHANGED
+    [model-charts-changed]=$MODEL_CHARTS_CHANGED
 )
 
 for var in "${!changes[@]}"; do

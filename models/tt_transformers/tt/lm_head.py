@@ -1,9 +1,11 @@
-# SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2024 Tenstorrent AI ULC
 
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+
 import torch
+
 import ttnn
 from models.common.lightweightmodule import LightweightModule
 from models.tt_transformers.tt.ccl import tt_all_reduce
@@ -14,15 +16,17 @@ class LMHead(LightweightModule):
         self,
         args,
         mesh_device,
+        tt_ccl,
         dtype,
         state_dict,
         state_dict_prefix,
         weight_cache_path,
-        max_columns_per_device=128256 // 4,  # larger values per device lead to OOM or hangs
+        max_columns_per_device,  # too many columns per device lead to L1 OOM
     ):
         super().__init__()
         self.args = args
         self.mesh_device = mesh_device
+        self.tt_ccl = tt_ccl
         self.dtype = dtype
         self.vocab_size = args.vocab_size
         self.padded_vocab_size = args.padded_vocab_size
@@ -61,15 +65,11 @@ class LMHead(LightweightModule):
                     layout=ttnn.TILE_LAYOUT,
                     dtype=dtype,
                     memory_config=memory_config,
-                    # cache_file_name=cache_file_name,
+                    cache_file_name=cache_file_name,
                 )
             )
         else:
             for i, split_size in enumerate(split_sizes):
-                cache_file_name = (
-                    None if args.dummy_weights else weight_cache_path / f"output_lm_head_{num_splits}_split_shard_{i}"
-                )
-
                 # Create a list to store the split tensors for each device
                 device_splits = []
                 for device in range(self.num_devices):
@@ -80,8 +80,13 @@ class LMHead(LightweightModule):
                 # Concatenate the splits from all devices
                 combined_split = torch.cat(device_splits, dim=-1)
 
+                cache_file_name = (
+                    None
+                    if args.dummy_weights
+                    else weight_cache_path / f"output_lm_head_{num_splits}_split_shard_{i}_{combined_split.shape[-1]}"
+                )
                 memory_config = args.create_dram_sharded_mem_config(
-                    k=args.dim, n=combined_split.shape[-1] // self.num_devices
+                    k=args.dim, n=math.ceil(combined_split.shape[-1] / self.num_devices)
                 )
                 self.output_weights.append(
                     ttnn.as_tensor(
@@ -144,7 +149,8 @@ class LMHead(LightweightModule):
 
         output = tt_all_reduce(
             output,
-            mesh_device=self.mesh_device,
+            self.mesh_device,
+            self.tt_ccl,
             cluster_axis=1,
             dim=3 if self.args.is_galaxy else 0,
             num_reduce_scatter_links=self.args.num_reduce_scatter_links,

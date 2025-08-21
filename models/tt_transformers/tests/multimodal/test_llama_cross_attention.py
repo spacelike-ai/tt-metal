@@ -1,21 +1,18 @@
 # SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
 
 # SPDX-License-Identifier: Apache-2.0
-import torch
-import pytest
-from loguru import logger
 import os
-import ttnn
 
 import llama_models.llama3.reference_impl.multimodal.model as llama_reference_mod
-from models.tt_transformers.tt.multimodal.llama_cross_attention import TtLlamaCrossAttention
+import pytest
+import torch
+from loguru import logger
+
+import ttnn
+from models.tt_transformers.tt.ccl import TT_CCL
 from models.tt_transformers.tt.model_config import ModelArgs
-from models.utility_functions import (
-    comp_pcc,
-    comp_allclose,
-    nearest_32,
-)
-from models.utility_functions import skip_for_grayskull
+from models.tt_transformers.tt.multimodal.llama_cross_attention import TtLlamaCrossAttention
+from models.utility_functions import comp_allclose, comp_pcc, nearest_32, skip_for_grayskull
 
 
 @skip_for_grayskull("Requires wormhole_b0 to run")
@@ -40,15 +37,14 @@ from models.utility_functions import skip_for_grayskull
         "batch_2",
     ],
 )
+@pytest.mark.parametrize("device_params", [{"fabric_config": True}], indirect=True)
 def test_cross_attention_inference(text_seq_len, batch, mesh_device, reset_seeds, ensure_gc):
     dtype = ttnn.bfloat16
     pcc_required = 0.99
 
-    mesh_device.enable_async(True)
-
     model_args = ModelArgs(mesh_device)
     model_args.max_seq_len = text_seq_len
-    state_dict = torch.load(model_args.consolidated_weights_path, map_location=torch.device("cpu"))
+    state_dict = model_args.load_state_dict()
 
     # Ref model needs partial state dict, but our models use full state dict keys as cached weight names
     first_layer_prefix = "text_model.cross_attention_layers.0.attention."
@@ -71,8 +67,10 @@ def test_cross_attention_inference(text_seq_len, batch, mesh_device, reset_seeds
 
     all_tests_pass = True
 
+    tt_ccl = TT_CCL(mesh_device)
     tt_model = TtLlamaCrossAttention(
         mesh_device,
+        tt_ccl,
         state_dict,
         state_dict_prefix=first_layer_prefix,
         weight_cache_path=model_args.weight_cache_path(dtype),

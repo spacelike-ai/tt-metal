@@ -2,14 +2,40 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include <algorithm>
-#include <functional>
-#include <random>
-
+#include <assert.h>
+#include <chrono>
+#include <errno.h>
+#include <fmt/base.h>
+#include <stdlib.h>
+#include <tt-metalium/bfloat16.hpp>
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/tt_metal.hpp>
-#include <tt-metalium/bfloat16.hpp>
-// #include "tt_gdb/tt_gdb.hpp"
+#include <cstdint>
+#include <cstring>
+#include <exception>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <unordered_map>
+#include <variant>
+#include <vector>
+
+#include <tt-metalium/assert.hpp>
+#include <tt-metalium/buffer.hpp>
+#include <tt-metalium/buffer_types.hpp>
+#include <tt-metalium/core_coord.hpp>
+#include <tt-metalium/data_types.hpp>
+#include <tt-metalium/kernel_types.hpp>
+#include <tt-logger/tt-logger.hpp>
+#include <tt-metalium/program.hpp>
+#include <tt_stl/span.hpp>
+#include "umd/device/types/xy_pair.h"
+
+namespace tt {
+namespace tt_metal {
+class IDevice;
+}  // namespace tt_metal
+}  // namespace tt
 
 //////////////////////////////////////////////////////////////////////////////////////////
 // TODO: explain what test does
@@ -37,8 +63,6 @@ int main(int argc, char** argv) {
         int device_id = 0;
         tt_metal::IDevice* device = tt_metal::CreateDevice(device_id);
 
-        bool profile_kernel = true;
-
         ////////////////////////////////////////////////////////////////////////////
         //                      Application Setup
         ////////////////////////////////////////////////////////////////////////////
@@ -52,7 +76,6 @@ int main(int argc, char** argv) {
         int num_sticks = 4;
         int num_elements_in_stick = 512;
         int stick_size = num_elements_in_stick * 2;
-        int num_elements_in_stick_as_packed_uint32 = num_elements_in_stick / 2;
         uint32_t dram_buffer_size =
             num_sticks * stick_size;  // num_tiles of FP16_B, hard-coded in the reader/writer kernels
         tt_metal::InterleavedBufferConfig dram_config{

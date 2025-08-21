@@ -2,8 +2,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include "cpp/ttnn/operations/ccl/reduce_scatter/host/reduce_scatter_common.hpp"
-#include "cpp/ttnn/operations/ccl/ccl_common.hpp"
+#include "ttnn/operations/ccl/reduce_scatter/host/reduce_scatter_common.hpp"
+#include "ttnn/operations/ccl/ccl_common.hpp"
 
 #include <cstdint>
 #include <cstddef>
@@ -162,7 +162,7 @@ std::vector<WorkerAttributes> build_worker_attributes(
 
     // Log worker attributes
     log_trace(tt::LogOp, "Worker Attributes:");
-    for (const auto& wa : worker_attributes) {
+    for ([[maybe_unused]] const auto& wa : worker_attributes) {
         log_trace(
             tt::LogOp,
             "\tAttributes: link={}, chan_index={}, slice_index: {}, core_logical=(x={},y={}), direction={}, "

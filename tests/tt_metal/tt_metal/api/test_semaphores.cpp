@@ -3,11 +3,35 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <gtest/gtest.h>
-
-#include "device_fixture.hpp"
+#include <stdint.h>
+#include <sys/types.h>
+#include <tt-metalium/host_api.hpp>
 #include <tt-metalium/tt_metal.hpp>
 #include <tt-metalium/util.hpp>
-#include <tt-metalium/host_api.hpp>
+#include <map>
+#include <set>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <tt-metalium/circular_buffer_config.hpp>
+#include <tt-metalium/core_coord.hpp>
+#include <tt-metalium/data_types.hpp>
+#include "device_fixture.hpp"
+#include <tt-metalium/hal.hpp>
+#include <tt-metalium/hal_types.hpp>
+#include "hostdevcommon/kernel_structs.h"
+#include <tt-metalium/kernel_types.hpp>
+#include <tt-metalium/program.hpp>
+#include <tt-metalium/semaphore.hpp>
+#include <tt-metalium/tt_backend_api_types.hpp>
+#include "umd/device/tt_core_coordinates.h"
+
+namespace tt {
+namespace tt_metal {
+class IDevice;
+}  // namespace tt_metal
+}  // namespace tt
 
 using std::vector;
 using namespace tt;
@@ -23,7 +47,7 @@ void initialize_program(tt_metal::IDevice* device, tt_metal::Program& program, c
     tt_metal::CircularBufferConfig cb_src0_config =
         tt_metal::CircularBufferConfig(num_input_tiles * single_tile_size, {{src0_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(src0_cb_index, single_tile_size);
-    auto cb_src0 = tt_metal::CreateCircularBuffer(program, core_range, cb_src0_config);
+    tt_metal::CreateCircularBuffer(program, core_range, cb_src0_config);
 
     uint32_t ouput_cb_index = tt::CBIndex::c_16;
     uint32_t num_output_tiles = 1;
@@ -31,16 +55,16 @@ void initialize_program(tt_metal::IDevice* device, tt_metal::Program& program, c
         tt_metal::CircularBufferConfig(
             num_output_tiles * single_tile_size, {{ouput_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(ouput_cb_index, single_tile_size);
-    auto cb_output = tt_metal::CreateCircularBuffer(program, core_range, cb_output_config);
+    tt_metal::CreateCircularBuffer(program, core_range, cb_output_config);
 
-    auto unary_reader_kernel = tt_metal::CreateKernel(
+    tt_metal::CreateKernel(
         program,
         "tests/tt_metal/tt_metal/test_kernels/dataflow/reader_unary_push_4.cpp",
         core_range,
         tt_metal::DataMovementConfig{
             .processor = tt_metal::DataMovementProcessor::RISCV_1, .noc = tt_metal::NOC::RISCV_1_default});
 
-    auto unary_writer_kernel = tt_metal::CreateKernel(
+    tt_metal::CreateKernel(
         program,
         "tt_metal/kernels/dataflow/writer_unary.cpp",
         core_range,
@@ -51,7 +75,7 @@ void initialize_program(tt_metal::IDevice* device, tt_metal::Program& program, c
         uint(num_tiles)  // per_core_tile_cnt
     };
 
-    auto eltwise_unary_kernel = tt_metal::CreateKernel(
+    tt_metal::CreateKernel(
         program,
         "tests/tt_metal/tt_metal/test_kernels/compute/eltwise_copy_3m.cpp",
         core_range,
@@ -69,7 +93,7 @@ void create_and_read_max_num_semaphores(
     }
 
     tt_metal::detail::CompileProgram(device, program);
-    tt::tt_metal::program_dispatch::finalize_program_offsets(program, device);
+    program.finalize_offsets(device);
 
     ASSERT_TRUE(tt_metal::detail::ConfigureDeviceWithProgram(device, program));
 
@@ -79,8 +103,9 @@ void create_and_read_max_num_semaphores(
             std::vector<uint32_t> res;
             for (uint32_t i = 0; i < tt::tt_metal::NUM_SEMAPHORES; i++) {
                 std::vector<uint32_t> single_val;
-                uint32_t semaphore_addr = program.get_sem_base_addr(device, logical_core, CoreType::WORKER) +
-                                          (tt::tt_metal::hal_ref.get_alignment(tt::tt_metal::HalMemType::L1) * i);
+                uint32_t semaphore_addr =
+                    program.get_sem_base_addr(device, logical_core, CoreType::WORKER) +
+                    (tt::tt_metal::MetalContext::instance().hal().get_alignment(tt::tt_metal::HalMemType::L1) * i);
                 uint32_t semaphore_size = sizeof(uint32_t);
                 tt_metal::detail::ReadFromDeviceL1(device, logical_core, semaphore_addr, semaphore_size, single_val);
                 ASSERT_TRUE(single_val.size() == 1);

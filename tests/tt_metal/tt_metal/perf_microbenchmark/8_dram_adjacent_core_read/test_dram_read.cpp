@@ -2,28 +2,50 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include <algorithm>
-#include <cctype>
 #include <chrono>
-#include <functional>
-#include <random>
-#include <stdexcept>
-#include <string>
-#include <vector>
-
-#include <tt-metalium/bfloat8.hpp>
+#include <errno.h>
+#include <fmt/base.h>
+#include <stdlib.h>
+#include <tt-metalium/allocator.hpp>
 #include <tt-metalium/bfloat16.hpp>
+#include <tt-metalium/bfloat8.hpp>
+#include <tt-metalium/host_api.hpp>
 #include <tt-metalium/tt_backend_api_types.hpp>
 #include <tt-metalium/tt_metal.hpp>
 #include <tt-metalium/util.hpp>
-#include <tt-metalium/host_api.hpp>
-#include <tt-metalium/allocator.hpp>
+#include <tt-metalium/tt_metal_profiler.hpp>
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <exception>
+#include <map>
+#include <memory>
+#include <optional>
+#include <set>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <variant>
+#include <vector>
 
-#include "tt_metal/tt_metal/perf_microbenchmark/common/util.hpp"
-#include <tt-metalium/work_split.hpp>
-#include <yaml-cpp/yaml.h>
-
+#include <tt-metalium/assert.hpp>
+#include <tt-metalium/buffer.hpp>
+#include <tt-metalium/buffer_types.hpp>
+#include <tt-metalium/circular_buffer_config.hpp>
+#include <tt-metalium/core_coord.hpp>
+#include <tt-metalium/data_types.hpp>
+#include <tt-metalium/device.hpp>
+#include <tt-metalium/hal_types.hpp>
+#include <tt-metalium/kernel_types.hpp>
+#include <tt-logger/tt-logger.hpp>
+#include <tt-metalium/program.hpp>
+#include <tt_stl/span.hpp>
 #include "test_common.hpp"
+#include "tt_metal/tt_metal/perf_microbenchmark/common/util.hpp"
+#include "umd/device/types/arch.h"
+#include "umd/device/types/xy_pair.h"
+#include <tt-metalium/distributed.hpp>
 
 using namespace tt;
 using std::chrono::duration_cast;
@@ -76,7 +98,7 @@ void get_max_page_size_and_num_pages(uint32_t num_tiles, uint32_t tile_size, uin
 }
 
 std::tuple<tt_metal::Program, tt_metal::KernelHandle, uint32_t> create_program(
-    tt_metal::IDevice* device,
+    tt_metal::distributed::MeshDevice* device,
     const CoreRangeSet& all_cores,
     const uint32_t& single_tile_size,
     const tt::DataFormat& tile_format,
@@ -106,7 +128,7 @@ std::tuple<tt_metal::Program, tt_metal::KernelHandle, uint32_t> create_program(
     uint32_t cb_addr = device->allocator()->get_base_allocator_addr(HalMemType::L1);
     tt_metal::CircularBufferConfig cb_config =
         tt_metal::CircularBufferConfig(cb_size, {{cb_index, tile_format}}).set_page_size(cb_index, single_tile_size);
-    auto cb = tt_metal::CreateCircularBuffer(program, all_cores, cb_config);
+    tt_metal::CreateCircularBuffer(program, all_cores, cb_config);
 
     std::vector<uint32_t> compile_time_args = {
         (std::uint32_t)input_buffer_addr,
@@ -144,7 +166,7 @@ std::tuple<tt_metal::Program, tt_metal::KernelHandle, uint32_t> create_program(
 
         const std::array rt_args = {(std::uint32_t)bank_id, (std::uint32_t)vc};
 
-        log_info("core: {}, vc: {}", core, vc);
+        log_info(tt::LogTest, "core: {}, vc: {}", core, vc);
 
         tt_metal::SetRuntimeArgs(program, reader_kernel, core, rt_args);
     }
@@ -153,7 +175,6 @@ std::tuple<tt_metal::Program, tt_metal::KernelHandle, uint32_t> create_program(
 
 bool validation(
     tt_metal::IDevice* device,
-    tt_metal::Buffer& input_buffer,
     std::vector<uint32_t>& input_vec,
     const uint32_t& num_cores,
     std::vector<CoreCoord>& all_cores,
@@ -234,8 +255,11 @@ uint32_t get_dram_bandwidth(tt::ARCH arch) {
 }
 
 void get_optimal_dram_bank_to_reader_assignment(
-    IDevice* device, std::vector<CoreCoord>& all_worker_cores_ordered, CoreRangeSet& all_worker_cores) {
-    all_worker_cores_ordered = device->get_optimal_dram_bank_to_logical_worker_assignment();
+    tt_metal::distributed::MeshDevice* device,
+    std::vector<CoreCoord>& all_worker_cores_ordered,
+    CoreRangeSet& all_worker_cores,
+    tt_metal::NOC noc) {
+    all_worker_cores_ordered = device->get_optimal_dram_bank_to_logical_worker_assignment(noc);
     std::set<CoreRange> all_cores_set;
     for (const auto& worker_core : all_worker_cores_ordered) {
         all_cores_set.insert(CoreRange(worker_core));
@@ -245,7 +269,7 @@ void get_optimal_dram_bank_to_reader_assignment(
 
 int main(int argc, char** argv) {
     if (getenv("TT_METAL_SLOW_DISPATCH_MODE") != nullptr) {
-        log_error("Test not supported w/ slow dispatch, exiting");
+        log_error(tt::LogTest, "Test not supported w/ slow dispatch, exiting");
     }
 
     bool pass = true;
@@ -260,7 +284,7 @@ int main(int argc, char** argv) {
     uint32_t num_banks = 1;
     uint32_t bank_start_id = 1;
 
-    log_info("start DRAM benchmark");
+    log_info(tt::LogTest, "start DRAM benchmark");
 
     try {
         ////////////////////////////////////////////////////////////////////////////
@@ -320,7 +344,6 @@ int main(int argc, char** argv) {
         ////////////////////////////////////////////////////////////////////////////
         uint32_t input_size = 0;
         tt::DataFormat tile_format = tt::DataFormat::Bfp8_b;
-        uint32_t total_banks = 12;
         if (df == 0) {
             input_size = k * n * 1088 / 1024;
             tile_format = tt::DataFormat::Bfp8_b;
@@ -335,7 +358,6 @@ int main(int argc, char** argv) {
         uint32_t block_h = kt / num_blocks;
         uint32_t block_w = nt / num_banks;
         uint32_t num_datum_per_slice = 32 * 32;
-        uint32_t eth_coord_y_phy = 6;
 
         uint32_t single_tile_size = tt_metal::detail::TileSize(tile_format);
         if (input_size % single_tile_size != 0) {
@@ -351,13 +373,11 @@ int main(int argc, char** argv) {
         //                      Device Setup
         ////////////////////////////////////////////////////////////////////////////
         int device_id = 0;
-        tt_metal::IDevice* device = tt_metal::CreateDevice(device_id);
+        auto device = tt_metal::distributed::MeshDevice::create_unit_mesh(device_id);
         dram_bandwidth_spec = get_dram_bandwidth(device->arch());
 
         TT_ASSERT(
             device->arch() == ARCH::WORMHOLE_B0 or device->arch() == ARCH::BLACKHOLE, "device must be wh_b0 or bh");
-
-        int clock_freq_mhz = get_tt_npu_clock(device);
 
         uint32_t num_tiles = static_cast<uint32_t>((input_size + single_tile_size - 1) / single_tile_size);
         uint32_t num_cores = num_banks;  // number of DRAM banks
@@ -365,14 +385,14 @@ int main(int argc, char** argv) {
 
         CoreRangeSet all_cores;
         std::vector<CoreCoord> all_cores_list;
-        get_optimal_dram_bank_to_reader_assignment(device, all_cores_list, all_cores);
+        get_optimal_dram_bank_to_reader_assignment(device.get(), all_cores_list, all_cores, tt_metal::NOC::NOC_0);
 
         uint32_t num_tiles_per_core = num_tiles / num_cores;
         uint32_t num_tiles_cb = num_tiles_per_core / num_blocks;
 
         for (auto core : all_cores_list) {
             auto virtual_core = device->worker_core_from_logical_core(core);
-            log_info("logical core: {}, virtual core: {}", core, virtual_core);
+            log_info(tt::LogTest, "logical core: {}, virtual core: {}", core, virtual_core);
         }
 
         log_info(
@@ -398,14 +418,19 @@ int main(int argc, char** argv) {
             input_vec = create_random_vector_of_bfloat16(input_size, 100, 1234);
         }
 
-        auto input_buffer = tt_metal::Buffer::create(
-            device, input_vec.size() * sizeof(uint32_t), single_tile_size, tt_metal::BufferType::DRAM);
+        // Create MeshBuffer for DRAM
+        tt_metal::distributed::DeviceLocalBufferConfig device_local{
+            .page_size = single_tile_size,
+            .buffer_type = tt_metal::BufferType::DRAM,
+        };
+        tt_metal::distributed::ReplicatedBufferConfig global_buf{.size = input_vec.size() * sizeof(uint32_t)};
+        auto input_buffer = tt_metal::distributed::MeshBuffer::create(global_buf, device_local, device.get());
 
         ////////////////////////////////////////////////////////////////////////////
         //                      Application Setup
         ////////////////////////////////////////////////////////////////////////////
         auto [program, kernel, cb_addr] = create_program(
-            device,
+            device.get(),
             all_cores,
             single_tile_size,
             tile_format,
@@ -422,19 +447,22 @@ int main(int argc, char** argv) {
         ////////////////////////////////////////////////////////////////////////////
         //                      Copy Input To DRAM or L1
         ////////////////////////////////////////////////////////////////////////////
-        tt_metal::detail::WriteToBuffer(*input_buffer, input_vec);
+        tt_metal::distributed::EnqueueWriteMeshBuffer(device->mesh_command_queue(), input_buffer, input_vec, false);
+        tt_metal::distributed::Finish(device->mesh_command_queue());
 
         ////////////////////////////////////////////////////////////////////////////
         //                      Execution Application
         ////////////////////////////////////////////////////////////////////////////
-        tt_metal::detail::CompileProgram(device, program);
+        auto mesh_workload = tt_metal::distributed::CreateMeshWorkload();
+        tt_metal::distributed::AddProgramToMeshWorkload(
+            mesh_workload, std::move(program), tt::tt_metal::distributed::MeshCoordinateRange{{0, 0}, {0, 0}});
 
         log_info(LogTest, "Num tests {}", num_tests);
         for (uint32_t i = 0; i < num_tests; ++i) {
             auto t_begin = std::chrono::steady_clock::now();
-            EnqueueProgram(device->command_queue(), program, false);
-            Finish(device->command_queue());
-            tt_metal::DumpDeviceProfileResults(device, program);
+            tt_metal::distributed::EnqueueMeshWorkload(device->mesh_command_queue(), mesh_workload, false);
+            tt_metal::distributed::Finish(device->mesh_command_queue());
+            tt_metal::detail::ReadDeviceProfilerResults(device->get_devices()[0]);
             auto t_end = std::chrono::steady_clock::now();
             auto elapsed_us = duration_cast<microseconds>(t_end - t_begin).count();
             dram_bandwidth.push_back((input_size / 1024.0 / 1024.0 / 1024.0) / (elapsed_us / 1000.0 / 1000.0));
@@ -450,8 +478,7 @@ int main(int argc, char** argv) {
         ////////////////////////////////////////////////////////////////////////////
 
         pass = validation(
-            device,
-            *input_buffer,
+            device.get(),
             input_vec,
             num_cores,
             all_cores_list,
@@ -466,7 +493,7 @@ int main(int argc, char** argv) {
             block_w,
             num_datum_per_slice);
 
-        pass &= tt_metal::CloseDevice(device);
+        pass &= device->close();
     } catch (const std::exception& e) {
         pass = false;
         // Capture the exception error message
@@ -477,7 +504,7 @@ int main(int argc, char** argv) {
 
     // Determine if it passes performance goal
     auto avg_dram_bandwidth = calculate_average(dram_bandwidth);
-    if (pass && bypass_check == false) {
+    if (pass && !bypass_check) {
         // goal is 90% of peak DRAM bandwidth performance
         double target_bandwidth = static_cast<double>(dram_bandwidth_spec) * 0.9;
         if (avg_dram_bandwidth < target_bandwidth) {

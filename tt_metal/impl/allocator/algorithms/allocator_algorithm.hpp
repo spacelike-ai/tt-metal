@@ -9,8 +9,9 @@
 #include <vector>
 #include "hostdevcommon/common_values.hpp"
 
+#include <assert.hpp>
+#include <hal_types.hpp>
 #include <allocator_types.hpp>
-#include "llrt/hal.hpp"
 
 namespace tt {
 
@@ -31,7 +32,7 @@ public:
             offset_bytes % this->alignment_ == 0, "Offset {} should be {} B aligned", offset_bytes, this->alignment_);
     }
 
-    virtual ~Algorithm() {}
+    virtual ~Algorithm() = default;
 
     DeviceAddr align(DeviceAddr address) const {
         DeviceAddr factor = (address + alignment_ - 1) / alignment_;

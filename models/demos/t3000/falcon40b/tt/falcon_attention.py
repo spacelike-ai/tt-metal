@@ -2,16 +2,15 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
 import math
 from typing import Optional, Tuple
 
+import torch
+
 import ttnn
-from ttnn import ShardTensorToMesh, ReplicateTensorToMesh
-
+from models.demos.t3000.falcon40b.tt.model_utils import determine_tensor_deallocation, falcon_prefill_matmul
 from models.utility_functions import nearest_32
-
-from models.demos.t3000.falcon40b.tt.model_utils import falcon_prefill_matmul, determine_tensor_deallocation
+from ttnn import ReplicateTensorToMesh, ShardTensorToMesh
 
 
 def generate_cos_sin_cache(
@@ -117,6 +116,7 @@ class TtFalconAttention:
     def __init__(
         self,
         mesh_device,
+        tt_ccl,
         state_dict,
         base_url,
         layer_num,
@@ -134,6 +134,7 @@ class TtFalconAttention:
         self.max_position_embeddings = max_position_embeddings
         self.num_devices = mesh_device.get_num_devices()
         self.mesh_device = mesh_device
+        self.tt_ccl = tt_ccl
         self.state_dict = state_dict
         self.model_config = model_config
         self.num_heads_per_device = self.num_heads // mesh_device.get_num_devices()
@@ -364,11 +365,17 @@ class TtFalconAttention:
             attn_output,
             memory_config=self.model_config["CONCAT_HEADS_OUTPUT_MEMCFG"],
         )
-        attn_output = ttnn.all_gather(
+        attn_output = ttnn.experimental.all_gather_async(
             attn_output,
+            persistent_output_buffer=None,
             dim=3,
+            multi_device_global_semaphore=self.tt_ccl.get_and_cycle_ag_semaphore_handles(),
             num_links=self.model_config["ALL_GATHER_NUM_LINKS"],
             memory_config=self.model_config["DEFAULT_MEMCFG"],
+            barrier_semaphore=self.tt_ccl.get_and_cycle_barrier_semaphore_handle(),
+            chunks_per_sync=10,
+            num_workers_per_link=2,
+            num_buffers_per_channel=2,
         )
         attn_output = falcon_prefill_matmul(
             attn_output,
@@ -513,9 +520,7 @@ class TtFalconAttention:
         attn_weights = ttnn.experimental.group_attn_matmul(
             query_layer,
             key_layer_transposed,
-            compute_with_storage_grid_size=self.mesh_device.get_devices()[
-                0
-            ].compute_with_storage_grid_size(),  # Change this
+            compute_with_storage_grid_size=self.mesh_device.compute_with_storage_grid_size(),  # Change this
             memory_config=self.model_config["PRE_SOFTMAX_MM_OUTPUT_MEMCFG"],
             dtype=self.model_config["PRE_SOFTMAX_MM_OUTPUT_DTYPE"],  # Must be BFLOAT16
         )
@@ -570,7 +575,7 @@ class TtFalconAttention:
         attn_output = ttnn.experimental.group_attn_matmul(
             attn_weights,
             value_layer,
-            compute_with_storage_grid_size=self.mesh_device.get_devices()[0].compute_with_storage_grid_size(),
+            compute_with_storage_grid_size=self.mesh_device.compute_with_storage_grid_size(),
             memory_config=self.model_config["POST_SOFTMAX_MM_OUTPUT_MEMCFG"],
             dtype=self.model_config["POST_SOFTMAX_MM_OUTPUT_DTYPE"],  # Must be BFLOAT16
         )
@@ -587,11 +592,17 @@ class TtFalconAttention:
             attn_output,
             memory_config=self.model_config["DEFAULT_MEMCFG"],
         )
-        attn_output = ttnn.all_gather(
+        attn_output = ttnn.experimental.all_gather_async(
             attn_output,
+            persistent_output_buffer=None,
             dim=3,
+            multi_device_global_semaphore=self.tt_ccl.get_and_cycle_ag_semaphore_handles(),
             num_links=self.model_config["ALL_GATHER_NUM_LINKS"],
             memory_config=self.model_config["DEFAULT_MEMCFG"],
+            barrier_semaphore=self.tt_ccl.get_and_cycle_barrier_semaphore_handle(),
+            chunks_per_sync=10,
+            num_workers_per_link=2,
+            num_buffers_per_channel=2,
         )
         attn_output = ttnn.interleaved_to_sharded(
             attn_output,

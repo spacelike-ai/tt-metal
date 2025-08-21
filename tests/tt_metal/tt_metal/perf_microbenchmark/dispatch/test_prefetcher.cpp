@@ -1,30 +1,57 @@
-// SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
+// SPDX-FileCopyrightText: © 2024 Tenstorrent AI ULC
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include <algorithm>
-#include <functional>
-#include <random>
-#include <thread>
-
-#include "assert.hpp"
+#include <chrono>
+#include <emmintrin.h>
+#include <fmt/base.h>
+#include <stdio.h>
+#include <cstdint>
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/tt_align.hpp>
 #include <tt-metalium/tt_metal.hpp>
-#include "rtoptions.hpp"
-#include <tt-metalium/command_queue_interface.hpp>
-#include <tt-metalium/dispatch_settings.hpp>
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
+#include <iomanip>
+#include <map>
+#include <memory>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
+#include <variant>
+#include <vector>
+
+#include <tt-metalium/allocator.hpp>
+#include <tt-metalium/assert.hpp>
+#include <tt-metalium/buffer_types.hpp>
 #include "common.h"
-#include "tt_cluster.hpp"
-#include "tt_metal/impl/dispatch/kernels/cq_commands.hpp"
-#include "tt_metal/impl/dispatch/kernels/packet_queue_ctrl.hpp"
-
-#include "llrt/hal.hpp"
+#include <tt-metalium/core_coord.hpp>
+#include <tt-metalium/data_types.hpp>
+#include <tt-metalium/device.hpp>
+#include <tt-metalium/hal_types.hpp>
+#include <tt-metalium/kernel_types.hpp>
 #include "llrt.hpp"
-
+#include <tt-logger/tt-logger.hpp>
+#include <tt-metalium/program.hpp>
+#include "impl/dispatch/command_queue_common.hpp"
+#include "impl/dispatch/dispatch_settings.hpp"
 #include "test_common.hpp"
+#include "impl/context/metal_context.hpp"
+#include "tt_metal/impl/dispatch/kernels/cq_commands.hpp"
+#include "umd/device/tt_core_coordinates.h"
+#include "umd/device/tt_io.hpp"
+#include "umd/device/tt_xy_pair.h"
+#include "umd/device/types/xy_pair.h"
+#include <tt-metalium/utils.hpp>
 
-#define CQ_PREFETCH_CMD_BARE_MIN_SIZE tt::tt_metal::hal_ref.get_alignment(tt::tt_metal::HalMemType::HOST)
+#define CQ_PREFETCH_CMD_BARE_MIN_SIZE \
+    tt::tt_metal::MetalContext::instance().hal().get_alignment(tt::tt_metal::HalMemType::HOST)
 
 constexpr uint32_t DEFAULT_TEST_TYPE = 0;
 constexpr uint32_t DEVICE_DATA_SIZE = 768 * 1024;
@@ -34,7 +61,6 @@ constexpr uint32_t DRAM_PAGES_TO_READ_DEFAULT = 16;
 
 constexpr uint32_t DRAM_EXEC_BUF_DEFAULT_BASE_ADDR = 0x1f400000;  // magic, half of dram
 constexpr uint32_t DRAM_EXEC_BUF_DEFAULT_LOG_PAGE_SIZE = 10;
-constexpr uint32_t DRAM_EXEC_BUF_DEFAULT_PAGE_SIZE = 1 << DRAM_EXEC_BUF_DEFAULT_LOG_PAGE_SIZE;
 
 constexpr uint32_t DEFAULT_HUGEPAGE_ISSUE_BUFFER_SIZE = 256 * 1024 * 1024;
 constexpr uint32_t DEFAULT_HUGEPAGE_COMPLETION_BUFFER_SIZE = 256 * 1024 * 1024;
@@ -43,8 +69,6 @@ constexpr uint32_t DEFAULT_CMDDAT_Q_SIZE = 128 * 1024 + 2 * sizeof(CQPrefetchCmd
 constexpr uint32_t DEFAULT_SCRATCH_DB_SIZE = 16 * 1024;
 
 constexpr uint32_t DEFAULT_ITERATIONS = 10000;
-
-constexpr uint32_t DEFAULT_PACKETIZED_PATH_TIMEOUT_EN = 0;
 
 // constexpr uint32_t PREFETCH_Q_LOG_MINSIZE = 4;
 // constexpr uint32_t PCIE_ALIGNMENT = ((1 << PREFETCH_Q_LOG_MINSIZE) > CQ_PREFETCH_CMD_BARE_MIN_SIZE) ? (1 <<
@@ -58,7 +82,9 @@ constexpr uint32_t PCIE_TRANSFER_SIZE_DEFAULT = 4096;
 
 constexpr uint32_t host_data_dirty_pattern = 0xbaadf00d;
 
-constexpr CoreType DISPATCH_CORE_TYPE = CoreType::WORKER;
+constexpr CoreType DISPATCH_CORE_TYPE =
+    CoreType::WORKER;  // If this changes, need to pass it into CreateDevice. TODO: Clean this up when when we clean up
+                       // single device creation.
 
 //////////////////////////////////////////////////////////////////////////////////////////
 // Test dispatch program performance
@@ -67,15 +93,8 @@ constexpr CoreType DISPATCH_CORE_TYPE = CoreType::WORKER;
 //////////////////////////////////////////////////////////////////////////////////////////
 using std::vector;
 using namespace tt;
-using tt::packet_queue::dispatch_packet_header_t;
-using tt::packet_queue::DispatchRemoteNetworkType;
-using tt::packet_queue::packet_switch_4B_pack;
-using tt::packet_queue::packet_switch_dest_pack;
 
 uint32_t iterations_g = DEFAULT_ITERATIONS;
-
-bool packetized_path_timeout_en_g;
-bool packetized_path_en_g;
 
 bool warmup_g = false;
 bool debug_g;
@@ -122,7 +141,8 @@ uint32_t l1_buf_base_g;
 uint32_t test_device_id_g = 0;
 
 void init(int argc, char** argv) {
-    auto default_settings = DispatchSettings::defaults(DISPATCH_CORE_TYPE, tt::Cluster::instance(), 1);
+    auto default_settings =
+        DispatchSettings::defaults(DISPATCH_CORE_TYPE, tt::tt_metal::MetalContext::instance().get_cluster(), 1);
 
     std::vector<std::string> input_args(argv, argv + argc);
 
@@ -131,6 +151,7 @@ void init(int argc, char** argv) {
         log_info(
             LogTest,
             "  -t: test type: 0:Terminate 1:Smoke 2:Random 3:PCIe 4:DRAM-read 5:DRAM-write-read 6:Host 7:Packed-read "
+            "8:Ringbuffer-read"
             "(default {})",
             DEFAULT_TEST_TYPE);
         log_info(LogTest, "  -w: warm-up before starting timer (default disabled)");
@@ -159,8 +180,6 @@ void init(int argc, char** argv) {
         log_info(LogTest, " -dpgr: dram pages to read in dram bw test type (default: {})", DRAM_PAGES_TO_READ_DEFAULT);
         log_info(LogTest, " -spre: split prefetcher into H and D variants (default not split)");
         log_info(LogTest, " -sdis: split dispatcher into H and the other thing variants (default not split)");
-        log_info(LogTest, "  -packetized_timeout_en: packetized path timeout enabled (default false)");
-        log_info(LogTest, "  -packetized_en: packetized path enabled (default false)");
         log_info(LogTest, "  -device_id: Device on which the test will be run, default = 0");
         log_info(LogTest, "  -x: execute commands from dram exec_buf (default 0)");
         log_info(LogTest, "  -mpps: give prefetcher the maximum number of packed data submcds to relay to dispatcher");
@@ -195,8 +214,6 @@ void init(int argc, char** argv) {
     exec_buf_log_page_size_g =
         test_args::get_command_option_uint32(input_args, "-xpls", DRAM_EXEC_BUF_DEFAULT_LOG_PAGE_SIZE);
 
-    packetized_path_en_g = test_args::has_command_option(input_args, "-packetized_en");
-    packetized_path_timeout_en_g = test_args::has_command_option(input_args, "-packetized_timeout_en");
     test_device_id_g = test_args::get_command_option_uint32(input_args, "-device_id", 0);
 
     uint32_t seed = test_args::get_command_option_uint32(input_args, "-s", 1);
@@ -205,22 +222,7 @@ void init(int argc, char** argv) {
     debug_g = test_args::has_command_option(input_args, "-d");
 
     if (debug_g && use_dram_exec_buf_g) {
-        tt::log_fatal("Exec buf is not supported with debug commands");
-        exit(0);
-    }
-
-    if (packetized_path_en_g && !(split_prefetcher_g && split_dispatcher_g)) {
-        tt::log_fatal("Packetized path requires split prefetcher and dispatcher");
-        exit(0);
-    }
-
-    if (!packetized_path_en_g && packetized_path_timeout_en_g) {
-        tt::log_fatal("Packetized path timeout specified without enabling the packetized path");
-        exit(0);
-    }
-
-    if (test_device_id_g != 0 && !packetized_path_en_g) {
-        tt::log_fatal("Split device requires packetized path and split prefetcher/dispatcher");
+        log_fatal(tt::LogTest, "Exec buf is not supported with debug commands");
         exit(0);
     }
 }
@@ -233,7 +235,7 @@ void dirty_host_completion_buffer(uint32_t* host_hugepage_completion_buffer) {
 }
 
 uint32_t round_cmd_size_up(uint32_t size) {
-    uint32_t align_mask = hal_ref.get_alignment(HalMemType::HOST) - 1;
+    uint32_t align_mask = MetalContext::instance().hal().get_alignment(HalMemType::HOST) - 1;
 
     return (size + align_mask) & ~align_mask;
 }
@@ -290,7 +292,7 @@ void add_prefetcher_paged_read_cmd(
     uint32_t pages,
     bool is_dram,
     uint32_t length_adjust) {
-    CQPrefetchCmd cmd;
+    CQPrefetchCmd cmd{};
     cmd.base.cmd_id = CQ_PREFETCH_CMD_RELAY_PAGED;
 
     cmd.relay_paged.start_page = start_page & CQ_PREFETCH_RELAY_PAGED_START_PAGE_MASK;
@@ -319,12 +321,13 @@ void add_prefetcher_linear_read_cmd(IDevice* device,
                                     uint32_t length) {
     CoreCoord phys_worker_core = device->worker_core_from_logical_core(worker_core);
 
-    CQPrefetchCmd cmd;
+    CQPrefetchCmd cmd{};
     cmd.base.cmd_id = CQ_PREFETCH_CMD_RELAY_LINEAR;
 
     cmd.relay_linear.pad1 = 0;
     cmd.relay_linear.pad2 = 0;
-    cmd.relay_linear.noc_xy_addr = NOC_XY_ENCODING(phys_worker_core.x, phys_worker_core.y);
+    cmd.relay_linear.noc_xy_addr =
+        tt::tt_metal::MetalContext::instance().hal().noc_xy_encoding(phys_worker_core.x, phys_worker_core.y);
     cmd.relay_linear.addr = addr;
     cmd.relay_linear.length = length;
 
@@ -333,7 +336,7 @@ void add_prefetcher_linear_read_cmd(IDevice* device,
 
 void add_prefetcher_debug_prologue(vector<uint32_t>& cmds) {
     if (debug_g) {
-        CQPrefetchCmd debug_cmd;
+        CQPrefetchCmd debug_cmd{};
         debug_cmd.base.cmd_id = CQ_PREFETCH_CMD_DEBUG;
         add_bare_prefetcher_cmd(cmds, debug_cmd, true);
     }
@@ -345,11 +348,6 @@ void add_prefetcher_debug_epilogue(vector<uint32_t>& cmds, size_t prior_end) {
         debug_cmd_ptr = (CQPrefetchCmd*)&cmds[prior_end];
         debug_cmd_ptr->debug.size = (cmds.size() - prior_end) * sizeof(uint32_t) - sizeof(CQPrefetchCmd);
         debug_cmd_ptr->debug.stride = CQ_PREFETCH_CMD_BARE_MIN_SIZE;
-        uint32_t checksum = 0;
-        for (uint32_t i = prior_end + sizeof(CQPrefetchCmd) / sizeof(uint32_t); i < cmds.size(); i++) {
-            checksum += cmds[i];
-        }
-        debug_cmd_ptr->debug.checksum = checksum;
     }
 }
 
@@ -395,7 +393,7 @@ void add_prefetcher_cmd(
 
     add_prefetcher_debug_prologue(cmds);
 
-    CQPrefetchCmd cmd;
+    CQPrefetchCmd cmd{};
     memset(&cmd, 0, sizeof(CQPrefetchCmd));
     cmd.base.cmd_id = id;
 
@@ -417,11 +415,6 @@ void add_prefetcher_cmd(
             cmd.debug.key = ++key;
             cmd.debug.size = payload_length_bytes;
             cmd.debug.stride = round_cmd_size_up(payload_length_bytes + sizeof(CQPrefetchCmd));
-            uint32_t checksum = 0;
-            for (uint32_t i = 0; i < payload.size(); i++) {
-                checksum += payload[i];
-            }
-            cmd.debug.checksum = checksum;
         } break;
 
         case CQ_PREFETCH_CMD_TERMINATE: break;
@@ -490,8 +483,8 @@ void gen_dram_packed_read_cmd(
     int count = 0;
     for (auto length : lengths) {
         TT_ASSERT(length <= num_dram_banks_g * page_size);
-        TT_ASSERT((length & (hal_ref.get_alignment(HalMemType::DRAM) - 1)) == 0);
-        CQPrefetchRelayPagedPackedSubCmd sub_cmd;
+        TT_ASSERT((length & (MetalContext::instance().hal().get_alignment(HalMemType::DRAM) - 1)) == 0);
+        CQPrefetchRelayPagedPackedSubCmd sub_cmd{};
         sub_cmd.start_page = 0;  // TODO: randomize?
         sub_cmd.log_page_size = log_page_size;
         sub_cmd.base_addr = DRAM_DATA_BASE_ADDR + count * page_size;
@@ -614,7 +607,7 @@ void gen_dram_write_cmd(
 void gen_wait_and_stall_cmd(IDevice* device, vector<uint32_t>& prefetch_cmds, vector<uint32_t>& cmd_sizes) {
     vector<uint32_t> dispatch_cmds;
 
-    CQDispatchCmd wait;
+    CQDispatchCmd wait{};
     wait.base.cmd_id = CQ_DISPATCH_CMD_WAIT;
     wait.wait.flags = CQ_DISPATCH_CMD_WAIT_FLAG_BARRIER | CQ_DISPATCH_CMD_WAIT_FLAG_NOTIFY_PREFETCH |
                       CQ_DISPATCH_CMD_WAIT_FLAG_WAIT_MEMORY;
@@ -659,14 +652,14 @@ void gen_linear_read_cmd(
     for (uint32_t i = 0; i < length_words; i++) {
         device_data.push_one(worker_core, device_data.at(worker_core, bank_id, offset + i));
     }
-    device_data.pad(worker_core, bank_id, hal_ref.get_alignment(HalMemType::L1));
+    device_data.pad(worker_core, bank_id, MetalContext::instance().hal().get_alignment(HalMemType::L1));
 }
 
 void gen_dispatcher_delay_cmd(
     IDevice* device, vector<uint32_t>& prefetch_cmds, vector<uint32_t>& cmd_sizes, uint32_t count) {
     vector<uint32_t> dispatch_cmds;
 
-    CQDispatchCmd delay;
+    CQDispatchCmd delay{};
     delay.base.cmd_id = CQ_DISPATCH_CMD_DELAY;
     delay.delay.delay = count;
     add_bare_dispatcher_cmd(dispatch_cmds, delay);
@@ -810,12 +803,13 @@ void gen_host_test(
     // Read data from a worker so we can get reasonable BW measurements
     // TODO: extend the DRAM mechanism for pre-fill to workers
     vector<uint32_t> data;
+    data.reserve(max_data_size / sizeof(uint32_t));
     for (uint32_t i = 0; i < max_data_size / sizeof(uint32_t); i++) {
         data.push_back(i);
     }
     CoreCoord phys_worker_core = device->worker_core_from_logical_core(first_worker_g);
     llrt::write_hex_vec_to_core(device->id(), phys_worker_core, data, l1_buf_base_g);
-    tt::Cluster::instance().l1_barrier(device->id());
+    tt::tt_metal::MetalContext::instance().get_cluster().l1_barrier(device->id());
 
     for (int count = 1; count < 100; count++) {
         uint32_t data_size_words = std::rand() % ((max_data_size / 100 / sizeof(uint32_t)) * count) + 1;
@@ -872,7 +866,7 @@ void gen_rnd_dram_paged_cmd(
     CoreCoord worker_core) {
     vector<uint32_t> dispatch_cmds;
 
-    const uint32_t dram_alignment = hal_ref.get_alignment(HalMemType::DRAM);
+    const uint32_t dram_alignment = MetalContext::instance().hal().get_alignment(HalMemType::DRAM);
     uint32_t start_page = std::rand() % num_dram_banks_g;
     uint32_t max_page_size = big_g ? MAX_PAGE_SIZE : 4096;
     uint32_t page_size = (std::rand() % (max_page_size + 1)) & ~(dram_alignment - 1);
@@ -970,7 +964,7 @@ void gen_packed_read_test(
         uint32_t n_sub_cmds =
             relay_max_packed_paged_submcds ? CQ_PREFETCH_CMD_RELAY_PAGED_PACKED_MAX_SUB_CMDS : (std::rand() % 7) + 1;
         uint32_t max_read_size = (1 << packed_read_page_size) * num_dram_banks_g;
-        auto dram_alignment = hal_ref.get_alignment(HalMemType::DRAM);
+        auto dram_alignment = MetalContext::instance().hal().get_alignment(HalMemType::DRAM);
         vector<uint32_t> lengths;
         uint32_t total_length = 0;
         for (uint32_t i = 0; i < n_sub_cmds; i++) {
@@ -989,6 +983,165 @@ void gen_packed_read_test(
             gen_dram_packed_read_cmd(
                 device, prefetch_cmds, cmd_sizes, device_data, first_worker_g, packed_read_page_size, lengths);
         }
+    }
+}
+
+template <typename T>
+void update_cmd_sizes(std::vector<uint32_t>& prefetch_cmds, vector<uint32_t>& cmd_sizes, T updater) {
+    auto prior_end = prefetch_cmds.size();
+    updater();
+    uint32_t new_size = (prefetch_cmds.size() - prior_end) * sizeof(uint32_t);
+    cmd_sizes.push_back(new_size >> DispatchSettings::PREFETCH_Q_LOG_MINSIZE);
+}
+
+template <typename T>
+void copy_struct_to_vector(std::vector<uint32_t>& prefetch_cmds, T& cmd) {
+    static_assert(
+        sizeof(T) % sizeof(uint32_t) == 0, "CQPrefetchCmd must be a multiple of 4 bytes to be copied to vector");
+    size_t current_size = prefetch_cmds.size();
+    prefetch_cmds.resize(current_size + sizeof(T) / sizeof(uint32_t));
+    memcpy(&prefetch_cmds[current_size], &cmd, sizeof(T));
+}
+
+void pad_vector(std::vector<uint32_t>& prefetch_cmds, uint32_t pad_bytes) {
+    TT_ASSERT(pad_bytes % sizeof(uint32_t) == 0, "Padding must be a multiple of 4 bytes to be copied to vector");
+    for (int i = 0; i < pad_bytes / sizeof(uint32_t); i++) {
+        prefetch_cmds.push_back(0);
+    }
+}
+
+// ringbuffer read from dram to linear write to worker
+void gen_dram_ringbuffer_read_cmd(
+    IDevice* device,
+    vector<uint32_t>& prefetch_cmds,
+    vector<uint32_t>& cmd_sizes,
+    DeviceData& device_data,
+    CoreCoord worker_core,
+    uint32_t log_page_size,
+    vector<uint32_t>& lengths) {
+    vector<uint32_t> dispatch_cmds;
+
+    uint32_t total_length = 0;
+    for (auto length : lengths) {
+        total_length += length;
+    }
+    gen_bare_dispatcher_unicast_write_cmd(device, dispatch_cmds, worker_core, device_data, total_length);
+    bool reset = false;
+    uint32_t page_size = 1 << log_page_size;
+    int count = 0;
+
+    std::vector<CQPrefetchRelayRingbufferSubCmd> sub_cmds;
+    for (auto length : lengths) {
+        constexpr uint32_t max_page_offset = 5;
+        CQPrefetchCmd cmd{};
+        cmd.base.cmd_id = CQ_PREFETCH_CMD_PAGED_TO_RINGBUFFER;
+        auto& ringbuffer_cmd = cmd.paged_to_ringbuffer;
+        if (!reset) {
+            ringbuffer_cmd.flags = CQ_PREFETCH_PAGED_TO_RING_BUFFER_FLAG_RESET_TO_START;
+            reset = true;
+        }
+        ringbuffer_cmd.start_page = rand() % max_page_offset;
+        ringbuffer_cmd.log2_page_size = log_page_size;
+        ringbuffer_cmd.base_addr = DRAM_DATA_BASE_ADDR + count * page_size;
+        ringbuffer_cmd.length = length;
+        ringbuffer_cmd.wp_offset_update = length;
+        count++;
+
+        update_cmd_sizes(prefetch_cmds, cmd_sizes, [&]() { add_bare_prefetcher_cmd(prefetch_cmds, cmd, true); });
+
+        // Model the paged to ringbuffer read in this function by updating worker data with interleaved/paged DRAM data,
+        // for validation later.
+        uint32_t length_words = length / sizeof(uint32_t);
+        uint32_t base_addr_words = (ringbuffer_cmd.base_addr - DRAM_DATA_BASE_ADDR) / sizeof(uint32_t);
+        uint32_t page_size_words = page_size / sizeof(uint32_t);
+
+        // Get data from DRAM map, add to worker.
+        uint32_t page_idx = ringbuffer_cmd.start_page;
+        for (uint32_t i = 0; i < length_words; i += page_size_words) {
+            uint32_t dram_bank_id = page_idx % num_dram_banks_g;
+            auto dram_channel = device->allocator()->get_dram_channel_from_bank_id(dram_bank_id);
+            CoreCoord bank_core = device->logical_core_from_dram_channel(dram_channel);
+            uint32_t bank_offset = base_addr_words + page_size_words * (page_idx / num_dram_banks_g);
+
+            uint32_t words = (page_size_words > length_words - i) ? length_words - i : page_size_words;
+            for (uint32_t j = 0; j < words; j++) {
+                uint32_t datum = device_data.at(bank_core, dram_bank_id, bank_offset + j);
+                device_data.push_one(worker_core, datum);
+            }
+
+            page_idx++;
+        }
+    }
+
+    constexpr uint32_t kWriteOffset = 1234;  // arbitrary
+
+    update_cmd_sizes(prefetch_cmds, cmd_sizes, [&]() {
+        CQPrefetchCmd cmd{};
+        cmd.base.cmd_id = CQ_PREFETCH_CMD_SET_RINGBUFFER_OFFSET;
+        cmd.set_ringbuffer_offset.offset = kWriteOffset;
+        add_bare_prefetcher_cmd(prefetch_cmds, cmd, true);
+    });
+
+    size_t current_offset = 0;
+    for (auto length : lengths) {
+        CQPrefetchRelayRingbufferSubCmd sub_cmd{};
+        sub_cmd.start = current_offset - kWriteOffset;
+        sub_cmd.length = length;
+        current_offset += length;
+        sub_cmds.push_back(sub_cmd);
+    }
+
+    add_prefetcher_cmd(prefetch_cmds, cmd_sizes, CQ_PREFETCH_CMD_RELAY_INLINE_NOFLUSH, dispatch_cmds);
+    update_cmd_sizes(prefetch_cmds, cmd_sizes, [&]() {
+        CQPrefetchCmd cmd{};
+        cmd.base.cmd_id = CQ_PREFETCH_CMD_RELAY_RINGBUFFER;
+
+        uint32_t stride = sub_cmds.size() * sizeof(CQPrefetchRelayRingbufferSubCmd) + sizeof(CQPrefetchCmd);
+        uint32_t aligned_stride = round_cmd_size_up(stride);
+        cmd.relay_ringbuffer.stride = aligned_stride;
+        cmd.relay_ringbuffer.count = sub_cmds.size();
+
+        copy_struct_to_vector(prefetch_cmds, cmd);
+
+        for (const auto& sub_cmd : sub_cmds) {
+            copy_struct_to_vector(prefetch_cmds, sub_cmd);
+        }
+        pad_vector(prefetch_cmds, aligned_stride - stride);
+    });
+}
+
+void gen_ringbuffer_read_test(
+    IDevice* device, vector<uint32_t>& prefetch_cmds, vector<uint32_t>& cmd_sizes, DeviceData& device_data) {
+    static constexpr uint32_t min_read_size = 128;
+    bool done = false;
+    while (!done) {
+        uint32_t ringbuffer_read_page_size_log2 = std::rand() % 3 + 9;  // log2 values. i.e., 512, 1024, 2048
+        uint32_t max_read_size = (1 << ringbuffer_read_page_size_log2) * num_dram_banks_g;
+        auto dram_alignment = MetalContext::instance().hal().get_alignment(HalMemType::DRAM);
+        // arbitrary.
+        uint32_t n_sub_cmds = (std::rand() % 7) + 1;
+        vector<uint32_t> lengths;
+        uint32_t total_length = 0;
+        for (uint32_t i = 0; i < n_sub_cmds; i++) {
+            // limit the length to min and max read size
+            uint32_t length = tt::align(
+                std::min(max_read_size, std::max(min_read_size, std::rand() % scratch_db_size_g)), dram_alignment);
+            length = std::min(scratch_db_size_g - total_length, length);
+            if (length == 0) {
+                break;
+            }
+            total_length += length;
+            lengths.push_back(length);
+        }
+
+        if (device_data.size() * sizeof(uint32_t) + total_length > DEVICE_DATA_SIZE) {
+            // got close-ish to the end anyway...
+            done = true;
+        } else {
+            gen_dram_ringbuffer_read_cmd(
+                device, prefetch_cmds, cmd_sizes, device_data, first_worker_g, ringbuffer_read_page_size_log2, lengths);
+        }
+        done = true;
     }
 }
 
@@ -1031,7 +1184,7 @@ void gen_prefetcher_exec_buf_cmd_and_write_to_dram(
     vector<uint32_t> empty_payload;  // don't give me grief, it is just a test
 
     // Add the semaphore release for prefetch_h
-    CQDispatchCmd dcmd;
+    CQDispatchCmd dcmd{};
     memset(&dcmd, 0, sizeof(CQDispatchCmd));
 
     // cmddat_q in prefetch_d is re-used for exec_buf
@@ -1052,6 +1205,7 @@ void gen_prefetcher_exec_buf_cmd_and_write_to_dram(
 
     uint32_t length = exec_buf_cmds.size() * sizeof(uint32_t);
     length += (page_size - (length & (page_size - 1))) & (page_size - 1);  // rounded up to full pages
+    exec_buf_cmds.resize(length / sizeof(uint32_t));  // make sure access to the last segment do not overrun the buffer
 
     uint32_t pages = length / page_size;
     uint32_t index = 0;
@@ -1062,9 +1216,9 @@ void gen_prefetcher_exec_buf_cmd_and_write_to_dram(
 
         index += page_size;
     }
-    tt::Cluster::instance().dram_barrier(device->id());
+    tt::tt_metal::MetalContext::instance().get_cluster().dram_barrier(device->id());
 
-    CQPrefetchCmd cmd;
+    CQPrefetchCmd cmd{};
     cmd.base.cmd_id = CQ_PREFETCH_CMD_EXEC_BUF;
     cmd.exec_buf.pad1 = 0;
     cmd.exec_buf.pad2 = 0;
@@ -1090,7 +1244,7 @@ void gen_smoke_test(
     CoreCoord another_worker_core) {
     vector<uint32_t> empty_payload;  // don't give me grief, it is just a test
     vector<uint32_t> dispatch_cmds;
-    const uint32_t dram_alignment = hal_ref.get_alignment(HalMemType::DRAM);
+    const uint32_t dram_alignment = MetalContext::instance().hal().get_alignment(HalMemType::DRAM);
 
     if (!use_dram_exec_buf_g) {
         add_prefetcher_cmd(prefetch_cmds, cmd_sizes, CQ_PREFETCH_CMD_DEBUG, empty_payload);
@@ -1460,8 +1614,9 @@ void gen_prefetcher_cmds(
             break;
         case 6: gen_host_test(device, prefetch_cmds, cmd_sizes, device_data); break;
         case 7: gen_packed_read_test(device, prefetch_cmds, cmd_sizes, device_data); break;
+        case 8: gen_ringbuffer_read_test(device, prefetch_cmds, cmd_sizes, device_data); break;
         default:
-            log_fatal("Unknown test: {}", test_type_g);
+            log_fatal(tt::LogTest, "Unknown test: {}", test_type_g);
             exit(0);
             break;
     }
@@ -1521,7 +1676,7 @@ void write_prefetcher_cmd(
 
     // wait for space
     while (prefetch_q_dev_ptr == prefetch_q_dev_fence) {
-        tt::Cluster::instance().read_core(
+        tt::tt_metal::MetalContext::instance().get_cluster().read_core(
             read_vec, sizeof(uint32_t), tt_cxy_pair(device->id(), phys_prefetch_core), prefetch_q_rd_ptr_addr);
         prefetch_q_dev_fence = read_vec[0];
     }
@@ -1532,7 +1687,7 @@ void write_prefetcher_cmd(
         prefetch_q_dev_ptr = prefetch_q_base;
 
         while (prefetch_q_dev_ptr == prefetch_q_dev_fence) {
-            tt::Cluster::instance().read_core(
+            tt::tt_metal::MetalContext::instance().get_cluster().read_core(
                 read_vec, sizeof(uint32_t), tt_cxy_pair(device->id(), phys_prefetch_core), prefetch_q_rd_ptr_addr);
             prefetch_q_dev_fence = read_vec[0];
         }
@@ -1598,11 +1753,9 @@ void write_prefetcher_cmds(
         for (uint32_t j = 0; j < cmd_sizes.size(); j++) {
             uint32_t cmd_size_words =
                 ((uint32_t)cmd_sizes[j] << DispatchSettings::PREFETCH_Q_LOG_MINSIZE) / sizeof(uint32_t);
-            uint32_t space_at_end_for_wrap_words = CQ_PREFETCH_CMD_BARE_MIN_SIZE / sizeof(uint32_t);
             if ((void*)(host_mem_ptr + cmd_size_words) >
                 (void*)((uint8_t*)host_hugepage_base + hugepage_issue_buffer_size_g)) {
                 // Wrap huge page
-                uint32_t offset = 0;
                 host_mem_ptr = (uint32_t*)host_hugepage_base;
             }
 
@@ -1679,13 +1832,7 @@ std::chrono::duration<double> run_test(
             true);
     });
     tt_metal::detail::LaunchProgram(device, program, false);
-    if (test_device_id_g != 0) {
-        tt_metal::detail::LaunchProgram(device_r, program_r, false);
-    }
     tt_metal::detail::WaitProgramDone(device, program);
-    if (test_device_id_g != 0) {
-        tt_metal::detail::WaitProgramDone(device_r, program_r);
-    }
     t1.join();
 
     auto end = std::chrono::system_clock::now();
@@ -1699,15 +1846,10 @@ void configure_for_single_chip(
     void*& host_hugepage_base,
     uint32_t prefetch_q_base,
     uint32_t prefetch_q_rd_ptr_addr,
-    CoreCoord& phys_prefetch_relay_mux_core,
-    CoreCoord& phys_prefetch_relay_demux_core,
-    CoreCoord& phys_dispatch_relay_mux_core,
-    CoreCoord& phys_dispatch_relay_demux_core,
-    uint32_t& packetized_path_test_results_addr,
-    uint32_t packetized_path_test_results_size,
     uint32_t dev_hugepage_base_g) {
-    uint32_t dispatch_buffer_pages = DispatchMemMap::get(DISPATCH_CORE_TYPE, 1).dispatch_buffer_block_size_pages() *
-                                     DispatchSettings::DISPATCH_BUFFER_SIZE_BLOCKS;
+    uint32_t dispatch_buffer_pages =
+        MetalContext::instance().dispatch_mem_map(DISPATCH_CORE_TYPE).dispatch_buffer_block_size_pages() *
+        DispatchSettings::DISPATCH_BUFFER_SIZE_BLOCKS;
     uint32_t num_compute_cores =
         device->compute_with_storage_grid_size().x * device->compute_with_storage_grid_size().y;
 
@@ -1721,36 +1863,23 @@ void configure_for_single_chip(
     CoreCoord phys_dispatch_core = device->worker_core_from_logical_core(dispatch_core);
     CoreCoord phys_dispatch_h_core = device->worker_core_from_logical_core(dispatch_h_core);
 
-    // Packetized relay nodes - instantiated only if packetized_path_en_g is set
-    CoreCoord prefetch_relay_mux_core = {1, 0};
-    CoreCoord prefetch_relay_demux_core = {2, 0};
-    CoreCoord dispatch_relay_mux_core = {5, 0};
-    CoreCoord dispatch_relay_demux_core = {6, 0};
-
-    phys_prefetch_relay_mux_core = device->worker_core_from_logical_core(prefetch_relay_mux_core);
-    phys_prefetch_relay_demux_core = device->worker_core_from_logical_core(prefetch_relay_demux_core);
-    phys_dispatch_relay_mux_core = device->worker_core_from_logical_core(dispatch_relay_mux_core);
-    phys_dispatch_relay_demux_core = device->worker_core_from_logical_core(dispatch_relay_demux_core);
-
-    // Packetized components will write their status + a few debug values here:
     uint32_t l1_unreserved_base = device->allocator()->get_base_allocator_addr(HalMemType::L1);
-    packetized_path_test_results_addr = l1_unreserved_base;
 
     // Want different buffers on each core, instead use big buffer and self-manage it
     uint32_t l1_unreserved_base_aligned = tt::align(
-        l1_unreserved_base + packetized_path_test_results_size,
+        l1_unreserved_base,
         (1 << DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE));  // Was not aligned, lately.
     TT_ASSERT((l1_buf_base_g & ((1 << DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE) - 1)) == 0);
 
     uint32_t dispatch_buffer_base = l1_buf_base_g;
     uint32_t prefetch_d_buffer_base = l1_buf_base_g;
     uint32_t prefetch_d_buffer_pages = prefetch_d_buffer_size_g >> DispatchSettings::PREFETCH_D_BUFFER_LOG_PAGE_SIZE;
-    dispatch_wait_addr_g = l1_unreserved_base_aligned + hal_ref.get_alignment(HalMemType::L1);
+    dispatch_wait_addr_g = l1_unreserved_base_aligned + MetalContext::instance().hal().get_alignment(HalMemType::L1);
     vector<uint32_t> zero_data(0);
     llrt::write_hex_vec_to_core(device->id(), phys_dispatch_core, zero_data, dispatch_wait_addr_g);
 
     uint32_t prefetch_q_size = prefetch_q_entries_g * sizeof(DispatchSettings::prefetch_q_entry_type);
-    uint32_t noc_read_alignment = hal_ref.get_alignment(HalMemType::HOST);
+    uint32_t noc_read_alignment = MetalContext::instance().hal().get_alignment(HalMemType::HOST);
     uint32_t cmddat_q_base =
         prefetch_q_base + ((prefetch_q_size + noc_read_alignment - 1) / noc_read_alignment * noc_read_alignment);
 
@@ -1763,18 +1892,23 @@ void configure_for_single_chip(
     TT_ASSERT(cmddat_q_size_g >= 2 * max_prefetch_command_size_g);
 
     // NOTE: this test hijacks hugepage
-    chip_id_t mmio_device_id = tt::Cluster::instance().get_associated_mmio_device(device->id());
-    uint16_t channel = tt::Cluster::instance().get_assigned_channel_for_device(device->id());
-    host_hugepage_base = (void*)tt::Cluster::instance().host_dma_address(0, mmio_device_id, channel);
+    chip_id_t mmio_device_id =
+        tt::tt_metal::MetalContext::instance().get_cluster().get_associated_mmio_device(device->id());
+    uint16_t channel =
+        tt::tt_metal::MetalContext::instance().get_cluster().get_assigned_channel_for_device(device->id());
+    host_hugepage_base =
+        (void*)tt::tt_metal::MetalContext::instance().get_cluster().host_dma_address(0, mmio_device_id, channel);
     host_hugepage_base = (void*)((uint8_t*)host_hugepage_base + dev_hugepage_base_g);
     host_hugepage_completion_buffer_base_g = (void*)((uint8_t*)host_hugepage_base + hugepage_issue_buffer_size_g);
     uint32_t dev_hugepage_completion_buffer_base = dev_hugepage_base_g + hugepage_issue_buffer_size_g;
     uint32_t* host_hugepage_completion_buffer = (uint32_t*)host_hugepage_completion_buffer_base_g;
     vector<uint32_t> tmp = {dev_hugepage_completion_buffer_base >> 4};
     CoreCoord phys_dispatch_host_core = split_dispatcher_g ? phys_dispatch_h_core : phys_dispatch_core;
-    uint32_t completion_q_wr_ptr = DispatchMemMap::get(DISPATCH_CORE_TYPE)
+    uint32_t completion_q_wr_ptr = MetalContext::instance()
+                                       .dispatch_mem_map(DISPATCH_CORE_TYPE)
                                        .get_device_command_queue_addr(CommandQueueDeviceAddrType::COMPLETION_Q_WR);
-    uint32_t completion_q_rd_ptr = DispatchMemMap::get(DISPATCH_CORE_TYPE)
+    uint32_t completion_q_rd_ptr = MetalContext::instance()
+                                       .dispatch_mem_map(DISPATCH_CORE_TYPE)
                                        .get_device_command_queue_addr(CommandQueueDeviceAddrType::COMPLETION_Q_RD);
     tt::llrt::write_hex_vec_to_core(device->id(), phys_dispatch_host_core, tmp, completion_q_wr_ptr);
     tt::llrt::write_hex_vec_to_core(device->id(), phys_dispatch_host_core, tmp, completion_q_rd_ptr);
@@ -1783,105 +1917,97 @@ void configure_for_single_chip(
     const uint32_t prefetch_core_sem_0_id = tt_metal::CreateSemaphore(program, {prefetch_core}, 0);
     const uint32_t prefetch_d_core_sem_0_id = tt_metal::CreateSemaphore(program, {prefetch_d_core}, 0);
     TT_ASSERT(prefetch_core_sem_0_id == prefetch_d_core_sem_0_id);
-    if (packetized_path_en_g) {
-        const uint32_t prefetch_relay_mux_core_sem_0_id =
-            tt_metal::CreateSemaphore(program, {prefetch_relay_mux_core}, 0);  // unused
-        const uint32_t prefetch_relay_demux_core_sem_0_id =
-            tt_metal::CreateSemaphore(program, {prefetch_relay_demux_core}, 0);  // unused
-        TT_ASSERT(prefetch_relay_mux_core_sem_0_id == prefetch_relay_demux_core_sem_0_id);
-        TT_ASSERT(prefetch_relay_mux_core_sem_0_id == prefetch_core_sem_0_id);
-    }
     const uint32_t prefetch_sync_sem = prefetch_core_sem_0_id;
 
     const uint32_t prefetch_downstream_buffer_pages =
         split_prefetcher_g ? prefetch_d_buffer_pages : dispatch_buffer_pages;
     const uint32_t prefetch_core_sem_1_id =
         tt_metal::CreateSemaphore(program, {prefetch_core}, prefetch_downstream_buffer_pages);
-    if (packetized_path_en_g) {
-        // for the unpacketize stage, we use rptr/wptr for flow control, and poll semaphore
-        // value only to update the rptr:
-        const uint32_t prefetch_relay_demux_core_sem_1_id =
-            tt_metal::CreateSemaphore(program, {prefetch_relay_demux_core}, 0);
-        TT_ASSERT(prefetch_core_sem_1_id == prefetch_relay_demux_core_sem_1_id);
-    }
     const uint32_t prefetch_downstream_cb_sem = prefetch_core_sem_1_id;
 
     const uint32_t prefetch_d_core_sem_1_id = tt_metal::CreateSemaphore(program, {prefetch_d_core}, 0);
     const uint32_t prefetch_d_core_sem_2_id =
         tt_metal::CreateSemaphore(program, {prefetch_d_core}, dispatch_buffer_pages);
-    if (packetized_path_en_g) {
-        const uint32_t prefetch_relay_mux_core_sem_1_id =
-            tt_metal::CreateSemaphore(program, {prefetch_relay_mux_core}, 0);
-        TT_ASSERT(prefetch_d_core_sem_1_id == prefetch_relay_mux_core_sem_1_id);
-    }
     const uint32_t prefetch_d_upstream_cb_sem = prefetch_d_core_sem_1_id;
     const uint32_t prefetch_d_downstream_cb_sem = prefetch_d_core_sem_2_id;
 
-    const uint32_t dispatch_core_sem_0_id = tt_metal::CreateSemaphore(program, {dispatch_core}, 0);
-    const uint32_t dispatch_relay_demux_core_sem_0_id =
-        tt_metal::CreateSemaphore(program, {dispatch_relay_demux_core}, 0);  // unused
-    TT_ASSERT(dispatch_core_sem_0_id == dispatch_relay_demux_core_sem_0_id);
-    const uint32_t dispatch_sync_sem = dispatch_core_sem_0_id;
+    tt_metal::CreateSemaphore(program, {dispatch_core}, 0);
 
     const uint32_t dispatch_core_sem_1_id = tt_metal::CreateSemaphore(program, {dispatch_core}, 0);  // 1
-    const uint32_t dispatch_relay_demux_core_sem_1_id =
-        tt_metal::CreateSemaphore(program, {dispatch_relay_demux_core}, 0);  // unused
-    TT_ASSERT(dispatch_core_sem_1_id == dispatch_relay_demux_core_sem_1_id);
     const uint32_t dispatch_cb_sem = dispatch_core_sem_1_id;
 
     const uint32_t dispatch_core_sem_2_id = tt_metal::CreateSemaphore(program, {dispatch_core}, dispatch_buffer_pages);
-    // for the unpacketize stage, we use rptr/wptr for flow control, and poll semaphore
-    // value only to update the rptr:
-    const uint32_t dispatch_relay_demux_core_sem_2_id =
-        tt_metal::CreateSemaphore(program, {dispatch_relay_demux_core}, 0);
-    TT_ASSERT(dispatch_core_sem_2_id == dispatch_relay_demux_core_sem_2_id);
     const uint32_t dispatch_downstream_cb_sem = dispatch_core_sem_2_id;
 
     const uint32_t dispatch_h_core_sem_0_id = tt_metal::CreateSemaphore(program, {dispatch_h_core}, 0);
-    const uint32_t dispatch_relay_mux_core_sem_0_id = tt_metal::CreateSemaphore(program, {dispatch_relay_mux_core}, 0);
-    TT_ASSERT(dispatch_h_core_sem_0_id == dispatch_relay_mux_core_sem_0_id);
     const uint32_t dispatch_h_cb_sem = dispatch_h_core_sem_0_id;
 
-    std::vector<uint32_t> prefetch_compile_args = {
-        dispatch_buffer_base,                             // overridden below for prefetch_h
-        DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE,  // overridden below for prefetch_h
-        dispatch_buffer_pages,                            // overridden below for prefetch_h
-        prefetch_downstream_cb_sem,                       // overridden below for prefetch_d
-        dispatch_cb_sem,                                  // overridden below for prefetch_h
-        dev_hugepage_base_g,
-        hugepage_issue_buffer_size_g,
-        prefetch_q_base,
-        prefetch_q_entries_g * (uint32_t)sizeof(DispatchSettings::prefetch_q_entry_type),
-        prefetch_q_rd_ptr_addr,
-        prefetch_q_rd_ptr_addr + sizeof(uint32_t),
-        cmddat_q_base,    // overridden for split below
-        cmddat_q_size_g,  // overridden for split below
-        0,                // scratch_db_base filled in below if used
-        scratch_db_size_g,
-        prefetch_sync_sem,
-        prefetch_d_buffer_pages,     // prefetch_d only
-        prefetch_d_upstream_cb_sem,  // prefetch_d only
-        prefetch_downstream_cb_sem,  // prefetch_d only
-        DispatchSettings::PREFETCH_D_BUFFER_LOG_PAGE_SIZE,
-        DispatchSettings::PREFETCH_D_BUFFER_BLOCKS,  // prefetch_d only
-        0,                                           // unused: for prefetch_hd <--> dispatch_hd
-        0,                                           // unused: for prefetch_hd <--> dispatch_hd
-        0,                                           // unused: for prefetch_hd <--> dispatch_hd
-        0,                                           // unused: for prefetch_hd <--> dispatch_hd
-        0,                                           // unused: for prefetch_hd <--> dispatch_hd
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
+    std::map<std::string, std::string> prefetch_defines = {
+        {"DOWNSTREAM_CB_BASE", std::to_string(dispatch_buffer_base)},  // overridden below for prefetch_h
+        {"DOWNSTREAM_CB_LOG_PAGE_SIZE",
+         std::to_string(DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE)},        // overridden below for prefetch_h
+        {"DOWNSTREAM_CB_PAGES", std::to_string(dispatch_buffer_pages)},           // overridden below for prefetch_h
+        {"MY_DOWNSTREAM_CB_SEM_ID", std::to_string(prefetch_downstream_cb_sem)},  // overridden below for prefetch_d
+        {"DOWNSTREAM_CB_SEM_ID", std::to_string(dispatch_cb_sem)},                // overridden below for prefetch_h
+        {"PCIE_BASE", std::to_string(dev_hugepage_base_g)},
+        {"PCIE_SIZE", std::to_string(hugepage_issue_buffer_size_g)},
+        {"PREFETCH_Q_BASE", std::to_string(prefetch_q_base)},
+        {"PREFETCH_Q_SIZE",
+         std::to_string(prefetch_q_entries_g * (uint32_t)sizeof(DispatchSettings::prefetch_q_entry_type))},
+        {"PREFETCH_Q_RD_PTR_ADDR", std::to_string(prefetch_q_rd_ptr_addr)},
+        {"PREFETCH_Q_PCIE_RD_PTR_ADDR", std::to_string(prefetch_q_rd_ptr_addr + sizeof(uint32_t))},
+        {"CMDDAT_Q_BASE", std::to_string(cmddat_q_base)},    // overridden for split below
+        {"CMDDAT_Q_SIZE", std::to_string(cmddat_q_size_g)},  // overridden for split below
+        {"SCRATCH_DB_BASE", std::to_string(0)},              // scratch_db_base filled in below if used
+        {"SCRATCH_DB_SIZE", std::to_string(scratch_db_size_g)},
+        {"DOWNSTREAM_SYNC_SEM_ID", std::to_string(prefetch_sync_sem)},
+        {"CMDDAT_Q_PAGES", std::to_string(prefetch_d_buffer_pages)},            // prefetch_d only
+        {"MY_UPSTREAM_CB_SEM_ID", std::to_string(prefetch_d_upstream_cb_sem)},  // prefetch_d only
+        {"UPSTREAM_CB_SEM_ID", std::to_string(prefetch_downstream_cb_sem)},     // prefetch_d only
+        {"CMDDAT_Q_LOG_PAGE_SIZE", std::to_string(DispatchSettings::PREFETCH_D_BUFFER_LOG_PAGE_SIZE)},
+        {"CMDDAT_Q_BLOCKS", std::to_string(DispatchSettings::PREFETCH_D_BUFFER_BLOCKS)},  // prefetch_d only
+        {"DISPATCH_S_BUFFER_BASE", std::to_string(0)},           // unused: for prefetch_hd <--> dispatch_hd
+        {"MY_DISPATCH_S_CB_SEM_ID", std::to_string(0)},          // unused: for prefetch_hd <--> dispatch_hd
+        {"DOWNSTREAM_DISPATCH_S_CB_SEM_ID", std::to_string(0)},  // unused: for prefetch_hd <--> dispatch_hd
+        {"DISPATCH_S_BUFFER_SIZE", std::to_string(0)},           // unused: for prefetch_hd <--> dispatch_hd
+        {"DISPATCH_S_CB_LOG_PAGE_SIZE", std::to_string(0)},      // unused: for prefetch_hd <--> dispatch_hd
+        {"RINGBUFFER_SIZE", std::to_string(scratch_db_size_g)},
+        // Fabric configuration - set to 0
+        {"FABRIC_HEADER_RB_BASE", std::to_string(0)},
+        {"FABRIC_HEADER_RB_ENTRIES", std::to_string(0)},
+        {"MY_FABRIC_SYNC_STATUS_ADDR", std::to_string(0)},
+
+        {"FABRIC_MUX_X", std::to_string(0)},
+        {"FABRIC_MUX_Y", std::to_string(0)},
+        {"FABRIC_MUX_NUM_BUFFERS_PER_CHANNEL", std::to_string(0)},
+        {"FABRIC_MUX_CHANNEL_BUFFER_SIZE_BYTES", std::to_string(0)},
+        {"FABRIC_MUX_CHANNEL_BASE_ADDRESS", std::to_string(0)},
+        {"FABRIC_MUX_CONNECTION_INFO_ADDRESS", std::to_string(0)},
+        {"FABRIC_MUX_CONNECTION_HANDSHAKE_ADDRESS", std::to_string(0)},
+        {"FABRIC_MUX_FLOW_CONTROL_ADDRESS", std::to_string(0)},
+        {"FABRIC_MUX_BUFFER_INDEX_ADDRESS", std::to_string(0)},
+        {"FABRIC_MUX_STATUS_ADDRESS", std::to_string(0)},
+        {"FABRIC_MUX_TERMINATION_SIGNAL_ADDRESS", std::to_string(0)},
+        {"WORKER_CREDITS_STREAM_ID", std::to_string(0)},
+
+        {"FABRIC_WORKER_FLOW_CONTROL_SEM", std::to_string(0)},
+        {"FABRIC_WORKER_TEARDOWN_SEM", std::to_string(0)},
+        {"FABRIC_WORKER_BUFFER_INDEX_SEM", std::to_string(0)},
+
+        {"NUM_HOPS", std::to_string(0)},
+
+        {"MY_DEV_ID", std::to_string(0)},
+        {"EW_DIM", std::to_string(0)},
+        {"TO_MESH_ID", std::to_string(0)},
+        {"TO_DEV_ID", std::to_string(0)},
+        {"ROUTER_DIRECTION", std::to_string(0)},
     };
 
     constexpr NOC my_noc_index = NOC::NOC_0;
     constexpr NOC dispatch_upstream_noc_index = NOC::NOC_1;
 
     if (split_prefetcher_g) {
-        log_info(LogTest, "split prefetcher test, packetized_path_en={}", packetized_path_en_g);
+        log_info(LogTest, "split prefetcher test");
 
         // prefetch_d
         uint32_t scratch_db_base =
@@ -1890,16 +2016,17 @@ void configure_for_single_chip(
                                       noc_read_alignment * noc_read_alignment);
         TT_ASSERT(scratch_db_base < 1024 * 1024);  // L1 size
 
-        prefetch_compile_args[3] = prefetch_d_downstream_cb_sem;
-        prefetch_compile_args[11] = prefetch_d_buffer_base;
-        prefetch_compile_args[12] = prefetch_d_buffer_pages * (1 << DispatchSettings::PREFETCH_D_BUFFER_LOG_PAGE_SIZE);
-        prefetch_compile_args[13] = scratch_db_base;
-        CoreCoord phys_prefetch_d_upstream_core =
-            packetized_path_en_g ? phys_prefetch_relay_demux_core : phys_prefetch_core_g;
+        prefetch_defines["MY_DOWNSTREAM_CB_SEM_ID"] = std::to_string(prefetch_d_downstream_cb_sem);
+        prefetch_defines["CMDDAT_Q_BASE"] = std::to_string(prefetch_d_buffer_base);
+        prefetch_defines["CMDDAT_Q_SIZE"] =
+            std::to_string(prefetch_d_buffer_pages * (1 << DispatchSettings::PREFETCH_D_BUFFER_LOG_PAGE_SIZE));
+        prefetch_defines["SCRATCH_DB_BASE"] = std::to_string(scratch_db_base);
+        CoreCoord phys_prefetch_d_upstream_core = phys_prefetch_core_g;
         configure_kernel_variant<true, false>(
             program,
             "tt_metal/impl/dispatch/kernels/cq_prefetch.cpp",
-            prefetch_compile_args,
+            prefetch_defines,
+            {},
             prefetch_d_core,
             phys_prefetch_d_core,
             phys_prefetch_d_upstream_core,
@@ -1910,20 +2037,21 @@ void configure_for_single_chip(
             my_noc_index);
 
         // prefetch_h
-        prefetch_compile_args[0] = prefetch_d_buffer_base;
-        prefetch_compile_args[1] = DispatchSettings::PREFETCH_D_BUFFER_LOG_PAGE_SIZE;
-        prefetch_compile_args[2] = prefetch_d_buffer_pages;
-        prefetch_compile_args[3] = prefetch_downstream_cb_sem;
-        prefetch_compile_args[4] = prefetch_d_upstream_cb_sem;
-        prefetch_compile_args[11] = cmddat_q_base;
-        prefetch_compile_args[12] = cmddat_q_size_g;
-        prefetch_compile_args[13] = 0;
-        CoreCoord phys_prefetch_h_downstream_core =
-            packetized_path_en_g ? phys_prefetch_relay_mux_core : phys_prefetch_d_core;
+        prefetch_defines["DOWNSTREAM_CB_BASE"] = std::to_string(prefetch_d_buffer_base);
+        prefetch_defines["DOWNSTREAM_CB_LOG_PAGE_SIZE"] =
+            std::to_string(DispatchSettings::PREFETCH_D_BUFFER_LOG_PAGE_SIZE);
+        prefetch_defines["DOWNSTREAM_CB_PAGES"] = std::to_string(prefetch_d_buffer_pages);
+        prefetch_defines["MY_DOWNSTREAM_CB_SEM_ID"] = std::to_string(prefetch_downstream_cb_sem);
+        prefetch_defines["DOWNSTREAM_CB_SEM_ID"] = std::to_string(prefetch_d_upstream_cb_sem);
+        prefetch_defines["CMDDAT_Q_BASE"] = std::to_string(cmddat_q_base);
+        prefetch_defines["CMDDAT_Q_SIZE"] = std::to_string(cmddat_q_size_g);
+        prefetch_defines["SCRATCH_DB_BASE"] = std::to_string(0);
+        CoreCoord phys_prefetch_h_downstream_core = phys_prefetch_d_core;
         configure_kernel_variant<false, true>(
             program,
             "tt_metal/impl/dispatch/kernels/cq_prefetch.cpp",
-            prefetch_compile_args,
+            prefetch_defines,
+            {},
             prefetch_core,
             phys_prefetch_core_g,
             {0xffffffff, 0xffffffff},  // upstream core unused
@@ -1932,180 +2060,17 @@ void configure_for_single_chip(
             my_noc_index,
             my_noc_index,
             my_noc_index);
-
-        if (packetized_path_en_g) {
-            uint32_t prefetch_relay_mux_queue_start_addr = prefetch_d_buffer_base;
-            uint32_t prefetch_relay_mux_queue_size_bytes = prefetch_d_buffer_size_g;
-
-            // Packetized path buffer, can be at any available address.
-            uint32_t prefetch_relay_demux_queue_start_addr = l1_unreserved_base;
-            constexpr uint32_t prefetch_relay_demux_queue_size_bytes = 0x10000;
-
-            // For tests with checkers enabled, packetized path may time out and
-            // cause the test to fail.
-            // To save inner loop cycles, presently the packetized components have
-            // a 32-bit timeout cycle counter so 4K cycles is the maximum timeout.
-            // Setting this to 0 disables the timeout.
-            uint32_t timeout_mcycles = packetized_path_timeout_en_g ? 4000 : 0;
-
-            // These could start from 0, but we assign values that are easy to
-            // identify for debug.
-            constexpr uint32_t src_endpoint_start_id = 0xaa;
-            constexpr uint32_t dest_endpoint_start_id = 0xbb;
-
-            constexpr uint32_t num_src_endpoints = 1;
-            constexpr uint32_t num_dest_endpoints = 1;
-
-            std::vector<uint32_t> prefetch_relay_mux_compile_args = {
-                0,                                           // 0: reserved
-                (prefetch_relay_mux_queue_start_addr >> 4),  // 1: rx_queue_start_addr_words
-                (prefetch_relay_mux_queue_size_bytes >> 4),  // 2: rx_queue_size_words
-                num_src_endpoints,                           // 3: mux_fan_in
-                packet_switch_4B_pack(
-                    (uint32_t)phys_prefetch_core_g.x,
-                    (uint32_t)phys_prefetch_core_g.y,
-                    1,
-                    (uint32_t)DispatchRemoteNetworkType::NOC0),  // 4: src 0 info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 5: src 1 info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 6: src 2 info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 7: src 3 info
-                (prefetch_relay_demux_queue_start_addr >> 4),             // 8: remote_tx_queue_start_addr_words
-                (prefetch_relay_demux_queue_size_bytes >> 4),             // 9: remote_tx_queue_size_words
-                (uint32_t)phys_prefetch_relay_demux_core.x,               // 10: remote_tx_x
-                (uint32_t)phys_prefetch_relay_demux_core.y,               // 11: remote_tx_y
-                0,                                                        // 12: remote_tx_queue_id
-                (uint32_t)DispatchRemoteNetworkType::NOC0,                // 13: tx_network_type
-                packetized_path_test_results_addr,                        // 14: test_results_addr
-                packetized_path_test_results_size,                        // 15: test_results_size
-                timeout_mcycles * 1000 * 1000,                            // 16: timeout_cycles
-                0x0,                                                      // 17: output_depacketize
-                0x0,                                                      // 18: output_depacketize info
-                // 19: input 0 packetize info:
-                packet_switch_4B_pack(
-                    0x1,
-                    DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE,
-                    prefetch_downstream_cb_sem,                          // upstream sem
-                    prefetch_d_upstream_cb_sem),                         // local sem
-                packet_switch_4B_pack(0, 0, 0, 0),                       // 20: input 1 packetize info
-                packet_switch_4B_pack(0, 0, 0, 0),                       // 21: input 2 packetize info
-                packet_switch_4B_pack(0, 0, 0, 0),                       // 22: input 3 packetize info
-                packet_switch_4B_pack(src_endpoint_start_id, 0, 0, 0),   // 23: packetized input src id
-                packet_switch_4B_pack(dest_endpoint_start_id, 0, 0, 0),  // 24: packetized input dest id
-            };
-
-            log_info(
-                LogTest, "run prefetch relay mux at x={},y={}", prefetch_relay_mux_core.x, prefetch_relay_mux_core.y);
-
-            std::map<string, string> defines = {
-                {"FD_CORE_TYPE", std::to_string(0)},  // todo, support dispatch on eth
-            };
-
-            auto mux_kernel = tt_metal::CreateKernel(
-                program,
-                "tt_metal/impl/dispatch/kernels/packet_mux.cpp",
-                {prefetch_relay_mux_core},
-                tt_metal::DataMovementConfig{
-                    .processor = tt_metal::DataMovementProcessor::RISCV_0,
-                    .noc = tt_metal::NOC::RISCV_0_default,
-                    .compile_args = prefetch_relay_mux_compile_args,
-                    .defines = defines,
-                });
-
-            uint32_t dest_map_array[4] = {0, 1, 2, 3};
-            uint64_t dest_endpoint_output_map = packet_switch_dest_pack(dest_map_array, 4);
-            std::vector<uint32_t> demux_compile_args = {
-                dest_endpoint_start_id,                        // 0: endpoint_id_start_index
-                (prefetch_relay_demux_queue_start_addr >> 4),  // 1: rx_queue_start_addr_words
-                (prefetch_relay_demux_queue_size_bytes >> 4),  // 2: rx_queue_size_words
-                num_dest_endpoints,                            // 3: demux_fan_out
-                packet_switch_4B_pack(
-                    phys_prefetch_d_core.x,
-                    phys_prefetch_d_core.y,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::NOC0),  // 4: remote_tx_0_info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 5: remote_tx_1_info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 6: remote_tx_2_info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 7: remote_tx_3_info
-                (prefetch_d_buffer_base >> 4),                            // 8: remote_tx_queue_start_addr_words 0
-                prefetch_d_buffer_size_g >> 4,                            // 9: remote_tx_queue_size_words 0
-                0,                                                        // 10: remote_tx_queue_start_addr_words 1
-                0,                                                        // 11: remote_tx_queue_size_words 1
-                0,                                                        // 12: remote_tx_queue_start_addr_words 2
-                0,                                                        // 13: remote_tx_queue_size_words 2
-                0,                                                        // 14: remote_tx_queue_start_addr_words 3
-                0,                                                        // 15: remote_tx_queue_size_words 3
-                (uint32_t)phys_prefetch_relay_mux_core.x,                 // 16: remote_rx_x
-                (uint32_t)phys_prefetch_relay_mux_core.y,                 // 17: remote_rx_y
-                num_dest_endpoints,                                       // 18: remote_rx_queue_id
-                (uint32_t)DispatchRemoteNetworkType::NOC0,                // 19: tx_network_type
-                (uint32_t)(dest_endpoint_output_map >> 32),               // 20: dest_endpoint_output_map_hi
-                (uint32_t)(dest_endpoint_output_map & 0xFFFFFFFF),        // 21: dest_endpoint_output_map_lo
-                packetized_path_test_results_addr,                        // 22: test_results_addr
-                packetized_path_test_results_size,                        // 23: test_results_size
-                timeout_mcycles * 1000 * 1000,                            // 24: timeout_cycles
-                0x1,                                                      // 25: output_depacketize_mask
-                // 26: output 0 packetize info:
-                packet_switch_4B_pack(
-                    DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE,
-                    prefetch_d_upstream_cb_sem,     // downstream sem
-                    prefetch_downstream_cb_sem,     // local sem
-                    0),                             // remove header
-                packet_switch_4B_pack(0, 0, 0, 0),  // 27: output 1 packetize info
-                packet_switch_4B_pack(0, 0, 0, 0),  // 28: output 2 packetize info
-                packet_switch_4B_pack(0, 0, 0, 0),  // 29: output 3 packetize info
-            };
-
-            log_info(
-                LogTest,
-                "run prefetch relay demux at x={},y={}",
-                prefetch_relay_demux_core.x,
-                prefetch_relay_demux_core.y);
-            auto demux_kernel = tt_metal::CreateKernel(
-                program,
-                "tt_metal/impl/dispatch/kernels/packet_demux.cpp",
-                {prefetch_relay_demux_core},
-                tt_metal::DataMovementConfig{
-                    .processor = tt_metal::DataMovementProcessor::RISCV_0,
-                    .noc = tt_metal::NOC::RISCV_0_default,
-                    .compile_args = demux_compile_args,
-                    .defines = defines,
-                });
-        }
-
     } else {
         uint32_t scratch_db_base =
             cmddat_q_base + ((cmddat_q_size_g + noc_read_alignment - 1) / noc_read_alignment * noc_read_alignment);
         TT_ASSERT(scratch_db_base < 1024 * 1024);  // L1 size
-        prefetch_compile_args[13] = scratch_db_base;
+        prefetch_defines["SCRATCH_DB_BASE"] = std::to_string(scratch_db_base);
 
         configure_kernel_variant<true, true>(
             program,
             "tt_metal/impl/dispatch/kernels/cq_prefetch.cpp",
-            prefetch_compile_args,
+            prefetch_defines,
+            {},
             prefetch_core,
             phys_prefetch_core_g,
             {0xffffffff, 0xffffffff},  // upstream core unused
@@ -2116,73 +2081,114 @@ void configure_for_single_chip(
             my_noc_index);
     }
 
-    uint32_t host_completion_queue_wr_ptr =
-        DispatchMemMap::get(DISPATCH_CORE_TYPE).get_host_command_queue_addr(CommandQueueHostAddrType::COMPLETION_Q_WR);
+    uint32_t host_completion_queue_wr_ptr = MetalContext::instance()
+                                                .dispatch_mem_map(DISPATCH_CORE_TYPE)
+                                                .get_host_command_queue_addr(CommandQueueHostAddrType::COMPLETION_Q_WR);
     uint32_t dev_completion_queue_wr_ptr =
-        DispatchMemMap::get(DISPATCH_CORE_TYPE)
+        MetalContext::instance()
+            .dispatch_mem_map(DISPATCH_CORE_TYPE)
             .get_device_command_queue_addr(CommandQueueDeviceAddrType::COMPLETION_Q_WR);
     uint32_t dev_completion_queue_rd_ptr =
-        DispatchMemMap::get(DISPATCH_CORE_TYPE)
+        MetalContext::instance()
+            .dispatch_mem_map(DISPATCH_CORE_TYPE)
             .get_device_command_queue_addr(CommandQueueDeviceAddrType::COMPLETION_Q_RD);
 
-    std::vector<uint32_t> dispatch_compile_args = {
-        dispatch_buffer_base,
-        DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE,
-        DispatchSettings::DISPATCH_BUFFER_SIZE_BLOCKS *
-            DispatchMemMap::get(DISPATCH_CORE_TYPE, 1).dispatch_buffer_block_size_pages(),
-        dispatch_cb_sem,  // overridden below for h
-        split_prefetcher_g ? prefetch_d_downstream_cb_sem
-                           : prefetch_downstream_cb_sem,  // overridden below for dispatch_h
-        DispatchSettings::DISPATCH_BUFFER_SIZE_BLOCKS,
-        prefetch_sync_sem,
-        0,  // true base of hugepage
-        dev_hugepage_completion_buffer_base,
-        DEFAULT_HUGEPAGE_COMPLETION_BUFFER_SIZE,
-        dispatch_buffer_base,
-        (1 << DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE) * dispatch_buffer_pages,
-        0,  // unused on hd, filled in below for h and d
-        0,  // unused on hd, filled in below for h and d
-        0,  // unused unless tunneler is between h and d
-        split_prefetcher_g,
-        NOC_XY_ENCODING(phys_prefetch_core_g.x, phys_prefetch_core_g.y),
-        prefetch_downstream_cb_sem,
-        prefetch_downstream_buffer_pages,
-        num_compute_cores,  // max_write_packed_cores
-        0,
-        DispatchSettings::DISPATCH_MESSAGE_ENTRIES,
-        DispatchSettings::DISPATCH_GO_SIGNAL_NOC_DATA_ENTRIES,
-        0,
-        0,
-        0,
-        host_completion_queue_wr_ptr,
-        dev_completion_queue_wr_ptr,
-        dev_completion_queue_rd_ptr,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        DispatchMemMap::get(DISPATCH_CORE_TYPE).get_dispatch_stream_index(0),
+    std::map<std::string, std::string> dispatch_defines = {
+        {"DISPATCH_CB_BASE", std::to_string(dispatch_buffer_base)},
+        {"DISPATCH_CB_LOG_PAGE_SIZE", std::to_string(DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE)},
+        {"DISPATCH_CB_PAGES",
+         std::to_string(
+             DispatchSettings::DISPATCH_BUFFER_SIZE_BLOCKS *
+             MetalContext::instance().dispatch_mem_map(DISPATCH_CORE_TYPE).dispatch_buffer_block_size_pages())},
+        {"MY_DISPATCH_CB_SEM_ID", std::to_string(dispatch_cb_sem)},  // will be overridden for variants
+        {"UPSTREAM_DISPATCH_CB_SEM_ID",
+         std::to_string(
+             split_prefetcher_g ? prefetch_d_downstream_cb_sem
+                                : prefetch_downstream_cb_sem)},  // will be overridden for variants
+        {"DISPATCH_CB_BLOCKS", std::to_string(DispatchSettings::DISPATCH_BUFFER_SIZE_BLOCKS)},
+        {"UPSTREAM_SYNC_SEM", std::to_string(prefetch_sync_sem)},
+        {"COMMAND_QUEUE_BASE_ADDR", "0"},  // true base of hugepage
+        {"COMPLETION_QUEUE_BASE_ADDR", std::to_string(dev_hugepage_completion_buffer_base)},
+        {"COMPLETION_QUEUE_SIZE", std::to_string(DEFAULT_HUGEPAGE_COMPLETION_BUFFER_SIZE)},
+        {"DOWNSTREAM_CB_BASE", std::to_string(dispatch_buffer_base)},
+        {"DOWNSTREAM_CB_SIZE",
+         std::to_string((1 << DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE) * dispatch_buffer_pages)},
+        {"MY_DOWNSTREAM_CB_SEM_ID", "0"},            // unused on hd, filled in below for h and d
+        {"DOWNSTREAM_CB_SEM_ID", "0"},               // unused on hd, filled in below for h and d
+        {"SPLIT_DISPATCH_PAGE_PREAMBLE_SIZE", "0"},  // unused unless tunneler is between h and d
+        {"SPLIT_PREFETCH", std::to_string(split_prefetcher_g)},
+        {"PREFETCH_H_NOC_XY",
+         std::to_string(tt::tt_metal::MetalContext::instance().hal().noc_xy_encoding(
+             phys_prefetch_core_g.x, phys_prefetch_core_g.y))},
+        {"PREFETCH_H_LOCAL_DOWNSTREAM_SEM_ADDR", std::to_string(prefetch_downstream_cb_sem)},
+        {"PREFETCH_H_MAX_CREDITS", std::to_string(prefetch_downstream_buffer_pages)},
+        {"PACKED_WRITE_MAX_UNICAST_SUB_CMDS", std::to_string(num_compute_cores)},  // max_write_packed_cores
+        {"DISPATCH_S_SYNC_SEM_BASE_ADDR", "0"},
+        {"MAX_NUM_WORKER_SEMS", std::to_string(DispatchSettings::DISPATCH_MESSAGE_ENTRIES)},
+        {"MAX_NUM_GO_SIGNAL_NOC_DATA_ENTRIES", std::to_string(DispatchSettings::DISPATCH_GO_SIGNAL_NOC_DATA_ENTRIES)},
+        {"MCAST_GO_SIGNAL_ADDR", "0"},
+        {"UNICAST_GO_SIGNAL_ADDR", "0"},
+        {"DISTRIBUTED_DISPATCHER", "0"},
+        {"HOST_COMPLETION_Q_WR_PTR", std::to_string(host_completion_queue_wr_ptr)},
+        {"DEV_COMPLETION_Q_WR_PTR", std::to_string(dev_completion_queue_wr_ptr)},
+        {"DEV_COMPLETION_Q_RD_PTR", std::to_string(dev_completion_queue_rd_ptr)},
+        {"FIRST_STREAM_USED",
+         std::to_string(MetalContext::instance().dispatch_mem_map(DISPATCH_CORE_TYPE).get_dispatch_stream_index(0))},
+        {"VIRTUALIZE_UNICAST_CORES", "0"},    // unused for single device
+        {"NUM_VIRTUAL_UNICAST_CORES", "0"},   // unused for single device
+        {"NUM_PHYSICAL_UNICAST_CORES", "0"},  // unused for single device
+        {"FABRIC_HEADER_RB_BASE", "0"},
+        {"FABRIC_HEADER_RB_ENTRIES", "0"},
+        {"MY_FABRIC_SYNC_STATUS_ADDR", "0"},
+        {"FABRIC_MUX_X", "0"},
+        {"FABRIC_MUX_Y", "0"},
+        {"FABRIC_MUX_NUM_BUFFERS_PER_CHANNEL", "0"},
+        {"FABRIC_MUX_CHANNEL_BUFFER_SIZE_BYTES", "0"},
+        {"FABRIC_MUX_CHANNEL_BASE_ADDRESS", "0"},
+        {"FABRIC_MUX_CONNECTION_INFO_ADDRESS", "0"},
+        {"FABRIC_MUX_CONNECTION_HANDSHAKE_ADDRESS", "0"},
+        {"FABRIC_MUX_FLOW_CONTROL_ADDRESS", "0"},
+        {"FABRIC_MUX_BUFFER_INDEX_ADDRESS", "0"},
+        {"FABRIC_MUX_STATUS_ADDRESS", "0"},
+        {"FABRIC_MUX_TERMINATION_SIGNAL_ADDRESS", "0"},
+        {"WORKER_CREDITS_STREAM_ID", "0"},
+        {"FABRIC_WORKER_FLOW_CONTROL_SEM", "0"},
+        {"FABRIC_WORKER_TEARDOWN_SEM", "0"},
+        {"FABRIC_WORKER_BUFFER_INDEX_SEM", "0"},
+        {"NUM_HOPS", "0"},
+        {"MY_DEV_ID", "0"},
+        {"EW_DIM", "0"},
+        {"TO_MESH_ID", "0"},
+        {"TO_DEV_ID", "0"},
+        {"ROUTER_DIRECTION", "0"},
+        {"FABRIC_2D", "0"},
+        {"WORKER_MCAST_GRID", "0"},
+        {"NUM_WORKER_CORES_TO_MCAST", "0"},
     };
 
     CoreCoord phys_upstream_from_dispatch_core = split_prefetcher_g ? phys_prefetch_d_core : phys_prefetch_core_g;
     if (split_dispatcher_g) {
-        log_info(LogTest, "split dispatcher test, packetized_path_en={}", packetized_path_en_g);
+        log_info(LogTest, "split dispatcher test");
 
         // dispatch_hd and dispatch_d
-        uint32_t dispatch_d_preamble_size = packetized_path_en_g ? sizeof(dispatch_packet_header_t) : 0;
-        dispatch_compile_args[12] = dispatch_downstream_cb_sem;
-        dispatch_compile_args[13] = dispatch_h_cb_sem;
-        dispatch_compile_args[14] = dispatch_d_preamble_size;
-        dispatch_compile_args[21] = DispatchSettings::DISPATCH_MESSAGE_ENTRIES;
-        dispatch_compile_args[22] = DispatchSettings::DISPATCH_GO_SIGNAL_NOC_DATA_ENTRIES;
-        CoreCoord phys_dispatch_d_downstream_core =
-            packetized_path_en_g ? phys_dispatch_relay_mux_core : phys_dispatch_h_core;
+        constexpr uint32_t dispatch_d_preamble_size = 0;
+        CoreCoord phys_dispatch_d_downstream_core = phys_dispatch_h_core;
+
+        std::map<std::string, std::string> dispatch_d_defines = dispatch_defines;
+        dispatch_d_defines["MY_DOWNSTREAM_CB_SEM_ID"] = std::to_string(dispatch_downstream_cb_sem);
+        dispatch_d_defines["DOWNSTREAM_CB_SEM_ID"] = std::to_string(dispatch_h_cb_sem);
+        dispatch_d_defines["SPLIT_DISPATCH_PAGE_PREAMBLE_SIZE"] = std::to_string(dispatch_d_preamble_size);
+        dispatch_d_defines["MAX_NUM_WORKER_SEMS"] = std::to_string(DispatchSettings::DISPATCH_MESSAGE_ENTRIES);
+        dispatch_d_defines["MAX_NUM_GO_SIGNAL_NOC_DATA_ENTRIES"] =
+            std::to_string(DispatchSettings::DISPATCH_GO_SIGNAL_NOC_DATA_ENTRIES);
+        dispatch_d_defines["IS_D_VARIANT"] = "1";
+        dispatch_d_defines["IS_H_VARIANT"] = "0";
+
         configure_kernel_variant<true, false>(
             program,
             "tt_metal/impl/dispatch/kernels/cq_dispatch.cpp",
-            dispatch_compile_args,
+            dispatch_d_defines,
+            {},
             dispatch_core,
             phys_dispatch_core,
             phys_upstream_from_dispatch_core,
@@ -2193,21 +2199,26 @@ void configure_for_single_chip(
             my_noc_index);
 
         // dispatch_h
-        dispatch_compile_args[3] = dispatch_h_cb_sem;
-        dispatch_compile_args[4] = dispatch_downstream_cb_sem;
-        dispatch_compile_args[12] = dispatch_h_cb_sem;
-        dispatch_compile_args[13] = dispatch_downstream_cb_sem;
-        dispatch_compile_args[14] = 0;  // preamble size
-        dispatch_compile_args[21] =
-            1;  // max_num_worker_sems is used for array sizing, set to 1 even if array isn't used
-        dispatch_compile_args[22] =
-            1;  // max_num_go_signal_noc_data_entries is used for array sizing, set to 1 even if array isn't used
-        CoreCoord phys_dispatch_h_upstream_core =
-            packetized_path_en_g ? phys_dispatch_relay_demux_core : phys_dispatch_core;
+        CoreCoord phys_dispatch_h_upstream_core = phys_dispatch_core;
+
+        std::map<std::string, std::string> dispatch_h_defines = dispatch_defines;
+        dispatch_h_defines["MY_DISPATCH_CB_SEM_ID"] = std::to_string(dispatch_h_cb_sem);
+        dispatch_h_defines["UPSTREAM_DISPATCH_CB_SEM_ID"] = std::to_string(dispatch_downstream_cb_sem);
+        dispatch_h_defines["MY_DOWNSTREAM_CB_SEM_ID"] = std::to_string(dispatch_h_cb_sem);
+        dispatch_h_defines["DOWNSTREAM_CB_SEM_ID"] = std::to_string(dispatch_downstream_cb_sem);
+        dispatch_h_defines["SPLIT_DISPATCH_PAGE_PREAMBLE_SIZE"] = "0";  // preamble size
+        dispatch_h_defines["MAX_NUM_WORKER_SEMS"] =
+            "1";  // max_num_worker_sems is used for array sizing, set to 1 even if array isn't used
+        dispatch_h_defines["MAX_NUM_GO_SIGNAL_NOC_DATA_ENTRIES"] =
+            "1";  // max_num_go_signal_noc_data_entries is used for array sizing, set to 1 even if array isn't used
+        dispatch_h_defines["IS_D_VARIANT"] = "0";
+        dispatch_h_defines["IS_H_VARIANT"] = "1";
+
         configure_kernel_variant<false, true>(
             program,
             "tt_metal/impl/dispatch/kernels/cq_dispatch.cpp",
-            dispatch_compile_args,
+            dispatch_h_defines,
+            {},
             dispatch_h_core,
             phys_dispatch_h_core,
             phys_dispatch_h_upstream_core,
@@ -2216,1046 +2227,12 @@ void configure_for_single_chip(
             my_noc_index,
             dispatch_upstream_noc_index,
             my_noc_index);
-
-        if (packetized_path_en_g) {
-            uint32_t dispatch_relay_mux_queue_start_addr = dispatch_buffer_base;
-            uint32_t dispatch_relay_mux_queue_size_bytes = dispatch_buffer_page_size_g * dispatch_buffer_pages;
-
-            // Packetized path buffer, can be at any available address.
-            uint32_t dispatch_relay_demux_queue_start_addr = l1_unreserved_base;
-            constexpr uint32_t dispatch_relay_demux_queue_size_bytes = 0x10000;
-
-            // For tests with checkers enabled, packetized path may time out and
-            // cause the test to fail.
-            // To save inner loop cycles, presently the packetized components have
-            // a 32-bit timeout cycle counter so 4K cycles is the maximum timeout.
-            // Setting this to 0 disables the timeout.
-            uint32_t timeout_mcycles = packetized_path_timeout_en_g ? 4000 : 0;
-
-            // These could start from 0, but we assign values that are easy to
-            // identify for debug.
-            constexpr uint32_t src_endpoint_start_id = 0xcc;
-            constexpr uint32_t dest_endpoint_start_id = 0xdd;
-
-            constexpr uint32_t num_src_endpoints = 1;
-            constexpr uint32_t num_dest_endpoints = 1;
-
-            std::vector<uint32_t> dispatch_relay_mux_compile_args = {
-                0,                                           // 0: reserved
-                (dispatch_relay_mux_queue_start_addr >> 4),  // 1: rx_queue_start_addr_words
-                (dispatch_relay_mux_queue_size_bytes >> 4),  // 2: rx_queue_size_words
-                num_src_endpoints,                           // 3: mux_fan_in
-                packet_switch_4B_pack(
-                    (uint32_t)phys_dispatch_core.x,
-                    (uint32_t)phys_dispatch_core.y,
-                    1,
-                    (uint32_t)DispatchRemoteNetworkType::NOC0),  // 4: src 0 info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 5: src 1 info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 6: src 2 info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 7: src 3 info
-                (dispatch_relay_demux_queue_start_addr >> 4),             // 8: remote_tx_queue_start_addr_words
-                (dispatch_relay_demux_queue_size_bytes >> 4),             // 9: remote_tx_queue_size_words
-                (uint32_t)phys_dispatch_relay_demux_core.x,               // 10: remote_tx_x
-                (uint32_t)phys_dispatch_relay_demux_core.y,               // 11: remote_tx_y
-                0,                                                        // 12: remote_tx_queue_id
-                (uint32_t)DispatchRemoteNetworkType::NOC0,                // 13: tx_network_type
-                packetized_path_test_results_addr,                        // 14: test_results_addr
-                packetized_path_test_results_size,                        // 15: test_results_size
-                timeout_mcycles * 1000 * 1000,                            // 16: timeout_cycles
-                0x0,                                                      // 17: output_depacketize
-                0x0,                                                      // 18: output_depacketize info
-                // 19: input 0 packetize info:
-                packet_switch_4B_pack(
-                    0x1,
-                    DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE,
-                    dispatch_downstream_cb_sem,                          // upstream sem
-                    dispatch_h_cb_sem),                                  // local sem
-                packet_switch_4B_pack(0, 0, 0, 0),                       // 20: input 1 packetize info
-                packet_switch_4B_pack(0, 0, 0, 0),                       // 21: input 2 packetize info
-                packet_switch_4B_pack(0, 0, 0, 0),                       // 22: input 3 packetize info
-                packet_switch_4B_pack(src_endpoint_start_id, 0, 0, 0),   // 23: packetized input src id
-                packet_switch_4B_pack(dest_endpoint_start_id, 0, 0, 0),  // 24: packetized input dest id
-            };
-
-            log_info(
-                LogTest, "run dispatch relay mux at x={},y={}", dispatch_relay_mux_core.x, dispatch_relay_mux_core.y);
-
-            std::map<string, string> defines = {
-                {"FD_CORE_TYPE", std::to_string(0)},  // todo, support dispatch on eth
-            };
-
-            auto mux_kernel = tt_metal::CreateKernel(
-                program,
-                "tt_metal/impl/dispatch/kernels/packet_mux.cpp",
-                {dispatch_relay_mux_core},
-                tt_metal::DataMovementConfig{
-                    .processor = tt_metal::DataMovementProcessor::RISCV_0,
-                    .noc = tt_metal::NOC::RISCV_0_default,
-                    .compile_args = dispatch_relay_mux_compile_args,
-                    .defines = defines,
-                });
-
-            uint32_t dest_map_array[4] = {0, 1, 2, 3};
-            uint64_t dest_endpoint_output_map = packet_switch_dest_pack(dest_map_array, 4);
-            std::vector<uint32_t> demux_compile_args = {
-                dest_endpoint_start_id,                        // 0: endpoint_id_start_index
-                (dispatch_relay_demux_queue_start_addr >> 4),  // 1: rx_queue_start_addr_words
-                (dispatch_relay_demux_queue_size_bytes >> 4),  // 2: rx_queue_size_words
-                num_dest_endpoints,                            // 3: demux_fan_out
-                packet_switch_4B_pack(
-                    phys_dispatch_h_core.x,
-                    phys_dispatch_h_core.y,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::NOC0),  // 4: remote_tx_0_info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 5: remote_tx_1_info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 6: remote_tx_2_info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),     // 7: remote_tx_3_info
-                (dispatch_buffer_base >> 4),                                 // 8: remote_tx_queue_start_addr_words 0
-                (dispatch_buffer_page_size_g * dispatch_buffer_pages) >> 4,  // 9: remote_tx_queue_size_words 0
-                0,                                                           // 10: remote_tx_queue_start_addr_words 1
-                0,                                                           // 11: remote_tx_queue_size_words 1
-                0,                                                           // 12: remote_tx_queue_start_addr_words 2
-                0,                                                           // 13: remote_tx_queue_size_words 2
-                0,                                                           // 14: remote_tx_queue_start_addr_words 3
-                0,                                                           // 15: remote_tx_queue_size_words 3
-                (uint32_t)phys_dispatch_relay_mux_core.x,                    // 16: remote_rx_x
-                (uint32_t)phys_dispatch_relay_mux_core.y,                    // 17: remote_rx_y
-                num_dest_endpoints,                                          // 18: remote_rx_queue_id
-                (uint32_t)DispatchRemoteNetworkType::NOC0,                   // 19: tx_network_type
-                (uint32_t)(dest_endpoint_output_map >> 32),                  // 20: dest_endpoint_output_map_hi
-                (uint32_t)(dest_endpoint_output_map & 0xFFFFFFFF),           // 21: dest_endpoint_output_map_lo
-                packetized_path_test_results_addr,                           // 22: test_results_addr
-                packetized_path_test_results_size,                           // 23: test_results_size
-                timeout_mcycles * 1000 * 1000,                               // 24: timeout_cycles
-                0x1,                                                         // 25: output_depacketize_mask
-                // 26: output 0 packetize info:
-                packet_switch_4B_pack(
-                    DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE,
-                    dispatch_h_cb_sem,              // downstream sem
-                    dispatch_downstream_cb_sem,     // local sem
-                    1),                             // remove header
-                packet_switch_4B_pack(0, 0, 0, 0),  // 27: output 1 packetize info
-                packet_switch_4B_pack(0, 0, 0, 0),  // 28: output 2 packetize info
-                packet_switch_4B_pack(0, 0, 0, 0),  // 29: output 3 packetize info
-            };
-
-            log_info(
-                LogTest,
-                "run dispatch relay demux at x={},y={}",
-                dispatch_relay_demux_core.x,
-                dispatch_relay_demux_core.y);
-            auto demux_kernel = tt_metal::CreateKernel(
-                program,
-                "tt_metal/impl/dispatch/kernels/packet_demux.cpp",
-                {dispatch_relay_demux_core},
-                tt_metal::DataMovementConfig{
-                    .processor = tt_metal::DataMovementProcessor::RISCV_0,
-                    .noc = tt_metal::NOC::RISCV_0_default,
-                    .compile_args = demux_compile_args,
-                    .defines = defines,
-                });
-        }
-
     } else {
         configure_kernel_variant<true, true>(
             program,
             "tt_metal/impl/dispatch/kernels/cq_dispatch.cpp",
-            dispatch_compile_args,
-            dispatch_core,
-            phys_dispatch_core,
-            phys_upstream_from_dispatch_core,
-            {0xffffffff, 0xffffffff},
-            device,
-            my_noc_index,
-            dispatch_upstream_noc_index,
-            my_noc_index);
-    }
-}
-
-// This is, sadly, copied and modified from above
-// TODO: clean up, maybe leverage runtime structures
-void configure_for_multi_chip(
-    IDevice* device,
-    Program& program,
-    IDevice* device_r,
-    Program& program_r,
-    int device_id_l,
-    int device_id_r,
-    void*& host_hugepage_base,
-    uint32_t prefetch_q_base,
-    uint32_t prefetch_q_rd_ptr_addr,
-    CoreCoord& phys_prefetch_relay_mux_core,
-    CoreCoord& phys_prefetch_relay_demux_core,
-    CoreCoord& phys_dispatch_relay_mux_core,
-    CoreCoord& phys_dispatch_relay_demux_core,
-    uint32_t& packetized_path_test_results_addr,
-    uint32_t packetized_path_test_results_size,
-    uint32_t dev_hugepage_base_g) {
-    uint32_t dispatch_buffer_pages = DispatchMemMap::get(DISPATCH_CORE_TYPE, 1).dispatch_buffer_block_size_pages() *
-                                     DispatchSettings::DISPATCH_BUFFER_SIZE_BLOCKS;
-    uint32_t num_compute_cores =
-        device->compute_with_storage_grid_size().x * device->compute_with_storage_grid_size().y;
-    TT_ASSERT(
-        num_compute_cores == (device->compute_with_storage_grid_size().x * device->compute_with_storage_grid_size().y));
-
-    CoreCoord prefetch_core = {0, 0};
-    CoreCoord prefetch_d_core = {3, 0};
-    CoreCoord dispatch_core = {4, 0};
-    CoreCoord dispatch_h_core = {7, 0};
-
-    phys_prefetch_core_g = device->worker_core_from_logical_core(prefetch_core);
-    CoreCoord phys_prefetch_d_core = device_r->worker_core_from_logical_core(prefetch_d_core);
-    CoreCoord phys_dispatch_core = device_r->worker_core_from_logical_core(dispatch_core);
-    CoreCoord phys_dispatch_h_core = device->worker_core_from_logical_core(dispatch_h_core);
-
-    // Packetized relay nodes - instantiated only if packetized_path_en_g is set
-    CoreCoord prefetch_relay_mux_core = {1, 0};
-    CoreCoord prefetch_relay_demux_core = {2, 0};
-    CoreCoord dispatch_relay_mux_core = {5, 0};
-    CoreCoord dispatch_relay_demux_core = {6, 0};
-
-    phys_prefetch_relay_mux_core = device->worker_core_from_logical_core(prefetch_relay_mux_core);
-    phys_prefetch_relay_demux_core = device_r->worker_core_from_logical_core(prefetch_relay_demux_core);
-    phys_dispatch_relay_mux_core = device_r->worker_core_from_logical_core(dispatch_relay_mux_core);
-    phys_dispatch_relay_demux_core = device->worker_core_from_logical_core(dispatch_relay_demux_core);
-    CoreCoord tunneler_logical_core = device->get_ethernet_sockets(device_id_r)[0];
-    CoreCoord tunneler_phys_core = device->ethernet_core_from_logical_core(tunneler_logical_core);
-    CoreCoord r_tunneler_logical_core = device_r->get_ethernet_sockets(device_id_l)[0];
-    CoreCoord r_tunneler_phys_core = device_r->ethernet_core_from_logical_core(r_tunneler_logical_core);
-    log_info(LogTest, "Left Tunneler = {}", tunneler_logical_core.str());
-    log_info(LogTest, "Right Tunneler = {}", r_tunneler_logical_core.str());
-
-    // Packetized components will write their status + a few debug values here:
-    uint32_t l1_unreserved_base = device->allocator()->get_base_allocator_addr(HalMemType::L1);
-    packetized_path_test_results_addr = l1_unreserved_base;
-    uint32_t tunneler_queue_start_addr = 0x19000;
-    uint32_t tunneler_queue_size_bytes = 0x10000;
-    uint32_t tunneler_test_results_addr = 0x39000;
-    uint32_t tunneler_test_results_size = 0x7000;
-
-    // Want different buffers on each core, instead use big buffer and self-manage it
-    uint32_t l1_unreserved_base_aligned = tt::align(
-        l1_unreserved_base + packetized_path_test_results_size,
-        (1 << DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE));  // Was aligned, lately.
-    l1_buf_base_g =
-        l1_unreserved_base_aligned + (1 << DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE);  // Reserve a page.
-    TT_ASSERT((l1_buf_base_g & ((1 << DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE) - 1)) == 0);
-
-    uint32_t dispatch_buffer_base = l1_buf_base_g;
-    uint32_t prefetch_d_buffer_base = l1_buf_base_g;
-    uint32_t prefetch_d_buffer_pages = prefetch_d_buffer_size_g >> DispatchSettings::PREFETCH_D_BUFFER_LOG_PAGE_SIZE;
-    prefetch_q_base = l1_buf_base_g;
-    prefetch_q_rd_ptr_addr = l1_unreserved_base_aligned;
-    dispatch_wait_addr_g = l1_unreserved_base_aligned + hal_ref.get_alignment(HalMemType::L1);
-    vector<uint32_t> zero_data(0);
-    llrt::write_hex_vec_to_core(device_r->id(), phys_dispatch_core, zero_data, dispatch_wait_addr_g);
-
-    uint32_t prefetch_q_size = prefetch_q_entries_g * sizeof(DispatchSettings::prefetch_q_entry_type);
-    uint32_t noc_read_alignment = hal_ref.get_alignment(HalMemType::HOST);
-    uint32_t cmddat_q_base =
-        prefetch_q_base + ((prefetch_q_size + noc_read_alignment - 1) / noc_read_alignment * noc_read_alignment);
-
-    // Implementation syncs w/ device on prefetch_q but not on hugepage, ie, assumes we can't run
-    // so far ahead in the hugepage that we overright un-read commands since we'll first
-    // stall on the prefetch_q
-    TT_ASSERT(
-        hugepage_issue_buffer_size_g > prefetch_q_entries_g * max_prefetch_command_size_g,
-        "Shrink the max command size or grow the hugepage buffer size or shrink the prefetch_q size");
-    TT_ASSERT(cmddat_q_size_g >= 2 * max_prefetch_command_size_g);
-
-    // NOTE: this test hijacks hugepage
-    chip_id_t mmio_device_id = tt::Cluster::instance().get_associated_mmio_device(device->id());
-    uint16_t channel = tt::Cluster::instance().get_assigned_channel_for_device(device->id());
-    host_hugepage_base = (void*)tt::Cluster::instance().host_dma_address(0, mmio_device_id, channel);
-    host_hugepage_base = (void*)((uint8_t*)host_hugepage_base + dev_hugepage_base_g);
-    host_hugepage_completion_buffer_base_g = (void*)((uint8_t*)host_hugepage_base + hugepage_issue_buffer_size_g);
-    uint32_t dev_hugepage_completion_buffer_base = dev_hugepage_base_g + hugepage_issue_buffer_size_g;
-    uint32_t* host_hugepage_completion_buffer = (uint32_t*)host_hugepage_completion_buffer_base_g;
-    vector<uint32_t> tmp = {dev_hugepage_completion_buffer_base >> 4};
-    CoreCoord phys_dispatch_host_core = split_dispatcher_g ? phys_dispatch_h_core : phys_dispatch_core;
-    uint32_t completion_q_wr_ptr = DispatchMemMap::get(DISPATCH_CORE_TYPE)
-                                       .get_device_command_queue_addr(CommandQueueDeviceAddrType::COMPLETION_Q_WR);
-    uint32_t completion_q_rd_ptr = DispatchMemMap::get(DISPATCH_CORE_TYPE)
-                                       .get_device_command_queue_addr(CommandQueueDeviceAddrType::COMPLETION_Q_RD);
-    tt::llrt::write_hex_vec_to_core(device->id(), phys_dispatch_host_core, tmp, completion_q_wr_ptr);
-    tt::llrt::write_hex_vec_to_core(device->id(), phys_dispatch_host_core, tmp, completion_q_rd_ptr);
-    dirty_host_completion_buffer(host_hugepage_completion_buffer);
-
-    const uint32_t prefetch_core_sem_0_id = tt_metal::CreateSemaphore(program, {prefetch_core}, 0);
-    const uint32_t prefetch_d_core_sem_0_id = tt_metal::CreateSemaphore(program_r, {prefetch_d_core}, 0);
-    TT_ASSERT(prefetch_core_sem_0_id == prefetch_d_core_sem_0_id);
-    if (packetized_path_en_g) {
-        const uint32_t prefetch_relay_mux_core_sem_0_id =
-            tt_metal::CreateSemaphore(program, {prefetch_relay_mux_core}, 0);  // unused
-        const uint32_t prefetch_relay_demux_core_sem_0_id =
-            tt_metal::CreateSemaphore(program_r, {prefetch_relay_demux_core}, 0);  // unused
-        TT_ASSERT(prefetch_relay_mux_core_sem_0_id == prefetch_relay_demux_core_sem_0_id);
-        TT_ASSERT(prefetch_relay_mux_core_sem_0_id == prefetch_core_sem_0_id);
-    }
-    const uint32_t prefetch_sync_sem = prefetch_core_sem_0_id;
-
-    const uint32_t prefetch_downstream_buffer_pages =
-        split_prefetcher_g ? prefetch_d_buffer_pages : dispatch_buffer_pages;
-    const uint32_t prefetch_core_sem_1_id =
-        tt_metal::CreateSemaphore(program, {prefetch_core}, prefetch_downstream_buffer_pages);
-    if (packetized_path_en_g) {
-        // for the unpacketize stage, we use rptr/wptr for flow control, and poll semaphore
-        // value only to update the rptr:
-        const uint32_t prefetch_relay_demux_core_sem_1_id =
-            tt_metal::CreateSemaphore(program_r, {prefetch_relay_demux_core}, 0);
-        TT_ASSERT(prefetch_core_sem_1_id == prefetch_relay_demux_core_sem_1_id);
-    }
-    const uint32_t prefetch_downstream_cb_sem = prefetch_core_sem_1_id;
-
-    const uint32_t prefetch_d_core_sem_1_id = tt_metal::CreateSemaphore(program_r, {prefetch_d_core}, 0);
-    const uint32_t prefetch_d_core_sem_2_id =
-        tt_metal::CreateSemaphore(program_r, {prefetch_d_core}, dispatch_buffer_pages);
-    if (packetized_path_en_g) {
-        const uint32_t prefetch_relay_mux_core_sem_1_id =
-            tt_metal::CreateSemaphore(program, {prefetch_relay_mux_core}, 0);
-        TT_ASSERT(prefetch_d_core_sem_1_id == prefetch_relay_mux_core_sem_1_id);
-    }
-    const uint32_t prefetch_d_upstream_cb_sem = prefetch_d_core_sem_1_id;
-    const uint32_t prefetch_d_downstream_cb_sem = prefetch_d_core_sem_2_id;
-
-    const uint32_t dispatch_core_sem_0_id = tt_metal::CreateSemaphore(program_r, {dispatch_core}, 0);
-    const uint32_t dispatch_relay_demux_core_sem_0_id =
-        tt_metal::CreateSemaphore(program, {dispatch_relay_demux_core}, 0);  // unused
-    TT_ASSERT(dispatch_core_sem_0_id == dispatch_relay_demux_core_sem_0_id);
-    const uint32_t dispatch_sync_sem = dispatch_core_sem_0_id;
-
-    const uint32_t dispatch_core_sem_1_id = tt_metal::CreateSemaphore(program_r, {dispatch_core}, 0);
-    const uint32_t dispatch_relay_demux_core_sem_1_id =
-        tt_metal::CreateSemaphore(program, {dispatch_relay_demux_core}, 0);  // unused
-    TT_ASSERT(dispatch_core_sem_1_id == dispatch_relay_demux_core_sem_1_id);
-    const uint32_t dispatch_cb_sem = dispatch_core_sem_1_id;
-
-    const uint32_t dispatch_core_sem_2_id =
-        tt_metal::CreateSemaphore(program_r, {dispatch_core}, dispatch_buffer_pages);
-    // for the unpacketize stage, we use rptr/wptr for flow control, and poll semaphore
-    // value only to update the rptr:
-    const uint32_t dispatch_relay_demux_core_sem_2_id =
-        tt_metal::CreateSemaphore(program, {dispatch_relay_demux_core}, 0);
-    TT_ASSERT(dispatch_core_sem_2_id == dispatch_relay_demux_core_sem_2_id);
-    const uint32_t dispatch_downstream_cb_sem = dispatch_core_sem_2_id;
-
-    const uint32_t dispatch_h_core_sem_0_id = tt_metal::CreateSemaphore(program, {dispatch_h_core}, 0);
-    const uint32_t dispatch_relay_mux_core_sem_0_id =
-        tt_metal::CreateSemaphore(program_r, {dispatch_relay_mux_core}, 0);
-    TT_ASSERT(dispatch_h_core_sem_0_id == dispatch_relay_mux_core_sem_0_id);
-    const uint32_t dispatch_h_cb_sem = dispatch_h_core_sem_0_id;
-
-    std::vector<uint32_t> prefetch_compile_args = {
-        dispatch_buffer_base,                              // overridden below for prefetch_h
-        DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE,  // overridden below for prefetch_h
-        dispatch_buffer_pages,                             // overridden below for prefetch_h
-        prefetch_downstream_cb_sem,                        // overridden below for prefetch_d
-        dispatch_cb_sem,                                   // overridden below for prefetch_h
-        dev_hugepage_base_g,
-        hugepage_issue_buffer_size_g,
-        prefetch_q_base,
-        prefetch_q_entries_g * (uint32_t)sizeof(DispatchSettings::prefetch_q_entry_type),
-        prefetch_q_rd_ptr_addr,
-        prefetch_q_rd_ptr_addr + sizeof(uint32_t),
-        cmddat_q_base,    // overridden for split below
-        cmddat_q_size_g,  // overridden for split below
-        0,                // scratch_db_base filled in below if used
-        scratch_db_size_g,
-        prefetch_sync_sem,
-        prefetch_d_buffer_pages,     // prefetch_d only
-        prefetch_d_upstream_cb_sem,  // prefetch_d only
-        prefetch_downstream_cb_sem,  // prefetch_d only
-        DispatchSettings::PREFETCH_D_BUFFER_LOG_PAGE_SIZE,
-        DispatchSettings::PREFETCH_D_BUFFER_BLOCKS,  // prefetch_d only
-        0,                                            // unused: for prefetch_d <--> dispatch_d
-        0,                                            // unused: for prefetch_d <--> dispatch_d
-        0,                                            // unused: for prefetch_d <--> dispatch_d
-        0,                                            // unused: for prefetch_d <--> dispatch_d
-        0,                                            // unused: for prefetch_d <--> dispatch_d
-    };
-
-    constexpr NOC my_noc_index = NOC::NOC_0;
-    constexpr NOC dispatch_upstream_noc_index = NOC::NOC_1;
-
-    if (split_prefetcher_g) {
-        log_info(LogTest, "split prefetcher test, packetized_path_en={}", packetized_path_en_g);
-
-        // prefetch_d
-        uint32_t scratch_db_base =
-            prefetch_d_buffer_base + (((prefetch_d_buffer_pages << DispatchSettings::PREFETCH_D_BUFFER_LOG_PAGE_SIZE) +
-                                       noc_read_alignment - 1) /
-                                      noc_read_alignment * noc_read_alignment);
-        TT_ASSERT(scratch_db_base < 1024 * 1024);  // L1 size
-
-        prefetch_compile_args[3] = prefetch_d_downstream_cb_sem;
-        prefetch_compile_args[11] = prefetch_d_buffer_base;
-        prefetch_compile_args[12] = prefetch_d_buffer_pages * (1 << DispatchSettings::PREFETCH_D_BUFFER_LOG_PAGE_SIZE);
-        prefetch_compile_args[13] = scratch_db_base;
-
-        CoreCoord phys_prefetch_d_upstream_core =
-            packetized_path_en_g ? phys_prefetch_relay_demux_core : phys_prefetch_core_g;
-        configure_kernel_variant<true, false>(
-            program_r,
-            "tt_metal/impl/dispatch/kernels/cq_prefetch.cpp",
-            prefetch_compile_args,
-            prefetch_d_core,
-            phys_prefetch_d_core,
-            phys_prefetch_d_upstream_core,
-            phys_dispatch_core,
-            device,
-            my_noc_index,
-            my_noc_index,
-            my_noc_index);
-
-        // prefetch_h
-        prefetch_compile_args[0] = prefetch_d_buffer_base;
-        prefetch_compile_args[1] = DispatchSettings::PREFETCH_D_BUFFER_LOG_PAGE_SIZE;
-        prefetch_compile_args[2] = prefetch_d_buffer_pages;
-        prefetch_compile_args[3] = prefetch_downstream_cb_sem;
-        prefetch_compile_args[4] = prefetch_d_upstream_cb_sem;
-        prefetch_compile_args[11] = cmddat_q_base;
-        prefetch_compile_args[12] = cmddat_q_size_g;
-        prefetch_compile_args[13] = 0;
-
-        CoreCoord phys_prefetch_h_downstream_core =
-            packetized_path_en_g ? phys_prefetch_relay_mux_core : phys_prefetch_d_core;
-        configure_kernel_variant<false, true>(
-            program,
-            "tt_metal/impl/dispatch/kernels/cq_prefetch.cpp",
-            prefetch_compile_args,
-            prefetch_core,
-            phys_prefetch_core_g,
-            {0xffffffff, 0xffffffff},  // upstream core unused
-            phys_prefetch_h_downstream_core,
-            device,
-            my_noc_index,
-            my_noc_index,
-            my_noc_index);
-
-        if (packetized_path_en_g) {
-            uint32_t prefetch_relay_mux_queue_start_addr = prefetch_d_buffer_base;
-            uint32_t prefetch_relay_mux_queue_size_bytes = prefetch_d_buffer_size_g;
-
-            // Packetized path buffer, can be at any available address.
-            uint32_t prefetch_relay_demux_queue_start_addr = l1_unreserved_base;
-            constexpr uint32_t prefetch_relay_demux_queue_size_bytes = 0x10000;
-
-            // For tests with checkers enabled, packetized path may time out and
-            // cause the test to fail.
-            // To save inner loop cycles, presently the packetized components have
-            // a 32-bit timeout cycle counter so 4K cycles is the maximum timeout.
-            // Setting this to 0 disables the timeout.
-            uint32_t timeout_mcycles = packetized_path_timeout_en_g ? 4000 : 0;
-
-            // These could start from 0, but we assign values that are easy to
-            // identify for debug.
-            constexpr uint32_t src_endpoint_start_id = 0xaa;
-            constexpr uint32_t dest_endpoint_start_id = 0xbb;
-
-            constexpr uint32_t num_src_endpoints = 1;
-            constexpr uint32_t num_dest_endpoints = 1;
-
-            std::vector<uint32_t> prefetch_relay_mux_compile_args = {
-                0,                                           // 0: reserved
-                (prefetch_relay_mux_queue_start_addr >> 4),  // 1: rx_queue_start_addr_words
-                (prefetch_relay_mux_queue_size_bytes >> 4),  // 2: rx_queue_size_words
-                num_src_endpoints,                           // 3: mux_fan_in
-                packet_switch_4B_pack(
-                    (uint32_t)phys_prefetch_core_g.x,
-                    (uint32_t)phys_prefetch_core_g.y,
-                    1,
-                    (uint32_t)DispatchRemoteNetworkType::NOC0),  // 4: src 0 info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 5: src 1 info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 6: src 2 info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 7: src 3 info
-                (tunneler_queue_start_addr >> 4),                         // 8: remote_tx_queue_start_addr_words
-                (tunneler_queue_size_bytes >> 4),                         // 9: remote_tx_queue_size_words
-                (uint32_t)tunneler_phys_core.x,                           // 10: remote_tx_x
-                (uint32_t)tunneler_phys_core.y,                           // 11: remote_tx_y
-                0,                                                        // 12: remote_tx_queue_id
-                (uint32_t)DispatchRemoteNetworkType::NOC0,                // 13: tx_network_type
-                packetized_path_test_results_addr,                        // 14: test_results_addr
-                packetized_path_test_results_size,                        // 15: test_results_size
-                timeout_mcycles * 1000 * 1000,                            // 16: timeout_cycles
-                0x0,                                                      // 17: output_depacketize
-                0x0,                                                      // 18: output_depacketize info
-                // 19: input 0 packetize info:
-                packet_switch_4B_pack(
-                    0x1,
-                    DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE,
-                    prefetch_downstream_cb_sem,                          // upstream sem
-                    prefetch_d_upstream_cb_sem),                         // local sem
-                packet_switch_4B_pack(0, 0, 0, 0),                       // 20: input 1 packetize info
-                packet_switch_4B_pack(0, 0, 0, 0),                       // 21: input 2 packetize info
-                packet_switch_4B_pack(0, 0, 0, 0),                       // 22: input 3 packetize info
-                packet_switch_4B_pack(src_endpoint_start_id, 0, 0, 0),   // 23: packetized input src id
-                packet_switch_4B_pack(dest_endpoint_start_id, 0, 0, 0),  // 24: packetized input dest id
-            };
-
-            log_info(
-                LogTest, "run prefetch relay mux at x={},y={}", prefetch_relay_mux_core.x, prefetch_relay_mux_core.y);
-
-            std::map<string, string> defines = {
-                {"FD_CORE_TYPE", std::to_string(0)},  // todo, support dispatch on eth
-            };
-
-            auto mux_kernel = tt_metal::CreateKernel(
-                program,
-                "tt_metal/impl/dispatch/kernels/packet_mux.cpp",
-                {prefetch_relay_mux_core},
-                tt_metal::DataMovementConfig{
-                    .processor = tt_metal::DataMovementProcessor::RISCV_0,
-                    .noc = tt_metal::NOC::RISCV_0_default,
-                    .compile_args = prefetch_relay_mux_compile_args,
-                    .defines = defines,
-                });
-
-            std::vector<uint32_t> tunneler_l_compile_args{
-                dest_endpoint_start_id,            // 0: endpoint_id_start_index
-                2,                                 // 1: tunnel_lanes. 1 => Unidirectional. 2 => Bidirectional.
-                (tunneler_queue_start_addr >> 4),  // 2: rx_queue_start_addr_words
-                (tunneler_queue_size_bytes >> 4),  // 3: rx_queue_size_words
-                packet_switch_4B_pack(
-                    r_tunneler_phys_core.x,
-                    r_tunneler_phys_core.y,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::ETH),  // 4: remote_receiver_0_info
-                packet_switch_4B_pack(
-                    phys_dispatch_relay_demux_core.x,
-                    phys_dispatch_relay_demux_core.y,
-                    num_dest_endpoints,
-                    (uint32_t)DispatchRemoteNetworkType::NOC0),  // 5: remote_receiver_1_info
-                0,                                               // remote_receiver_2_info
-                0,                                               // remote_receiver_3_info
-                0,                                               // remote_receiver_4_info
-                0,                                               // remote_receiver_5_info
-                0,                                               // remote_receiver_6_info
-                0,                                               // remote_receiver_7_info
-                0,                                               // remote_receiver_8_info
-                0,                                               // remote_receiver_9_info
-
-                (tunneler_queue_start_addr >> 4),              // 14: remote_receiver_queue_start_addr_words 0
-                (tunneler_queue_size_bytes >> 4),              // 15: remote_receiver_queue_size_words 0
-                (prefetch_relay_demux_queue_start_addr >> 4),  // 16: remote_receiver_queue_start_addr_words 1
-                (prefetch_relay_demux_queue_size_bytes >> 4),  // 17: remote_receiver_queue_size_words 1
-                0,                                             // 18: remote_receiver_queue_start_addr_words
-                2,                                             // 19: remote_receiver_queue_size_words
-                0,                                             // 20:
-                2,                                             // 21:
-                0,                                             // 22:
-                2,                                             // 23:
-                0,                                             // 24:
-                2,                                             // 25:
-                0,                                             // 26:
-                2,                                             // 27:
-                0,                                             // 28:
-                2,                                             // 29:
-                0,                                             // 30:
-                2,                                             // 31:
-                0,                                             // 32:
-                2,                                             // 33:
-                packet_switch_4B_pack(
-                    phys_prefetch_relay_mux_core.x,
-                    phys_prefetch_relay_mux_core.y,
-                    num_dest_endpoints,
-                    (uint32_t)DispatchRemoteNetworkType::NOC0),  // 34: remote_sender_0_info
-                packet_switch_4B_pack(
-                    r_tunneler_phys_core.x,
-                    r_tunneler_phys_core.y,
-                    3,
-                    (uint32_t)DispatchRemoteNetworkType::ETH),  // 35: remote_sender_1_info
-                0,                                              // 36: remote_sender_2_info
-                0,                                              // 37:
-                0,                                              // 38:
-                0,                                              // 39:
-                0,                                              // 40:
-                0,                                              // 41:
-                0,                                              // 42:
-                0,                                              // 43:
-                tunneler_test_results_addr,                     // 44: test_results_addr
-                tunneler_test_results_size,                     // 45: test_results_size
-                timeout_mcycles * 1000 * 1000 * 4,              // 46: timeout_cycles
-                0,                                              // 47: inner_stop_mux_d_bypass
-            };
-
-            auto tunneler_l_kernel = tt_metal::CreateKernel(
-                program,
-                "tt_metal/impl/dispatch/kernels/vc_eth_tunneler.cpp",
-                tunneler_logical_core,
-                tt_metal::EthernetConfig{
-                    .noc = tt_metal::NOC::NOC_0, .compile_args = tunneler_l_compile_args, .defines = defines});
-
-            std::vector<uint32_t> tunneler_r_compile_args{
-                dest_endpoint_start_id,            // 0: endpoint_id_start_index
-                2,                                 // 1: tunnel_lanes. 1 => Unidirectional. 2 => Bidirectional.
-                (tunneler_queue_start_addr >> 4),  // 2: rx_queue_start_addr_words
-                (tunneler_queue_size_bytes >> 4),  // 3: rx_queue_size_words
-                packet_switch_4B_pack(
-                    phys_prefetch_relay_demux_core.x,
-                    phys_prefetch_relay_demux_core.y,
-                    num_dest_endpoints,
-                    (uint32_t)DispatchRemoteNetworkType::NOC0),  // 4: remote_receiver_0_info
-                packet_switch_4B_pack(
-                    tunneler_phys_core.x,
-                    tunneler_phys_core.y,
-                    1,
-                    (uint32_t)DispatchRemoteNetworkType::ETH),  // 5: remote_receiver_1_info
-                0,                                              // remote_receiver_2_info
-                0,                                              // remote_receiver_3_info
-                0,                                              // remote_receiver_4_info
-                0,                                              // remote_receiver_5_info
-                0,                                              // remote_receiver_6_info
-                0,                                              // remote_receiver_7_info
-                0,                                              // remote_receiver_8_info
-                0,                                              // remote_receiver_9_info
-
-                (prefetch_relay_demux_queue_start_addr >> 4),  // 14: remote_receiver_queue_start_addr_words 0
-                (prefetch_relay_demux_queue_size_bytes >> 4),  // 15: remote_receiver_queue_size_words 0
-                ((tunneler_queue_start_addr + tunneler_queue_size_bytes) >>
-                 4),                               // 16: remote_receiver_queue_start_addr_words 1
-                (tunneler_queue_size_bytes >> 4),  // 17: remote_receiver_queue_size_words 1
-                0,                                 // 18: remote_receiver_queue_start_addr_words
-                2,                                 // 19: remote_receiver_queue_size_words
-                0,                                 // 20:
-                2,                                 // 21:
-                0,                                 // 22:
-                2,                                 // 23:
-                0,                                 // 24:
-                2,                                 // 25:
-                0,                                 // 26:
-                2,                                 // 27:
-                0,                                 // 28:
-                2,                                 // 29:
-                0,                                 // 30:
-                2,                                 // 31:
-                0,                                 // 32:
-                2,                                 // 33:
-                packet_switch_4B_pack(
-                    tunneler_phys_core.x,
-                    tunneler_phys_core.y,
-                    2,
-                    (uint32_t)DispatchRemoteNetworkType::ETH),  // 34: remote_sender_0_info
-                packet_switch_4B_pack(
-                    phys_dispatch_relay_mux_core.x,
-                    phys_dispatch_relay_mux_core.y,
-                    num_dest_endpoints,
-                    (uint32_t)DispatchRemoteNetworkType::NOC0),  // 35: remote_sender_1_info
-                0,                                               // 36: remote_sender_2_info
-                0,                                               // 37:
-                0,                                               // 38:
-                0,                                               // 39:
-                0,                                               // 40:
-                0,                                               // 41:
-                0,                                               // 42:
-                0,                                               // 43:
-                tunneler_test_results_addr,                      // 44: test_results_addr
-                tunneler_test_results_size,                      // 45: test_results_size
-                timeout_mcycles * 1000 * 1000 * 4,               // 46: timeout_cycles
-                0,                                               // 47: inner_stop_mux_d_bypass
-            };
-
-            auto tunneler_r_kernel = tt_metal::CreateKernel(
-                program_r,
-                "tt_metal/impl/dispatch/kernels/vc_eth_tunneler.cpp",
-                r_tunneler_logical_core,
-                tt_metal::EthernetConfig{
-                    .noc = tt_metal::NOC::NOC_0, .compile_args = tunneler_r_compile_args, .defines = defines});
-
-            uint32_t dest_map_array[4] = {0, 1, 2, 3};
-            uint64_t dest_endpoint_output_map = packet_switch_dest_pack(dest_map_array, 4);
-            std::vector<uint32_t> demux_compile_args = {
-                dest_endpoint_start_id,                        // 0: endpoint_id_start_index
-                (prefetch_relay_demux_queue_start_addr >> 4),  // 1: rx_queue_start_addr_words
-                (prefetch_relay_demux_queue_size_bytes >> 4),  // 2: rx_queue_size_words
-                num_dest_endpoints,                            // 3: demux_fan_out
-                packet_switch_4B_pack(
-                    phys_prefetch_d_core.x,
-                    phys_prefetch_d_core.y,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::NOC0),  // 4: remote_tx_0_info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 5: remote_tx_1_info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 6: remote_tx_2_info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 7: remote_tx_3_info
-                (prefetch_d_buffer_base >> 4),                            // 8: remote_tx_queue_start_addr_words 0
-                prefetch_d_buffer_size_g >> 4,                            // 9: remote_tx_queue_size_words 0
-                0,                                                        // 10: remote_tx_queue_start_addr_words 1
-                0,                                                        // 11: remote_tx_queue_size_words 1
-                0,                                                        // 12: remote_tx_queue_start_addr_words 2
-                0,                                                        // 13: remote_tx_queue_size_words 2
-                0,                                                        // 14: remote_tx_queue_start_addr_words 3
-                0,                                                        // 15: remote_tx_queue_size_words 3
-                (uint32_t)r_tunneler_phys_core.x,                         // 16: remote_rx_x
-                (uint32_t)r_tunneler_phys_core.y,                         // 17: remote_rx_y
-                2,                                                        // 18: remote_rx_queue_id
-                (uint32_t)DispatchRemoteNetworkType::NOC0,                // 19: tx_network_type
-                (uint32_t)(dest_endpoint_output_map >> 32),               // 20: dest_endpoint_output_map_hi
-                (uint32_t)(dest_endpoint_output_map & 0xFFFFFFFF),        // 21: dest_endpoint_output_map_lo
-                packetized_path_test_results_addr,                        // 22: test_results_addr
-                packetized_path_test_results_size,                        // 23: test_results_size
-                timeout_mcycles * 1000 * 1000,                            // 24: timeout_cycles
-                0x1,                                                      // 25: output_depacketize_mask
-                // 26: output 0 packetize info:
-                packet_switch_4B_pack(
-                    DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE,
-                    prefetch_d_upstream_cb_sem,     // downstream sem
-                    prefetch_downstream_cb_sem,     // local sem
-                    0),                             // remove header
-                packet_switch_4B_pack(0, 0, 0, 0),  // 27: output 1 packetize info
-                packet_switch_4B_pack(0, 0, 0, 0),  // 28: output 2 packetize info
-                packet_switch_4B_pack(0, 0, 0, 0),  // 29: output 3 packetize info
-            };
-
-            log_info(
-                LogTest,
-                "run prefetch relay demux at x={},y={}",
-                prefetch_relay_demux_core.x,
-                prefetch_relay_demux_core.y);
-            auto demux_kernel = tt_metal::CreateKernel(
-                program_r,
-                "tt_metal/impl/dispatch/kernels/packet_demux.cpp",
-                {prefetch_relay_demux_core},
-                tt_metal::DataMovementConfig{
-                    .processor = tt_metal::DataMovementProcessor::RISCV_0,
-                    .noc = tt_metal::NOC::RISCV_0_default,
-                    .compile_args = demux_compile_args,
-                    .defines = defines,
-                });
-        }
-
-    } else {
-        uint32_t scratch_db_base =
-            cmddat_q_base + ((cmddat_q_size_g + noc_read_alignment - 1) / noc_read_alignment * noc_read_alignment);
-        TT_ASSERT(scratch_db_base < 1024 * 1024);  // L1 size
-        prefetch_compile_args[13] = scratch_db_base;
-
-        configure_kernel_variant<true, true>(
-            program,
-            "tt_metal/impl/dispatch/kernels/cq_prefetch.cpp",
-            prefetch_compile_args,
-            prefetch_core,
-            phys_prefetch_core_g,
-            {0xffffffff, 0xffffffff},  // upstream core unused
-            phys_dispatch_core,
-            device,
-            my_noc_index,
-            my_noc_index,
-            my_noc_index);
-    }
-
-    uint32_t host_completion_queue_wr_ptr =
-        DispatchMemMap::get(DISPATCH_CORE_TYPE).get_host_command_queue_addr(CommandQueueHostAddrType::COMPLETION_Q_WR);
-    uint32_t dev_completion_queue_wr_ptr =
-        DispatchMemMap::get(DISPATCH_CORE_TYPE)
-            .get_device_command_queue_addr(CommandQueueDeviceAddrType::COMPLETION_Q_WR);
-    uint32_t dev_completion_queue_rd_ptr =
-        DispatchMemMap::get(DISPATCH_CORE_TYPE)
-            .get_device_command_queue_addr(CommandQueueDeviceAddrType::COMPLETION_Q_RD);
-    std::vector<uint32_t> dispatch_compile_args = {
-        dispatch_buffer_base,
-        DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE,
-        DispatchSettings::DISPATCH_BUFFER_SIZE_BLOCKS *
-            DispatchMemMap::get(DISPATCH_CORE_TYPE, 1).dispatch_buffer_block_size_pages(),
-        dispatch_cb_sem,  // overridden below for h
-        split_prefetcher_g ? prefetch_d_downstream_cb_sem : prefetch_downstream_cb_sem,
-        DispatchSettings::DISPATCH_BUFFER_SIZE_BLOCKS,
-        prefetch_sync_sem,
-        0,  // true base of hugepage
-        dev_hugepage_completion_buffer_base,
-        DEFAULT_HUGEPAGE_COMPLETION_BUFFER_SIZE,
-        dispatch_buffer_base,
-        (1 << DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE) * dispatch_buffer_pages,
-        0,  // unused on hd, filled in below for h and d
-        0,  // unused on hd, filled in below for h and d
-        0,  // unused unless tunneler is between h and d
-        split_prefetcher_g,
-        NOC_XY_ENCODING(phys_prefetch_core_g.x, phys_prefetch_core_g.y),
-        prefetch_downstream_cb_sem,
-        prefetch_downstream_buffer_pages,
-        num_compute_cores,
-        0,
-        DispatchSettings::DISPATCH_MESSAGE_ENTRIES,
-        DispatchSettings::DISPATCH_GO_SIGNAL_NOC_DATA_ENTRIES,
-        0,
-        0,
-        0,
-        host_completion_queue_wr_ptr,
-        dev_completion_queue_wr_ptr,
-        dev_completion_queue_rd_ptr};
-
-    CoreCoord phys_upstream_from_dispatch_core = split_prefetcher_g ? phys_prefetch_d_core : phys_prefetch_core_g;
-    if (split_dispatcher_g) {
-        log_info(LogTest, "split dispatcher test, packetized_path_en={}", packetized_path_en_g);
-
-        // dispatch_hd and dispatch_d
-        uint32_t dispatch_d_preamble_size = packetized_path_en_g ? sizeof(dispatch_packet_header_t) : 0;
-        dispatch_compile_args[12] = dispatch_downstream_cb_sem;
-        dispatch_compile_args[13] = dispatch_h_cb_sem;
-        dispatch_compile_args[14] = dispatch_d_preamble_size;
-        dispatch_compile_args[21] = DispatchSettings::DISPATCH_MESSAGE_ENTRIES;
-        dispatch_compile_args[22] = DispatchSettings::DISPATCH_GO_SIGNAL_NOC_DATA_ENTRIES;
-        CoreCoord phys_dispatch_d_downstream_core =
-            packetized_path_en_g ? phys_dispatch_relay_mux_core : phys_dispatch_h_core;
-        configure_kernel_variant<true, false>(
-            program_r,
-            "tt_metal/impl/dispatch/kernels/cq_dispatch.cpp",
-            dispatch_compile_args,
-            dispatch_core,
-            phys_dispatch_core,
-            phys_upstream_from_dispatch_core,
-            phys_dispatch_d_downstream_core,
-            device,
-            my_noc_index,
-            dispatch_upstream_noc_index,
-            my_noc_index);
-
-        // dispatch_h
-        dispatch_compile_args[3] = dispatch_h_cb_sem;
-        dispatch_compile_args[12] = dispatch_h_cb_sem;
-        dispatch_compile_args[13] = dispatch_downstream_cb_sem;
-        dispatch_compile_args[14] = 0;  // preamble size
-        dispatch_compile_args[21] =
-            1;  // max_num_worker_sems is used for array sizing, set to 1 even if array isn't used
-        dispatch_compile_args[22] =
-            1;  // max_num_go_signal_noc_data_entries is used for array sizing, set to 1 even if array isn't used
-        CoreCoord phys_dispatch_h_upstream_core =
-            packetized_path_en_g ? phys_dispatch_relay_demux_core : phys_dispatch_core;
-        configure_kernel_variant<false, true>(
-            program,
-            "tt_metal/impl/dispatch/kernels/cq_dispatch.cpp",
-            dispatch_compile_args,
-            dispatch_h_core,
-            phys_dispatch_h_core,
-            phys_dispatch_h_upstream_core,
-            {0xffffffff, 0xffffffff},
-            device,
-            my_noc_index,
-            dispatch_upstream_noc_index,
-            my_noc_index);
-
-        if (packetized_path_en_g) {
-            uint32_t dispatch_relay_mux_queue_start_addr = dispatch_buffer_base;
-            uint32_t dispatch_relay_mux_queue_size_bytes = dispatch_buffer_page_size_g * dispatch_buffer_pages;
-
-            // Packetized path buffer, can be at any available address.
-            uint32_t dispatch_relay_demux_queue_start_addr = l1_unreserved_base;
-            constexpr uint32_t dispatch_relay_demux_queue_size_bytes = 0x10000;
-
-            // For tests with checkers enabled, packetized path may time out and
-            // cause the test to fail.
-            // To save inner loop cycles, presently the packetized components have
-            // a 32-bit timeout cycle counter so 4K cycles is the maximum timeout.
-            // Setting this to 0 disables the timeout.
-            uint32_t timeout_mcycles = packetized_path_timeout_en_g ? 4000 : 0;
-
-            // These could start from 0, but we assign values that are easy to
-            // identify for debug.
-            constexpr uint32_t src_endpoint_start_id = 0xcc;
-            constexpr uint32_t dest_endpoint_start_id = 0xdd;
-
-            constexpr uint32_t num_src_endpoints = 1;
-            constexpr uint32_t num_dest_endpoints = 1;
-
-            std::vector<uint32_t> dispatch_relay_mux_compile_args = {
-                0,                                           // 0: reserved
-                (dispatch_relay_mux_queue_start_addr >> 4),  // 1: rx_queue_start_addr_words
-                (dispatch_relay_mux_queue_size_bytes >> 4),  // 2: rx_queue_size_words
-                num_src_endpoints,                           // 3: mux_fan_in
-                packet_switch_4B_pack(
-                    (uint32_t)phys_dispatch_core.x,
-                    (uint32_t)phys_dispatch_core.y,
-                    1,
-                    (uint32_t)DispatchRemoteNetworkType::NOC0),  // 4: src 0 info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 5: src 1 info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 6: src 2 info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 7: src 3 info
-                //(dispatch_relay_demux_queue_start_addr >> 4), // 8: remote_tx_queue_start_addr_words
-                //(dispatch_relay_demux_queue_size_bytes >> 4), // 9: remote_tx_queue_size_words
-                //(uint32_t)phys_dispatch_relay_demux_core.x, // 10: remote_tx_x
-                //(uint32_t)phys_dispatch_relay_demux_core.y, // 11: remote_tx_y
-                // num_dest_endpoints, // 12: remote_tx_queue_id
-                ((tunneler_queue_start_addr + tunneler_queue_size_bytes) >> 4),  // 8: remote_tx_queue_start_addr_words
-                (tunneler_queue_size_bytes >> 4),                                // 9: remote_tx_queue_size_words
-                (uint32_t)r_tunneler_phys_core.x,                                // 10: remote_tx_x
-                (uint32_t)r_tunneler_phys_core.y,                                // 11: remote_tx_y
-                1,                                                               // 12: remote_tx_queue_id
-                (uint32_t)DispatchRemoteNetworkType::NOC0,                       // 13: tx_network_type
-                packetized_path_test_results_addr,                               // 14: test_results_addr
-                packetized_path_test_results_size,                               // 15: test_results_size
-                timeout_mcycles * 1000 * 1000,                                   // 16: timeout_cycles
-                0x0,                                                             // 17: output_depacketize
-                0x0,                                                             // 18: output_depacketize info
-                // 19: input 0 packetize info:
-                packet_switch_4B_pack(
-                    0x1,
-                    DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE,
-                    dispatch_downstream_cb_sem,                          // upstream sem
-                    dispatch_h_cb_sem),                                  // local sem
-                packet_switch_4B_pack(0, 0, 0, 0),                       // 20: input 1 packetize info
-                packet_switch_4B_pack(0, 0, 0, 0),                       // 21: input 2 packetize info
-                packet_switch_4B_pack(0, 0, 0, 0),                       // 22: input 3 packetize info
-                packet_switch_4B_pack(src_endpoint_start_id, 0, 0, 0),   // 23: packetized input src id
-                packet_switch_4B_pack(dest_endpoint_start_id, 0, 0, 0),  // 24: packetized input dest id
-            };
-
-            log_info(
-                LogTest, "run dispatch relay mux at x={},y={}", dispatch_relay_mux_core.x, dispatch_relay_mux_core.y);
-
-            std::map<string, string> defines = {
-                {"FD_CORE_TYPE", std::to_string(0)},  // todo, support dispatch on eth
-            };
-
-            auto mux_kernel = tt_metal::CreateKernel(
-                program_r,
-                "tt_metal/impl/dispatch/kernels/packet_mux.cpp",
-                {dispatch_relay_mux_core},
-                tt_metal::DataMovementConfig{
-                    .processor = tt_metal::DataMovementProcessor::RISCV_0,
-                    .noc = tt_metal::NOC::RISCV_0_default,
-                    .compile_args = dispatch_relay_mux_compile_args,
-                    .defines = defines,
-                });
-
-            uint32_t dest_map_array[4] = {0, 1, 2, 3};
-            uint64_t dest_endpoint_output_map = packet_switch_dest_pack(dest_map_array, 4);
-            std::vector<uint32_t> demux_compile_args = {
-                dest_endpoint_start_id,                        // 0: endpoint_id_start_index
-                (dispatch_relay_demux_queue_start_addr >> 4),  // 1: rx_queue_start_addr_words
-                (dispatch_relay_demux_queue_size_bytes >> 4),  // 2: rx_queue_size_words
-                num_dest_endpoints,                            // 3: demux_fan_out
-                packet_switch_4B_pack(
-                    phys_dispatch_h_core.x,
-                    phys_dispatch_h_core.y,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::NOC0),  // 4: remote_tx_0_info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 5: remote_tx_1_info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),  // 6: remote_tx_2_info
-                packet_switch_4B_pack(
-                    0,
-                    0,
-                    0,
-                    (uint32_t)DispatchRemoteNetworkType::DISABLE_QUEUE),     // 7: remote_tx_3_info
-                (dispatch_buffer_base >> 4),                                 // 8: remote_tx_queue_start_addr_words 0
-                (dispatch_buffer_page_size_g * dispatch_buffer_pages) >> 4,  // 9: remote_tx_queue_size_words 0
-                0,                                                           // 10: remote_tx_queue_start_addr_words 1
-                0,                                                           // 11: remote_tx_queue_size_words 1
-                0,                                                           // 12: remote_tx_queue_start_addr_words 2
-                0,                                                           // 13: remote_tx_queue_size_words 2
-                0,                                                           // 14: remote_tx_queue_start_addr_words 3
-                0,                                                           // 15: remote_tx_queue_size_words 3
-                //(uint32_t)phys_dispatch_relay_mux_core.x, // 16: remote_rx_x
-                //(uint32_t)phys_dispatch_relay_mux_core.y, // 17: remote_rx_y
-                // num_dest_endpoints, // 18: remote_rx_queue_id
-                (uint32_t)tunneler_phys_core.x,
-                (uint32_t)tunneler_phys_core.y,
-                3,
-                (uint32_t)DispatchRemoteNetworkType::NOC0,          // 19: tx_network_type
-                (uint32_t)(dest_endpoint_output_map >> 32),         // 20: dest_endpoint_output_map_hi
-                (uint32_t)(dest_endpoint_output_map & 0xFFFFFFFF),  // 21: dest_endpoint_output_map_lo
-                packetized_path_test_results_addr,                  // 22: test_results_addr
-                packetized_path_test_results_size,                  // 23: test_results_size
-                timeout_mcycles * 1000 * 1000,                      // 24: timeout_cycles
-                0x1,                                                // 25: output_depacketize_mask
-                // 26: output 0 packetize info:
-                packet_switch_4B_pack(
-                    DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE,
-                    dispatch_h_cb_sem,              // downstream sem
-                    dispatch_downstream_cb_sem,     // local sem
-                    1),                             // remove header
-                packet_switch_4B_pack(0, 0, 0, 0),  // 27: output 1 packetize info
-                packet_switch_4B_pack(0, 0, 0, 0),  // 28: output 2 packetize info
-                packet_switch_4B_pack(0, 0, 0, 0),  // 29: output 3 packetize info
-            };
-
-            log_info(
-                LogTest,
-                "run dispatch relay demux at x={},y={}",
-                dispatch_relay_demux_core.x,
-                dispatch_relay_demux_core.y);
-            auto demux_kernel = tt_metal::CreateKernel(
-                program,
-                "tt_metal/impl/dispatch/kernels/packet_demux.cpp",
-                {dispatch_relay_demux_core},
-                tt_metal::DataMovementConfig{
-                    .processor = tt_metal::DataMovementProcessor::RISCV_0,
-                    .noc = tt_metal::NOC::RISCV_0_default,
-                    .compile_args = demux_compile_args,
-                    .defines = defines,
-                });
-        }
-
-    } else {
-        configure_kernel_variant<true, true>(
-            program,
-            "tt_metal/impl/dispatch/kernels/cq_dispatch.cpp",
-            dispatch_compile_args,
+            dispatch_defines,
+            {},
             dispatch_core,
             phys_dispatch_core,
             phys_upstream_from_dispatch_core,
@@ -3282,43 +2259,12 @@ int main(int argc, char** argv) {
                 LogTest, "Device {} is not valid. Highest valid device id = {}.", test_device_id_g, num_devices - 1);
             throw std::runtime_error("Invalid Device Id.");
         }
-        int device_id_l = test_device_id_g;
-        int device_id_r = -1;
 
         tt_metal::IDevice* device = tt_metal::CreateDevice(test_device_id_g);
-        tt_metal::IDevice* device_r = nullptr;
-        if (test_device_id_g == 0) {
-            device_r = device;
-        } else {
-            auto const& device_active_eth_cores = device->get_active_ethernet_cores();
-            auto remote_chips = tt::Cluster::instance().get_devices_controlled_by_mmio_device(device_id_l);
-            // remove mmio chip from the set. get_devices_controlled_by_mmio_device() returns a set that
-            // holds mmio chips as well as remote chips accessed through that mmmio chip.
-            remote_chips.erase(device_id_l);
-            if (device_active_eth_cores.size() == 0) {
-                log_info(
-                    LogTest,
-                    "Device {} does not have enough active cores. Need 1 active ethernet core for this test.",
-                    device_id_l);
-                tt_metal::CloseDevice(device);
-                throw std::runtime_error("Test cannot run on specified device.");
-            }
-
-            device_id_r = test_device_id_g;
-            for (auto eth_core : device_active_eth_cores) {
-                auto [connected_device_id, eth_receiver_core] = device->get_connected_ethernet_core(eth_core);
-                if (remote_chips.find(connected_device_id) != remote_chips.end()) {
-                    device_id_r = connected_device_id;
-                    break;
-                }
-            }
-            if (device_id_r == device_id_l) {
-                log_info(LogTest, "Device {} does not have a remote device connected to it.", device_id_l);
-                tt_metal::CloseDevice(device);
-                throw std::runtime_error("Test cannot run on specified device.");
-            }
-
-            device_r = tt_metal::CreateDevice(device_id_r);
+        tt_metal::IDevice* device_r = device;
+        if (!device->is_mmio_capable()) {
+            log_info(LogTest, "Device {} is not valid. This test only supports MMIO capable devices", test_device_id_g);
+            throw std::runtime_error("Invalid Device Id.");
         }
 
         tt_metal::Program program = tt_metal::CreateProgram();
@@ -3326,59 +2272,26 @@ int main(int argc, char** argv) {
 
         void* host_hugepage_base;
         uint32_t l1_unreserved_base = device->allocator()->get_base_allocator_addr(HalMemType::L1);
-        uint32_t packetized_path_test_results_size = 1024;
         uint32_t l1_unreserved_base_aligned = tt::align(
-            l1_unreserved_base + packetized_path_test_results_size,
+            l1_unreserved_base,
             (1 << DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE));  // Was not aligned, lately.
         l1_buf_base_g =
             l1_unreserved_base_aligned + (1 << DispatchSettings::DISPATCH_BUFFER_LOG_PAGE_SIZE);  // Reserve a page.
         uint32_t prefetch_q_base = l1_buf_base_g;
         uint32_t prefetch_q_rd_ptr_addr = l1_unreserved_base_aligned;
-        CoreCoord phys_prefetch_relay_mux_core;
-        CoreCoord phys_prefetch_relay_demux_core;
-        CoreCoord phys_dispatch_relay_mux_core;
-        CoreCoord phys_dispatch_relay_demux_core;
-        uint32_t packetized_path_test_results_addr;
-        uint32_t cq_start =
-            DispatchMemMap::get(DISPATCH_CORE_TYPE).get_host_command_queue_addr(CommandQueueHostAddrType::UNRESERVED);
+        uint32_t cq_start = MetalContext::instance()
+                                .dispatch_mem_map(DISPATCH_CORE_TYPE)
+                                .get_host_command_queue_addr(CommandQueueHostAddrType::UNRESERVED);
         uint32_t dev_hugepage_base_g = 2 * (cq_start * sizeof(uint32_t));  // HOST_CQ uses some at the start address
 
-        if (test_device_id_g == 0) {
-            configure_for_single_chip(
-                device,
-                program,
-                host_hugepage_base,
-                prefetch_q_base,
-                prefetch_q_rd_ptr_addr,
-                phys_prefetch_relay_mux_core,
-                phys_prefetch_relay_demux_core,
-                phys_dispatch_relay_mux_core,
-                phys_dispatch_relay_demux_core,
-                packetized_path_test_results_addr,
-                packetized_path_test_results_size,
-                dev_hugepage_base_g);
-        } else {
-            configure_for_multi_chip(
-                device,
-                program,
-                device_r,
-                program_r,
-                device_id_l,
-                device_id_r,
-                host_hugepage_base,
-                prefetch_q_base,
-                prefetch_q_rd_ptr_addr,
-                phys_prefetch_relay_mux_core,
-                phys_prefetch_relay_demux_core,
-                phys_dispatch_relay_mux_core,
-                phys_dispatch_relay_demux_core,
-                packetized_path_test_results_addr,
-                packetized_path_test_results_size,
-                dev_hugepage_base_g);
-        }
+        configure_for_single_chip(
+            device, program, host_hugepage_base, prefetch_q_base, prefetch_q_rd_ptr_addr, dev_hugepage_base_g);
 
         if ((1 << exec_buf_log_page_size_g) * device->allocator()->get_num_banks(BufferType::DRAM) > cmddat_q_size_g) {
-            log_fatal("Exec buffer must fit in cmddat_q, page size too large ({})", 1 << exec_buf_log_page_size_g);
+            log_fatal(
+                tt::LogTest,
+                "Exec buffer must fit in cmddat_q, page size too large ({})",
+                1 << exec_buf_log_page_size_g);
             exit(0);
         }
 
@@ -3407,8 +2320,8 @@ int main(int argc, char** argv) {
         }
         log_info(LogTest, "Iterations: {}", iterations_g);
 
-        tt::Writer prefetch_q_writer =
-            tt::Cluster::instance().get_static_tlb_writer(tt_cxy_pair(device->id(), phys_prefetch_core_g));
+        tt::Writer prefetch_q_writer = tt::tt_metal::MetalContext::instance().get_cluster().get_static_tlb_writer(
+            tt_cxy_pair(device->id(), phys_prefetch_core_g));
 
         vector<uint32_t> cmds, terminate_cmds;
         vector<uint32_t> cmd_sizes, terminate_sizes;
@@ -3426,12 +2339,8 @@ int main(int argc, char** argv) {
             initialize_dram_banks(device);
         }
 
-        tt::Cluster::instance().l1_barrier(device->id());
-        tt::Cluster::instance().dram_barrier(device->id());
-        if (test_device_id_g != 0) {
-            tt::Cluster::instance().l1_barrier(device_r->id());
-            tt::Cluster::instance().dram_barrier(device_r->id());
-        }
+        tt::tt_metal::MetalContext::instance().get_cluster().l1_barrier(device->id());
+        tt::tt_metal::MetalContext::instance().get_cluster().dram_barrier(device->id());
 
         // Cache stuff
         gen_terminate_cmds(terminate_cmds, terminate_sizes);
@@ -3522,66 +2431,13 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (packetized_path_en_g) {
-            using tt::packet_queue::PACKET_QUEUE_TEST_PASS;
-            using tt::packet_queue::packet_queue_test_status_to_string;
-            using tt::packet_queue::PQ_TEST_STATUS_INDEX;
-
-            vector<uint32_t> prefetch_relay_mux_results = tt::llrt::read_hex_vec_from_core(
-                device_r->id(),
-                phys_prefetch_relay_mux_core,
-                packetized_path_test_results_addr,
-                packetized_path_test_results_size);
-            log_info(
-                LogTest,
-                "prefetch relay mux status = {}",
-                packet_queue_test_status_to_string(prefetch_relay_mux_results[PQ_TEST_STATUS_INDEX]));
-            pass &= (prefetch_relay_mux_results[PQ_TEST_STATUS_INDEX] == PACKET_QUEUE_TEST_PASS);
-
-            vector<uint32_t> prefetch_relay_demux_results = tt::llrt::read_hex_vec_from_core(
-                device_r->id(),
-                phys_prefetch_relay_demux_core,
-                packetized_path_test_results_addr,
-                packetized_path_test_results_size);
-            log_info(
-                LogTest,
-                "prefetch relay demux status = {}",
-                packet_queue_test_status_to_string(prefetch_relay_demux_results[PQ_TEST_STATUS_INDEX]));
-            pass &= (prefetch_relay_demux_results[0] == PACKET_QUEUE_TEST_PASS);
-
-            vector<uint32_t> dispatch_relay_mux_results = tt::llrt::read_hex_vec_from_core(
-                device->id(),
-                phys_dispatch_relay_mux_core,
-                packetized_path_test_results_addr,
-                packetized_path_test_results_size);
-            log_info(
-                LogTest,
-                "dispatch relay mux status = {}",
-                packet_queue_test_status_to_string(dispatch_relay_mux_results[PQ_TEST_STATUS_INDEX]));
-            pass &= (dispatch_relay_mux_results[PQ_TEST_STATUS_INDEX] == PACKET_QUEUE_TEST_PASS);
-
-            vector<uint32_t> dispatch_relay_demux_results = tt::llrt::read_hex_vec_from_core(
-                device->id(),
-                phys_dispatch_relay_demux_core,
-                packetized_path_test_results_addr,
-                packetized_path_test_results_size);
-            log_info(
-                LogTest,
-                "dispatch relay demux status = {}",
-                packet_queue_test_status_to_string(dispatch_relay_demux_results[PQ_TEST_STATUS_INDEX]));
-            pass &= (dispatch_relay_demux_results[0] == PACKET_QUEUE_TEST_PASS);
-        }
-
         pass &= tt_metal::CloseDevice(device);
-        if (test_device_id_g != 0) {
-            pass &= tt_metal::CloseDevice(device_r);
-        }
     } catch (const std::exception& e) {
         pass = false;
-        log_fatal(e.what());
+        log_fatal(tt::LogTest, "{}", e.what());
     }
 
-    tt::llrt::RunTimeOptions::get_instance().set_kernels_nullified(false);
+    tt::tt_metal::MetalContext::instance().rtoptions().set_kernels_nullified(false);
 
     if (pass) {
         log_info(LogTest, "test_prefetcher.cpp - Test Passed");

@@ -14,6 +14,7 @@ import json
 import yaml
 from datetime import datetime
 import copy
+from collections import deque
 
 import click
 from loguru import logger
@@ -34,7 +35,11 @@ from tt_metal.tools.profiler.common import (
 
 yaml.SafeDumper.ignore_aliases = lambda *args: True
 
+TRACE_OP_ID_BITSHIFT = 32
+
 OUT_NAME = "ops_perf_results"
+PER_CORE_OP_TO_OP_OUT_NAME = "per_core_op_to_op_times"
+PROFILER_OP_TO_OP_OVERHEAD_NANO_SEC = 1500
 
 OPS_CSV_HEADER = [
     "OP CODE",
@@ -51,8 +56,10 @@ OPS_CSV_HEADER = [
     "DEVICE FW START CYCLE",
     "DEVICE FW END CYCLE",
     "OP TO OP LATENCY [ns]",
+    "OP TO OP LATENCY BR/NRISC START [ns]",
     "DEVICE FW DURATION [ns]",
     "DEVICE KERNEL DURATION [ns]",
+    "DEVICE KERNEL DURATION DM START [ns]",
     "DEVICE KERNEL DURATION PER CORE MIN [ns]",
     "DEVICE KERNEL DURATION PER CORE MAX [ns]",
     "DEVICE KERNEL DURATION PER CORE AVG [ns]",
@@ -65,6 +72,8 @@ OPS_CSV_HEADER = [
     "DEVICE ERISC KERNEL DURATION [ns]",
     "DEVICE COMPUTE CB WAIT FRONT [ns]",
     "DEVICE COMPUTE CB RESERVE BACK [ns]",
+    "DISPATCH TOTAL CQ CMD OP TIME [ns]",
+    "DISPATCH GO SEND WAIT TIME [ns]",
     "INPUTS",
     "OUTPUTS",
     "METAL TRACE ID",
@@ -73,12 +82,15 @@ OPS_CSV_HEADER = [
     "COMPUTE KERNEL HASH",
     "DATA MOVEMENT KERNEL SOURCE",
     "DATA MOVEMENT KERNEL HASH",
-    "BRISC MAX KERNEL SIZE [B]",
-    "NCRISC MAX KERNEL SIZE [B]",
-    "TRISC 0 MAX KERNEL SIZE [B]",
-    "TRISC 1 MAX KERNEL SIZE [B]",
-    "TRISC 2 MAX KERNEL SIZE [B]",
-    "ERISC MAX KERNEL SIZE [B]",
+    "TENSIX DM 0 MAX KERNEL SIZE [B]",
+    "TENSIX DM 1 MAX KERNEL SIZE [B]",
+    "TENSIX COMPUTE 0 MAX KERNEL SIZE [B]",
+    "TENSIX COMPUTE 1 MAX KERNEL SIZE [B]",
+    "TENSIX COMPUTE 2 MAX KERNEL SIZE [B]",
+    "ACTIVE ETH DM 0 MAX KERNEL SIZE [B]",
+    "ACTIVE ETH DM 1 MAX KERNEL SIZE [B]",
+    "IDLE ETH DM 0 MAX KERNEL SIZE [B]",
+    "IDLE ETH DM 1 MAX KERNEL SIZE [B]",
     "PM IDEAL [ns]",
     "PM COMPUTE [ns]",
     "PM BANDWIDTH [ns]",
@@ -124,11 +136,11 @@ def import_tracy_op_logs(logFolder):
                         jsonStr = tmpStrs[-1]
                         opData = json.loads(jsonStr)
                         opData["metal_trace_id"] = None
-                        if "op_hash" in opData.keys():
-                            assert "device_id" in opData.keys()
+                        if "op_hash" in opData:
+                            assert "device_id" in opData
                             deviceID = int(opData["device_id"])
                             opHash = int(opData["op_hash"])
-                            if deviceID in cached_ops.keys():
+                            if deviceID in cached_ops:
                                 cached_ops[deviceID][opHash] = opData.copy()
                             else:
                                 cached_ops[deviceID] = {opHash: opData.copy()}
@@ -138,12 +150,11 @@ def import_tracy_op_logs(logFolder):
                     else:  # cached device op
                         opDataList = opDataStr.split(":", 1)[-1].split(",")
                         assert len(opDataList) > 3, "Wrong cached op info format"
-                        opCode = opDataList[0].strip()
                         opHash = int(opDataList[1])
                         deviceID = int(opDataList[2])
                         opID = int(opDataList[3])
-                        assert deviceID in cached_ops.keys(), "Expected hashed op info is not found"
-                        assert opHash in cached_ops[deviceID].keys(), "Expected hashed op info is not found"
+                        assert deviceID in cached_ops, "Expected hashed op info is not found"
+                        assert opHash in cached_ops[deviceID], "Expected hashed op info is not found"
                         opData = cached_ops[deviceID][opHash].copy()
                         opData["global_call_count"] = opID
                         opData["metal_trace_id"] = None
@@ -170,6 +181,7 @@ def import_tracy_op_logs(logFolder):
                         traceIDs[deviceID] = None
                     elif "REPLAY" in opDataStr:
                         replayIDTime = opDataTime
+
                         if deviceID in traceReplays:
                             if traceID in traceReplays[deviceID]:
                                 traceReplays[deviceID][traceID].append(replayIDTime)
@@ -184,27 +196,28 @@ def import_tracy_op_logs(logFolder):
     for opData in opsData:
         ops[opData["global_call_count"]] = opData
 
+    tracyOpTimesData = []
     with open(tracyOpTimesLog, "r") as csvFile:
         csvReader = csv.DictReader(csvFile)
-        for op in csvReader:
-            if "TT_DNN" in op["name"] or "TT_METAL" in op["name"]:
-                opID = int(op["zone_text"].split(":")[-1])
-                assert opID in ops.keys(), f"Op time for op {opID} must present"
-                ops[opID]["host_time"] = op
+        tracyOpTimesData = list(csvReader)
 
-    with open(tracyOpTimesLog, "r") as csvFile:
-        csvReader = csv.DictReader(csvFile)
-        for op in csvReader:
-            if op["special_parent_text"] and "id:" in op["special_parent_text"]:
-                parentOpID = int(op["special_parent_text"].split(":")[-1])
+    for op in tracyOpTimesData:
+        if "TT_DNN" in op["name"] or "TT_METAL" in op["name"]:
+            opID = int(op["zone_text"].split(":")[-1])
+            assert opID in ops, f"Op time for op {opID} must present"
+            ops[opID]["host_time"] = op
 
-                if "child_calls" in ops[parentOpID].keys():
-                    if op["name"] in ops[parentOpID]["child_calls"].keys():
-                        ops[parentOpID]["child_calls"][op["name"]] += int(op["exec_time_ns"])
-                    else:
-                        ops[parentOpID]["child_calls"][op["name"]] = int(op["exec_time_ns"])
+    for op in tracyOpTimesData:
+        if op["special_parent_text"] and "id:" in op["special_parent_text"]:
+            parentOpID = int(op["special_parent_text"].split(":")[-1])
+
+            if "child_calls" in ops[parentOpID]:
+                if op["name"] in ops[parentOpID]["child_calls"]:
+                    ops[parentOpID]["child_calls"][op["name"]] += int(op["exec_time_ns"])
                 else:
-                    ops[parentOpID]["child_calls"] = {op["name"]: int(op["exec_time_ns"])}
+                    ops[parentOpID]["child_calls"][op["name"]] = int(op["exec_time_ns"])
+            else:
+                ops[parentOpID]["child_calls"] = {op["name"]: int(op["exec_time_ns"])}
 
     return ops, signposts, traceReplays
 
@@ -243,13 +256,13 @@ def get_device_op_data(ops):
     deviceOps = {}
     hasTraceRuns = False
     for opID, opData in ops.items():
-        if "device_id" in opData.keys():
+        if "device_id" in opData:
             deviceID = opData["device_id"]
-            if deviceID not in deviceOps.keys():
+            if deviceID not in deviceOps:
                 deviceOps[deviceID] = [opData]
             else:
                 deviceOps[deviceID].append(opData)
-        if "metal_trace_id" in opData.keys() and opData["metal_trace_id"] is not None:
+        if "metal_trace_id" in opData and opData["metal_trace_id"] is not None:
             hasTraceRuns = True
 
     for deviceID in deviceOps:
@@ -258,8 +271,18 @@ def get_device_op_data(ops):
     return deviceOps, hasTraceRuns
 
 
+def extract_dispatch_op_id(dispatchOps):
+    opId = 0
+    for ts in dispatchOps["timeseries"]:
+        if "meta_data" in ts[0] and "workers_runtime_id" in ts[0]["meta_data"]:
+            metaData = eval(ts[0]["meta_data"])
+            opId = metaData["workers_runtime_id"]
+            break
+    return opId
+
+
 # Append device data to device ops and return the list of mapped device op ref list
-def append_device_data(ops, traceReplays, logFolder, analyze_noc_traces):
+def append_device_data(ops, traceReplays, logFolder, analyze_noc_traces, device_analysis_types):
     traceReplayCounts = {}
     for deviceID in traceReplays:
         traceReplayCounts[deviceID] = {}
@@ -271,12 +294,21 @@ def append_device_data(ops, traceReplays, logFolder, analyze_noc_traces):
     traceOps = {}
     if os.path.isfile(deviceTimesLog):
         setup = device_post_proc_config.default_setup()
+        if device_analysis_types:
+            allAnalysis = setup.timerAnalysis
+            pickedAnalysis = {}
+            for analysis in device_analysis_types:
+                assert analysis in allAnalysis, f" {analysis} is not calculated in device analysis"
+                pickedAnalysis[analysis] = allAnalysis[analysis]
+
+            setup.timerAnalysis = pickedAnalysis
         setup.deviceInputLog = deviceTimesLog
         deviceData = import_log_run_stats(setup)
         freq = deviceData["deviceInfo"]["freq"]
         for device in devicesOps:
-            assert device in deviceData["devices"].keys()
+            assert device in deviceData["devices"]
             deviceOpsTime = deviceData["devices"][device]["cores"]["DEVICE"]["riscs"]["TENSIX"]["ops"]
+            deviceDispatchOpsTime = deviceData["devices"][device]["cores"]["DEVICE"]["riscs"]["TENSIX"]["dispatch_ops"]
             deviceOpsTime.sort(key=device_op_compare_time)
             if hasTraceRuns:
                 generatedHostData = []
@@ -292,11 +324,11 @@ def append_device_data(ops, traceReplays, logFolder, analyze_noc_traces):
                 for deviceOpTime in deviceOpsTime:
                     if len(deviceOpTime["timeseries"]) > 0:
                         timeID, ts, statData, risc, core = deviceOpTime["timeseries"][0]
-                        assert "run_host_id" in timeID.keys(), "Device op ID missing: Device data must provide op ID"
+                        assert "run_host_id" in timeID, "Device op ID missing: Device data must provide op ID"
                         deviceOpID = timeID["run_host_id"]
                         assert (
                             deviceOpID in opIDHostDataDict
-                        ), f"Device op ID not present: Device op ID {deviceOpID} not present in host data"
+                        ), f"Device op ID not present: Device op ID {deviceOpID} not present in host data on device {device}"
                         traceID = opIDHostDataDict[deviceOpID]["metal_trace_id"]
                         if traceID is not None:
                             if device in traceOps:
@@ -322,14 +354,30 @@ def append_device_data(ops, traceReplays, logFolder, analyze_noc_traces):
 
             deviceOpsTime.sort(key=device_op_compare_opID_time)
             devicesOps[device].sort(key=host_device_op_compare)
+
+            dispatchOPAnalysis = {}
+            for deviceDispatchOp in deviceDispatchOpsTime:
+                dispatchOpID = extract_dispatch_op_id(deviceDispatchOp)
+                dispatchOPAnalysis[dispatchOpID] = deviceDispatchOp["analysis"]
+
+            # attach op dispatch analysis to op analysis
+            for deviceOp in deviceOpsTime:
+                opID = deviceOp["timeseries"][0][0]["run_host_id"]
+                if opID in dispatchOPAnalysis:
+                    for dispatchAnalysis in dispatchOPAnalysis[opID]:
+                        deviceOp["analysis"][dispatchAnalysis] = dispatchOPAnalysis[opID][dispatchAnalysis]
+                    del dispatchOPAnalysis[opID]
+
+            assert len(dispatchOPAnalysis) == 0, "Unrecognized dispatch OPs are presentent by dispatch cores"
+
             if len(devicesOps[device]) != len(deviceOpsTime):
                 deviceOPId = None
                 hostOPId = None
                 for deviceOp, deviceOpTime in zip(devicesOps[device], deviceOpsTime):
                     if len(deviceOpTime["timeseries"]) > 0:
                         timeID, ts, statData, risc, core = deviceOpTime["timeseries"][0]
-                        if "zone_name" in timeID.keys() and "FW" in timeID["zone_name"]:
-                            if "run_host_id" in timeID.keys():
+                        if "zone_name" in timeID and "FW" in timeID["zone_name"]:
+                            if "run_host_id" in timeID:
                                 if timeID["run_host_id"] != deviceOp["global_call_count"]:
                                     deviceOPId = timeID["run_host_id"]
                                     hostOPId = deviceOp["global_call_count"]
@@ -348,8 +396,8 @@ def append_device_data(ops, traceReplays, logFolder, analyze_noc_traces):
             for deviceOp, deviceOpTime in zip(devicesOps[device], deviceOpsTime):
                 cores = set()
                 for timeID, ts, statData, risc, core in deviceOpTime["timeseries"]:
-                    if "zone_name" in timeID.keys() and "FW" in timeID["zone_name"]:
-                        if "run_host_id" in timeID.keys():
+                    if "zone_name" in timeID and "FW" in timeID["zone_name"]:
+                        if "run_host_id" in timeID:
                             assert (
                                 timeID["run_host_id"] == deviceOp["global_call_count"]
                             ), f"op id {timeID['run_host_id']} reported by device {device} is not matching assigned op id {deviceOp['global_call_count']}"
@@ -368,9 +416,10 @@ def append_device_data(ops, traceReplays, logFolder, analyze_noc_traces):
             # Tag trace ops with a UID
             for device in devicesOps:
                 for deviceOp in devicesOps[device]:
-                    if "metal_trace_replay_session_id" in deviceOp.keys():
+                    if "metal_trace_replay_session_id" in deviceOp:
                         deviceOp["global_call_count"] = (
-                            deviceOp["global_call_count"] | deviceOp["metal_trace_replay_session_id"] << 16
+                            deviceOp["global_call_count"]
+                            | deviceOp["metal_trace_replay_session_id"] << TRACE_OP_ID_BITSHIFT
                         )
                         traceOps[deviceOp["global_call_count"]] = deviceOp
                     else:
@@ -396,32 +445,39 @@ def append_device_data(ops, traceReplays, logFolder, analyze_noc_traces):
 
 
 def get_device_data_generate_report(
-    logFolder, outputFolder, date, nameAppend, export_csv=True, cleanup_device_log=False
+    logFolder, outputFolder, date, nameAppend, export_csv=True, cleanup_device_log=False, device_analysis_types=[]
 ):
     deviceTimesLog = os.path.join(logFolder, PROFILER_DEVICE_SIDE_LOG)
     devicePreOpTime = {}
+    devicePreOpDMStartTime = {}
     deviceOps = {}
     i = 0
     rowDicts = []
+    perCoreRowDicts = []
+    perCoreCSVHeader = set()
 
     outFolder = PROFILER_OUTPUT_DIR
     if outputFolder:
         outFolder = outputFolder
 
     name = OUT_NAME
+    perCoreName = PER_CORE_OP_TO_OP_OUT_NAME
     outFolder = os.path.abspath(outFolder)
 
     if nameAppend:
         name += f"_{nameAppend}"
+        perCoreName += f"_{nameAppend}"
         outFolder = os.path.join(outFolder, nameAppend)
 
     if date:
         dateStr = f"{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}"
         name += f"_{dateStr}"
+        perCoreName += f"_{dateStr}"
         outFolder = os.path.join(outFolder, dateStr)
 
     if export_csv:
         allOpsCSVPath = os.path.join(outFolder, f"{name}.csv")
+        perCoreCSVPath = os.path.join(outFolder, f"{perCoreName}.csv")
         logger.info(f"Copying runtime artifacts")
         os.system(f"rm -rf {outFolder}; mkdir -p {outFolder}")
         if os.path.isfile(f"{logFolder / PROFILER_DEVICE_SIDE_LOG}"):
@@ -430,6 +486,14 @@ def get_device_data_generate_report(
     if os.path.isfile(deviceTimesLog):
         logger.info(f"Getting device only ops data")
         setup = device_post_proc_config.default_setup()
+        if device_analysis_types:
+            allAnalysis = setup.timerAnalysis
+            pickedAnalysis = {}
+            for analysis in device_analysis_types:
+                assert analysis in allAnalysis, f" {analysis} is not calculated in device analysis"
+                pickedAnalysis[analysis] = allAnalysis[analysis]
+
+            setup.timerAnalysis = pickedAnalysis
         setup.deviceInputLog = deviceTimesLog
         deviceData = import_log_run_stats(setup)
         logger.info(f"Generating device op report ...")
@@ -442,7 +506,7 @@ def get_device_data_generate_report(
                 deviceOp = {}
                 cores = set()
                 for timeID, ts, statData, risc, core in deviceOpTime["timeseries"]:
-                    if "zone_name" in timeID.keys() and "FW" in timeID["zone_name"]:
+                    if "zone_name" in timeID and "FW" in timeID["zone_name"]:
                         if core not in cores:
                             cores.add(core)
                 deviceOp["core_usage"] = {"count": len(cores), "cores": [str(core) for core in cores]}
@@ -451,7 +515,7 @@ def get_device_data_generate_report(
                     for analysis, data in deviceOpTime["analysis"].items()
                 }
 
-                if "run_host_id" in timeID.keys():
+                if "run_host_id" in timeID:
                     deviceOp["global_call_count"] = timeID["run_host_id"]
                 else:
                     deviceOp["global_call_count"] = i
@@ -464,14 +528,14 @@ def get_device_data_generate_report(
                 for analysis, data in deviceOp["device_time"].items():
                     analysisData = data["series"]
                     analysisStats = data["stats"]
-                    if "core" in analysis:
+                    if "per_core" in analysis:
                         assert len(analysisData) >= 1, "Unexpected device data format"
                         headerField = f"{csv_header_format(analysis)} MIN [ns]"
-                        rowDict[headerField] = f"{analysisStats['Min']:.0f}"
+                        rowDict[headerField] = f"{analysisStats['Min'] * 1000 / freq:.0f}"
                         headerField = f"{csv_header_format(analysis)} MAX [ns]"
-                        rowDict[headerField] = f"{analysisStats['Max']:.0f}"
+                        rowDict[headerField] = f"{analysisStats['Max'] * 1000 / freq:.0f}"
                         headerField = f"{csv_header_format(analysis)} AVG [ns]"
-                        rowDict[headerField] = f"{analysisStats['Average']:.0f}"
+                        rowDict[headerField] = f"{analysisStats['Average'] * 1000 / freq:.0f}"
                     else:
                         headerField = f"{csv_header_format(analysis)} [ns]"
                         assert len(analysisData) == 1, "Unexpected device data format"
@@ -480,18 +544,73 @@ def get_device_data_generate_report(
                         rowDict["DEVICE FW START CYCLE"] = analysisData[0]["start_cycle"]
                         rowDict["DEVICE FW END CYCLE"] = analysisData[0]["end_cycle"]
                     if analysis == "device_kernel_duration":
-                        if device in devicePreOpTime.keys():
+                        if device in devicePreOpTime:
                             rowDict["OP TO OP LATENCY [ns]"] = round(
                                 1000 * (analysisData[0]["start_cycle"] - devicePreOpTime[device]) / freq
                             )
                         else:
                             rowDict["OP TO OP LATENCY [ns]"] = 0
                         devicePreOpTime[device] = analysisData[0]["end_cycle"]
+                    if analysis == "device_kernel_duration_dm_start":
+                        if device in devicePreOpDMStartTime:
+                            rowDict["OP TO OP LATENCY BR/NRISC START [ns]"] = round(
+                                1000 * (analysisData[0]["start_cycle"] - devicePreOpDMStartTime[device]) / freq
+                            )
+                        else:
+                            rowDict["OP TO OP LATENCY BR/NRISC START [ns]"] = 0
+                        devicePreOpDMStartTime[device] = analysisData[0]["end_cycle"]
                 rowDicts.append(rowDict)
+
+            def get_core_str_format(core):
+                return f"{core[0]}; {core[1]} [ns]"
+
+            allCores = list(deviceData["devices"][device]["cores"])
+            allCores.remove("DEVICE")
+            allCores.sort()
+            for core in allCores:
+                perCoreCSVHeader.add(get_core_str_format(core))
+
+            coreOpToOps = {}
+            opToOps = []
+            for core in allCores:
+                deviceDataDict = deviceData["devices"][device]["cores"][core]["riscs"]["TENSIX"]
+                if "analysis" in deviceDataDict:
+                    coreSeries = deviceDataDict["analysis"]["op2op"]["series"]
+                    for op2op in coreSeries:
+                        if op2op["end_iter_mark"][1] != op2op["start_iter_mark"][1]:
+                            startMarker, endMarker = op2op["duration_type"]
+                            op2opID = (startMarker["run_host_id"], endMarker["run_host_id"])
+                            op2opDuration = op2op["duration_cycles"]
+                            op2opStart = op2op["start_cycle"]
+                            opToOps.append((op2opStart, op2opID, op2opDuration, core))
+                            if core in coreOpToOps:
+                                coreOpToOps[core].append((op2opStart, op2opID, op2opDuration, core))
+                            else:
+                                coreOpToOps[core] = deque([(op2opStart, op2opID, op2opDuration, core)])
+            opToOps.sort()
+
+            pickedOps = set()
+            for op2op in opToOps:
+                if op2op not in pickedOps:
+                    op2opStart, op2opID, op2opDuration, core = op2op
+                    perCoreRowDict = {
+                        "device ID": device,
+                        "op2op ID": f"{op2opID[0]} -> {op2opID[1]}",
+                    }
+                    for core, series in coreOpToOps.items():
+                        perCoreRowDict[get_core_str_format(core)] = ""
+                        if series and op2opID == series[0][1]:
+                            coreOpToOp = series.popleft()
+                            perCoreRowDict[get_core_str_format(core)] = (
+                                coreOpToOp[2] - PROFILER_OP_TO_OP_OVERHEAD_NANO_SEC
+                            )
+                            pickedOps.add(coreOpToOp)
+
+                    perCoreRowDicts.append(perCoreRowDict)
 
         rowDictHeaders = set()
         for row in rowDicts:
-            for k in row.keys():
+            for k in row:
                 rowDictHeaders.add(k)
         if export_csv:
             with open(allOpsCSVPath, "w") as allOpsCSV:
@@ -506,6 +625,15 @@ def get_device_data_generate_report(
                         rowDict[field] = str(fieldData).replace(",", ";")
                     writer.writerow(rowDict)
             logger.info(f"Device only OPs csv generated at: {allOpsCSVPath}")
+            with open(perCoreCSVPath, "w") as perCoreCSV:
+                perCoreCSVHeader = ["device ID", "op2op ID"] + [core for core in perCoreCSVHeader]
+
+                writer = csv.DictWriter(perCoreCSV, fieldnames=perCoreCSVHeader)
+                writer.writeheader()
+
+                for rowDict in perCoreRowDicts:
+                    writer.writerow(rowDict)
+            logger.info(f"Device only per core op to op times csv generated at: {perCoreCSVPath}")
 
         if cleanup_device_log:
             os.remove(deviceTimesLog)
@@ -539,6 +667,8 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
         os.system(f"cp {logFolder / TRACY_FILE_NAME} {outFolder}")
     if os.path.isfile(f"{logFolder / PROFILER_DEVICE_SIDE_LOG}"):
         os.system(f"cp {logFolder / PROFILER_DEVICE_SIDE_LOG} {outFolder}")
+    if os.path.isdir(f"{logFolder.parent / 'npe_viz'}"):
+        os.system(f"cp -r {logFolder.parent / 'npe_viz'} {outFolder}")
 
     logger.info(f"Generating OPs CSV")
     allOpsCSVPath = os.path.join(outFolder, f"{name}.csv")
@@ -546,6 +676,7 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
         rowDicts = []
 
         devicePreOpTime = {}
+        devicePreOpDMStartTime = {}
 
         tensorCSVData = {
             "INPUT": {
@@ -563,9 +694,10 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
             data = {}
             if ioField == "shape":
                 for field in ["W", "Z", "Y", "X"]:
-                    headers.append(field)
-                    assert field in ioData.keys(), "Wrong io tensor shape data format"
-                    data[field] = ioData[field]
+                    padded_logical_field = field + "_PAD[LOGICAL]"
+                    headers.append(padded_logical_field)
+                    assert field in ioData, "Wrong io tensor shape data format"
+                    data[padded_logical_field] = ioData[field]
             elif ioField == "dtype":
                 headers = ["DATATYPE"]
                 data["DATATYPE"] = ioData
@@ -577,12 +709,12 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
                 if type(ioData) == str:
                     data["MEMORY"] = ioData
                 else:
-                    assert "device_id" in ioData.keys(), "Wrong io tensor memory data format"
+                    assert "device_id" in ioData, "Wrong io tensor memory data format"
                     deviceID = ioData["device_id"]
-                    assert "memory_config" in ioData.keys(), "Wrong io tensor memory data format"
-                    assert "buffer_type" in ioData["memory_config"].keys(), "Wrong io tensor memory data format"
+                    assert "memory_config" in ioData, "Wrong io tensor memory data format"
+                    assert "buffer_type" in ioData["memory_config"], "Wrong io tensor memory data format"
                     bufferType = ioData["memory_config"]["buffer_type"].upper()
-                    assert "memory_layout" in ioData["memory_config"].keys(), "Wrong io tensor memory data format"
+                    assert "memory_layout" in ioData["memory_config"], "Wrong io tensor memory data format"
                     memoryLayout = ioData["memory_config"]["memory_layout"].upper()
                     data["MEMORY"] = f"DEV_{deviceID}_{bufferType}_{memoryLayout}"
 
@@ -592,7 +724,7 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
             ioFields = ["shape", "layout", "dtype", "storage_type"]
             for count, tensor in enumerate(tensors):
                 for ioField in ioFields:
-                    assert ioField in tensor.keys(), "Wrong io tensor fields"
+                    assert ioField in tensor, "Wrong io tensor fields"
                     ioData = tensor[ioField]
                     fields, data = io_tensor_to_csv(ioField, ioData)
                     for field in fields:
@@ -608,23 +740,23 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
             if type(row) is str and "sp" in row:
                 ret = signposts[row]["tracy_time"]
             elif type(row) is int:
-                if row > ((1 << 16) - 1):
+                if row > ((1 << TRACE_OP_ID_BITSHIFT) - 1):
                     ret = traceOps[row]["tracy_time"]
                 else:
                     ret = ops[row]["host_time"]["ns_since_start"]
             ret = int(ret)
             return ret
 
-        rowKeys = list(ops.keys()) + list(traceOps.keys()) + list(signposts.keys())
+        rowKeys = list(ops) + list(traceOps) + list(signposts)
         rowKeys.sort(key=row_compare)
         childCallKeys = set()
         for row in rowKeys:
             if type(row) is int:
-                if row > ((1 << 16) - 1):
+                if row > ((1 << TRACE_OP_ID_BITSHIFT) - 1):
                     opData = traceOps[row]
                 else:
                     opData = ops[row]
-                if "child_calls" in opData.keys():
+                if "child_calls" in opData:
                     for childCall in opData["child_calls"]:
                         childCallKeys.add(f"{childCall}_TT_HOST_FUNC [ns]")
 
@@ -639,13 +771,13 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
                 rowDict["HOST START TS"] = int(signposts[row]["tracy_time"])
             elif type(row) is int:
                 op = row
-                if op > ((1 << 16) - 1):
+                if op > ((1 << TRACE_OP_ID_BITSHIFT) - 1):
                     opData = traceOps[op]
-                    opData["global_call_count"] = ((1 << 16) - 1) & op
+                    opData["global_call_count"] = ((1 << TRACE_OP_ID_BITSHIFT) - 1) & op
                 else:
                     opData = ops[op]
                     opData["metal_trace_replay_session_id"] = ""
-                    if "trac_id" not in opData.keys() or opData["metal_trace_id"] is None:
+                    if "trac_id" not in opData or opData["metal_trace_id"] is None:
                         opData["metal_trace_id"] = ""
 
                 for field, fieldData in opData.items():
@@ -653,7 +785,7 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
                     if headerField in OPS_CSV_HEADER:
                         rowDict[headerField] = fieldData
 
-                assert "host_time" in opData.keys(), "Corrupted op data"
+                assert "host_time" in opData, "Corrupted op data"
                 rowDict["HOST START TS"] = int(opData["host_time"]["ns_since_start"])
                 rowDict["HOST END TS"] = int(opData["host_time"]["ns_since_start"]) + int(
                     opData["host_time"]["exec_time_ns"]
@@ -667,7 +799,7 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
                 if "NPE CONG IMPACT (%)" in opData:
                     rowDict["NPE CONG IMPACT (%)"] = opData.get("NPE CONG IMPACT (%)")
 
-                if "kernel_info" in opData.keys():
+                if "kernel_info" in opData:
                     rowDict["COMPUTE KERNEL SOURCE"] = []
                     rowDict["COMPUTE KERNEL HASH"] = []
                     rowDict["DATA MOVEMENT KERNEL SOURCE"] = []
@@ -684,23 +816,24 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
                     for kernel, kernelSize in opData["kernel_info"]["kernel_sizes"].items():
                         rowDict[kernel.upper().replace("_", " ") + " [B]"] = kernelSize
 
-                if "core_usage" in opData.keys():
+                if "core_usage" in opData:
                     rowDict["CORE COUNT"] = opData["core_usage"]["count"]
 
-                if "device_time" in opData.keys():
-                    assert "device_id" in opData.keys(), "Op has device data without device_id"
+                if "device_time" in opData:
+                    assert "device_id" in opData, "Op has device data without device_id"
                     deviceID = opData["device_id"]
                     for analysis, data in opData["device_time"].items():
                         analysisData = data["series"]
                         analysisStats = data["stats"]
-                        if "core" in analysis:
+                        freq = analysisData[0]["duration_cycles"] / analysisData[0]["duration_ns"]
+                        if "per_core" in analysis:
                             assert len(analysisData) >= 1, "Unexpected device data format"
                             headerField = f"{csv_header_format(analysis)} MIN [ns]"
-                            rowDict[headerField] = f"{analysisStats['Min']:.0f}"
+                            rowDict[headerField] = f"{analysisStats['Min'] / freq:.0f}"
                             headerField = f"{csv_header_format(analysis)} MAX [ns]"
-                            rowDict[headerField] = f"{analysisStats['Max']:.0f}"
+                            rowDict[headerField] = f"{analysisStats['Max'] / freq:.0f}"
                             headerField = f"{csv_header_format(analysis)} AVG [ns]"
-                            rowDict[headerField] = f"{analysisStats['Average']:.0f}"
+                            rowDict[headerField] = f"{analysisStats['Average'] / freq:.0f}"
                         else:
                             headerField = f"{csv_header_format(analysis)} [ns]"
                             assert len(analysisData) == 1, "Unexpected device data format"
@@ -708,31 +841,38 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
                         if analysis == "device_fw_duration":
                             rowDict["DEVICE FW START CYCLE"] = analysisData[0]["start_cycle"]
                             rowDict["DEVICE FW END CYCLE"] = analysisData[0]["end_cycle"]
-                            freq = analysisData[0]["duration_cycles"] / analysisData[0]["duration_ns"]
                         if analysis == "device_kernel_duration":
-                            if deviceID in devicePreOpTime.keys():
+                            if deviceID in devicePreOpTime:
                                 rowDict["OP TO OP LATENCY [ns]"] = round(
                                     (analysisData[0]["start_cycle"] - devicePreOpTime[deviceID]) / freq
                                 )
                             else:
                                 rowDict["OP TO OP LATENCY [ns]"] = 0
                             devicePreOpTime[deviceID] = analysisData[0]["end_cycle"]
+                        if analysis == "device_kernel_duration_dm_start":
+                            if deviceID in devicePreOpDMStartTime:
+                                rowDict["OP TO OP LATENCY BR/NRISC START [ns]"] = round(
+                                    (analysisData[0]["start_cycle"] - devicePreOpDMStartTime[deviceID]) / freq
+                                )
+                            else:
+                                rowDict["OP TO OP LATENCY BR/NRISC START [ns]"] = 0
+                            devicePreOpDMStartTime[deviceID] = analysisData[0]["end_cycle"]
 
-                if "child_calls" in opData.keys():
+                if "child_calls" in opData:
                     for childCall, duration in opData["child_calls"].items():
                         headerField = f"{childCall}_TT_HOST_FUNC [ns]"
                         rowDict[headerField] = f"{duration:.0f}"
 
-                assert "input_tensors" in opData.keys(), "Ops must have input tensors"
-                if "optional_input_tensors" in opData.keys():
+                assert "input_tensors" in opData, "Ops must have input tensors"
+                if "optional_input_tensors" in opData:
                     add_io_data(opData["input_tensors"] + opData["optional_input_tensors"], "INPUT")
                 else:
                     add_io_data(opData["input_tensors"], "INPUT")
 
-                if "output_tensors" in opData.keys():
+                if "output_tensors" in opData:
                     add_io_data(opData["output_tensors"], "OUTPUT")
 
-                if "performance_model" in opData.keys():
+                if "performance_model" in opData:
                     rowDict["PM IDEAL [ns]"] = opData["performance_model"]["ideal_ns"]
                     rowDict["PM COMPUTE [ns]"] = opData["performance_model"]["compute_ns"]
                     rowDict["PM BANDWIDTH [ns]"] = opData["performance_model"]["bandwidth_ns"]
@@ -746,7 +886,7 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
                                 * float(rowDict["PM COMPUTE [ns]"])
                                 / float(rowDict["DEVICE KERNEL DURATION [ns]"])
                             )
-                            rowDict["PM FPU UTIL (%)"] = round(fpu_util, 1)
+                            rowDict["PM FPU UTIL (%)"] = round(fpu_util, 3)
                         except ZeroDivisionError:
                             rowDict["PM FPU UTIL (%)"] = 0.0
 
@@ -771,22 +911,30 @@ def generate_reports(ops, deviceOps, traceOps, signposts, logFolder, outputFolde
 
 def analyzeNoCTraces(logFolder):
     """Attempts to import tt-npe from $PYTHONPATH and process noc traces to
-    obtain per-operation DRAM BW and NoC utilization statistics"""
+    obtain per-operation DRAM BW and NoC utilization statistics and create
+    visualizer timeline files"""
     try:
         from npe_analyze_noc_trace_dir import analyze_noc_traces_in_dir
 
         logger.info(f"tt-npe module imported successfully; analyzing noc traces ... ")
-        return analyze_noc_traces_in_dir(logFolder, False, True)
+        return analyze_noc_traces_in_dir(
+            noc_trace_dir=logFolder,
+            emit_viz_timeline_files=True,
+            quiet=True,
+            compress_timeline_files=True,
+        )
     except ImportError:
         logger.warning("Could not import tt-npe module. Ensure tt-npe is built, then source 'tt-npe/ENV_SETUP'")
         return None
     except Exception as e:
-        logger.error("Unexpected error occured when analyzing noc traces, aborting ... ")
+        logger.error("Unexpected error occurred when analyzing noc traces, aborting ... ")
         logger.error(" ↳ " + repr(e))
         return None
 
 
-def process_ops(output_folder, name_append, date, device_only=False, analyze_noc_traces=False):
+def process_ops(
+    output_folder, name_append, date, device_only=False, analyze_noc_traces=False, device_analysis_types=[]
+):
     if not output_folder:
         output_folder = PROFILER_ARTIFACTS_DIR
     logFolder = generate_logs_folder(output_folder)
@@ -795,10 +943,14 @@ def process_ops(output_folder, name_append, date, device_only=False, analyze_noc
     ops, signposts, traceReplays = import_tracy_op_logs(logFolder)
 
     if ops and not device_only:
-        deviceOps, traceOps = append_device_data(ops, traceReplays, logFolder, analyze_noc_traces)
+        deviceOps, traceOps = append_device_data(
+            ops, traceReplays, logFolder, analyze_noc_traces, device_analysis_types
+        )
         generate_reports(ops, deviceOps, traceOps, signposts, logFolder, reportFolder, date, name_append)
     else:
-        deviceOps = get_device_data_generate_report(logFolder, reportFolder, date, name_append)
+        deviceOps = get_device_data_generate_report(
+            logFolder, reportFolder, date, name_append, device_analysis_types=device_analysis_types
+        )
 
 
 @click.command()
@@ -809,10 +961,11 @@ def process_ops(output_folder, name_append, date, device_only=False, analyze_noc
 @click.option(
     "--analyze-noc-traces", is_flag=True, help="Use tt-npe to analyze profiler noc event trace files (if available)"
 )
-def main(output_folder, name_append, date, device_only, analyze_noc_traces):
+@click.option("-a", "--device-analysis-types", multiple=True, help="Subset of analysis types to be performed on device")
+def main(output_folder, name_append, date, device_only, analyze_noc_traces, device_analysis_types):
     if output_folder:
         output_folder = Path(output_folder)
-    process_ops(output_folder, name_append, date, device_only, analyze_noc_traces)
+    process_ops(output_folder, name_append, date, device_only, analyze_noc_traces, device_analysis_types)
 
 
 if __name__ == "__main__":

@@ -1,31 +1,29 @@
 # SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
 
 # SPDX-License-Identifier: Apache-2.0
+import pytest
 import torch
 from loguru import logger
 
 import ttnn
-from ttnn import ConcatMeshToTensor
-from models.demos.t3000.mixtral8x7b.tt.mixtral_attention import TtMixtralAttention
-from models.demos.t3000.mixtral8x7b.tt.mixtral_common import prepare_inputs_ttnn, get_single_rot_mat
 from models.demos.t3000.mixtral8x7b.reference.model import Attention, precompute_freqs_cis
+from models.demos.t3000.mixtral8x7b.tt.mixtral_attention import TtMixtralAttention
+from models.demos.t3000.mixtral8x7b.tt.mixtral_ccl import TT_CCL
+from models.demos.t3000.mixtral8x7b.tt.mixtral_common import get_single_rot_mat, prepare_inputs_ttnn
 from models.demos.t3000.mixtral8x7b.tt.model_config import TtModelArgs
-from models.utility_functions import (
-    comp_pcc,
-    comp_allclose,
-)
+from models.utility_functions import comp_allclose, comp_pcc
+from ttnn import ConcatMeshToTensor
 
 
-def test_mixtral_attention_inference(t3k_mesh_device, use_program_cache, reset_seeds):
-    t3k_mesh_device.enable_async(True)
-
+@pytest.mark.parametrize("device_params", [{"fabric_config": ttnn.FabricConfig.FABRIC_1D}], indirect=True)
+def test_mixtral_attention_inference(t3k_mesh_device, reset_seeds):
     pcc = 0.99
     dtype = ttnn.bfloat8_b
     batch = 32
     seq_len = 1  # Decode one token at a time
 
     # Update the model batch size to 32 and max_seq_len to 16384 to fit on device.
-    model_args = TtModelArgs(t3k_mesh_device.get_device(0), max_batch_size=batch, max_seq_len=16384)
+    model_args = TtModelArgs(t3k_mesh_device, max_batch_size=batch, max_seq_len=16384)
     state_dict = model_args.load_state_dict()
 
     # Ref model needs partial state dict, but our models use full state dict keys as cached weight names
@@ -34,7 +32,8 @@ def test_mixtral_attention_inference(t3k_mesh_device, use_program_cache, reset_s
     reference_model = Attention(args=model_args)
     reference_model.load_state_dict(partial_state_dict)
 
-    tt_model = TtMixtralAttention(t3k_mesh_device, state_dict, args=model_args, layer_num=0, dtype=dtype)
+    tt_ccl = TT_CCL(t3k_mesh_device)
+    tt_model = TtMixtralAttention(t3k_mesh_device, tt_ccl, state_dict, args=model_args, layer_num=0, dtype=dtype)
 
     current_rot_mat, rot_matrix = get_single_rot_mat(
         model_args.head_dim,

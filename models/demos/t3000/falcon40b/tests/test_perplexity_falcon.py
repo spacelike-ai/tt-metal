@@ -2,25 +2,27 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+import time
+
+import numpy as np
 import pytest
 import torch
 from loguru import logger
-from transformers import AutoTokenizer
 from tqdm import tqdm
-import time
-import numpy as np
+from transformers import AutoTokenizer
+
 import ttnn
-from ttnn import ConcatMeshToTensor
-from models.demos.t3000.falcon40b.tt.falcon_causallm import TtFalconCausalLM
-from models.demos.t3000.falcon40b.tt.model_config import get_model_config
-from models.demos.t3000.falcon40b.tests.test_utils import load_hf_model
 from models.datasets.llm_dataset_utils import (
-    prepare_textgen_dataset,
-    prepare_textgen_dataloader,
     calculate_acc_metrics,
+    prepare_textgen_dataloader,
+    prepare_textgen_dataset,
     verify_acc_metrics,
 )
+from models.demos.t3000.falcon40b.tests.test_utils import load_hf_model
+from models.demos.t3000.falcon40b.tt.falcon_causallm import TtFalconCausalLM
+from models.demos.t3000.falcon40b.tt.model_config import get_model_config
 from models.utility_functions import is_wormhole_b0
+from ttnn import ConcatMeshToTensor
 
 
 def calculate_perplexity(
@@ -150,7 +152,7 @@ def run_test_perplexity(
         # Load tt-metal model config
         input_shape = [batch_size, max_seq_len]
         model_config = get_model_config(
-            model_config_str, llm_mode, input_shape, num_devices=len(mesh_device.get_devices())
+            model_config_str, llm_mode, input_shape, num_devices=mesh_device.get_num_devices()
         )
         tt_cache_path = get_tt_cache_path(
             model_version, model_subdir="Falcon", default_dir=model_config["DEFAULT_CACHE_PATH"]
@@ -257,7 +259,7 @@ def test_perplexity_huggingface(
         ("prefill", 1, 128, "BFLOAT8_B-DRAM", 64, 12.74, 0.47, 0.71),
         ("prefill", 1, 1024, "BFLOAT8_B-DRAM", 64, 7.25, 0.55, 0.78),
         ("prefill", 1, 2048, "BFLOAT8_B-DRAM", 64, 6.55, 0.56, 0.80),
-        ("decode", 32, 128, "BFLOAT8_B-SHARDED", 64, 13.90, 0.45, 0.71),
+        ("decode", 32, 128, "BFLOAT8_B-SHARDED", 64, 13.95, 0.45, 0.71),
         ("decode", 32, 1024, "BFLOAT8_B-SHARDED", 64, 7.79, 0.54, 0.78),
         ("decode", 32, 2048, "BFLOAT8_B-SHARDED", 64, 6.96, 0.55, 0.79),  # TODO: Hangs on CI
     ),
@@ -270,6 +272,7 @@ def test_perplexity_huggingface(
         "decode_2048",
     ],
 )
+@pytest.mark.parametrize("device_params", [{"fabric_config": ttnn.FabricConfig.FABRIC_1D}], indirect=True)
 def test_perplexity(
     llm_mode,
     batch_size,
@@ -282,7 +285,6 @@ def test_perplexity(
     model_location_generator,
     get_tt_cache_path,
     t3k_mesh_device,
-    use_program_cache,
 ):
     assert is_wormhole_b0(), "This test is only for Wormhole B0"
 

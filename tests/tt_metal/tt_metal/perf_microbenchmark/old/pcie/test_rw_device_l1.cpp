@@ -2,15 +2,32 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include <algorithm>
-#include <functional>
-#include <random>
-#include <string>
-
+#include <chrono>
+#include <errno.h>
+#include <fmt/base.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <time.h>
 #include <tt-metalium/bfloat16.hpp>
-#include <tt-metalium/tt_metal.hpp>
-#include "test_common.hpp"
 #include <tt-metalium/host_api.hpp>
+#include <tt-metalium/tt_metal.hpp>
+#include <algorithm>
+#include <cstring>
+#include <exception>
+#include <string>
+#include <tuple>
+#include <vector>
+
+#include <tt-metalium/assert.hpp>
+#include <tt-metalium/core_coord.hpp>
+#include <tt-logger/tt-logger.hpp>
+#include "test_common.hpp"
+
+namespace tt {
+namespace tt_metal {
+class IDevice;
+}  // namespace tt_metal
+}  // namespace tt
 
 using namespace tt;
 using namespace tt::tt_metal;
@@ -46,7 +63,7 @@ int main(int argc, char** argv) {
         log_info(LogTest, "Target core (x,y) = ({},{})", core_x, core_y);
         CoreCoord core = {core_x, core_y};
 
-        // Can accomodate input size up to 920*1024
+        // Can accommodate input size up to 920*1024
         uint32_t target_cb_addr = 107 * 1024;
 
         // Execute Application

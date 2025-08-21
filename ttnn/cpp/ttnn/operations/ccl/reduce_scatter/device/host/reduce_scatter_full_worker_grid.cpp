@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 ///
 
+#include <string>
+
 #include <tt-metalium/core_coord.hpp>
 #include <tt-metalium/buffer.hpp>
 #include "ttnn/operation.hpp"
@@ -12,11 +14,11 @@
 #include "ttnn/operations/ccl/ccl_common.hpp"
 #include <tt-metalium/constants.hpp>
 #include <tt-metalium/host_api.hpp>
-#include <tt-metalium/circular_buffer_types.hpp>
+#include <tt-metalium/circular_buffer_config.hpp>
 
 #include "ttnn/operations/eltwise/binary/common/binary_op_types.hpp"
 #include "ttnn/operations/eltwise/binary/common/binary_op_utils.hpp"
-#include "cpp/ttnn/operations/ccl/reduce_scatter/host/reduce_scatter_worker_builder.hpp"
+#include "ttnn/operations/ccl/reduce_scatter/host/reduce_scatter_worker_builder.hpp"
 
 // Includes that need to be moved to CCL datastructures header
 #include <vector>
@@ -83,7 +85,6 @@ static void add_worker_config_to_edm_builders(
     EdmInterfaceAddresses& edm_interface_addresses) {
     bool is_linear = topology_config.is_linear;
     for (std::size_t c = 0; c < num_channels_per_edm; ++c) {
-        std::size_t num_workers_per_eth_buffer = 1;
         auto global_worker_index = get_global_worker_id(link, c, num_channels_per_edm);
         TT_ASSERT(global_worker_index < all_worker_attributes.size());
         WorkerAttributes const& worker_attrs = all_worker_attributes[global_worker_index];
@@ -140,7 +141,7 @@ static void add_worker_config_to_edm_builders(
         // receiver kernel enabled
         bool receiver_enabled = !is_linear || !topology_config.is_first_device_in_line(is_in_clockwise_direction);
         if (receiver_enabled) {
-            bool choose_counter_clockwise_edm_builder = is_in_clockwise_direction;
+            [[maybe_unused]] bool choose_counter_clockwise_edm_builder = is_in_clockwise_direction;
             log_trace(
                 tt::LogOp,
                 "Adding receiver EDM channel to {} edm builder",
@@ -191,12 +192,12 @@ static std::tuple<KernelHandle, KernelHandle, KernelHandle, std::optional<Kernel
 
     auto const& worker_defines = op_config.emit_worker_defines();
     TT_ASSERT(worker_defines.size() > 0);
-    for (auto const& [key, value] : worker_defines) {
+    for ([[maybe_unused]] const auto& [key, value] : worker_defines) {
         log_trace(tt::LogOp, "Worker Define: {} = {}", key, value);
     }
     if (split_worker_core_range.has_value()) {
         log_trace(tt::LogOp, "second worker core list:");
-        for (const auto& core : corerange_to_cores(split_worker_core_range.value())) {
+        for ([[maybe_unused]] const auto& core : corerange_to_cores(split_worker_core_range.value())) {
             log_trace(tt::LogOp, "\tx={},y={}", core.x, core.y);
         }
     }
@@ -217,7 +218,6 @@ static std::tuple<KernelHandle, KernelHandle, KernelHandle, std::optional<Kernel
         (topology_config.ring_index == 0 || topology_config.ring_index == topology_config.ring_size - 1);
 
     // If we we implementing a line, and are at the end of the line
-    bool worker_grid_split_in_half = is_start_chip_in_line;
 
     KernelHandle worker_receiver_kernel_id, worker_sender_kernel_id, worker_reduce_kernel_id;
     std::optional<KernelHandle> line_start_sender_kernel_id;
@@ -237,7 +237,7 @@ static std::tuple<KernelHandle, KernelHandle, KernelHandle, std::optional<Kernel
     std::vector<uint32_t> compute_kernel_args = {};
     constexpr bool fp32_dest_acc_en = false;
     constexpr bool math_approx_mode = false;
-    std::map<string, string> eltwise_defines = ttnn::operations::binary::utils::get_defines(binary_math_op);
+    std::map<std::string, std::string> eltwise_defines = ttnn::operations::binary::utils::get_defines(binary_math_op);
     worker_reduce_kernel_id = tt::tt_metal::CreateKernel(
         program,
         reduce_kernel_path,
@@ -255,7 +255,7 @@ static std::tuple<KernelHandle, KernelHandle, KernelHandle, std::optional<Kernel
             "Internal Error. (line) Reduce scatter did not generate a smaller second worker grid to map the line start "
             "kernels onto");
         log_trace(tt::LogOp, "Invoking CCL send kernel on split kernel core range");
-        for (auto const& core : corerange_to_cores(split_worker_core_range.value())) {
+        for ([[maybe_unused]] const auto& core : corerange_to_cores(split_worker_core_range.value())) {
             log_trace(tt::LogOp, "\tcore=(x={},y={})", core.x, core.y);
         }
         line_start_sender_kernel_id = tt::tt_metal::CreateKernel(
@@ -406,12 +406,12 @@ static std::pair<CoreRangeSet, std::optional<CoreRangeSet>> select_worker_cores(
             auto const& core_ranges =
                 select_worker_cores_for_line_topology(topology_config, op_config, num_links, num_edm_channels);
             log_trace(tt::LogOp, "First core range");
-            for (const auto& core : corerange_to_cores(core_ranges.first)) {
+            for ([[maybe_unused]] const auto& core : corerange_to_cores(core_ranges.first)) {
                 log_trace(tt::LogOp, "\tx={},y={}", core.x, core.y);
             }
             if (core_ranges.second.has_value()) {
                 log_trace(tt::LogOp, "second worker core list:");
-                for (const auto& core : corerange_to_cores(core_ranges.second.value())) {
+                for ([[maybe_unused]] const auto& core : corerange_to_cores(core_ranges.second.value())) {
                     log_trace(tt::LogOp, "\tx={},y={}", core.x, core.y);
                 }
             }
@@ -440,7 +440,6 @@ static WorkerTransferInfo compute_num_edm_messages_per_channel(
     TT_ASSERT(page_size_in_bytes > 0);
     log_trace(tt::LogOp, "WorkerTransferInfo");
     const std::size_t num_links = topology_config.num_links;
-    std::size_t total_num_workers = num_edm_channels * num_links;
 
     auto get_iter_begin = [num_edm_channels](auto& vec, std::size_t link) -> auto {
         return vec.begin() + (link * num_edm_channels);
@@ -560,7 +559,7 @@ create_worker_circular_buffers(
     std::optional<CoreRangeSet> const& second_worker_core_range,
     uint32_t worker_pages_per_transfer,
     tt::tt_metal::Program& program) {
-    tt::DataFormat df = tt::tt_metal::datatype_to_dataformat_converter(input_tensor.get_dtype());
+    tt::DataFormat df = tt::tt_metal::datatype_to_dataformat_converter(input_tensor.dtype());
     uint32_t page_size_bytes = op_config.get_page_size();
 
     // Input 0 CB
@@ -632,6 +631,7 @@ operation::ProgramWithCallbacks reduce_scatter_with_workers(
     const uint32_t num_links,
     const uint32_t ring_size,
     const uint32_t ring_index,
+    chip_id_t target_device_id,
     const std::optional<chip_id_t> receiver_device_id,
     const std::optional<chip_id_t> sender_device_id,
     ttnn::ccl::Topology topology,
@@ -639,8 +639,7 @@ operation::ProgramWithCallbacks reduce_scatter_with_workers(
     const std::optional<size_t> user_defined_num_buffers_per_channel) {
     log_trace(tt::LogOp, "reduce_scatter_with_workers entry");
     TT_ASSERT(
-        input_tensor.get_padded_shape()[scatter_split_dim] ==
-            output_tensor.get_padded_shape()[scatter_split_dim] * ring_size,
+        input_tensor.padded_shape()[scatter_split_dim] == output_tensor.padded_shape()[scatter_split_dim] * ring_size,
         "Input and output tensor shapes must match");
     TT_ASSERT(
         input_tensor.buffer()->num_pages() % ring_size == 0,
@@ -658,7 +657,7 @@ operation::ProgramWithCallbacks reduce_scatter_with_workers(
     std::unique_ptr<ttnn::ccl::CclOpTensorConfig> output_tensor_config =
         ttnn::ccl::CclOpTensorConfig::build_all_gather_tensor_config(output_tensor);
     // // The input tensor is fractured by ring_size so we divi
-    std::size_t input_tensor_n_elems_per_slice = input_tensor.volume() / ring_size;
+    std::size_t input_tensor_n_elems_per_slice = input_tensor.physical_volume() / ring_size;
     std::size_t input_tensor_num_units_per_tensor_slice =
         input_tensor_n_elems_per_slice / (tt::constants::TILE_WIDTH * tt::constants::TILE_HEIGHT);
 
@@ -687,7 +686,8 @@ operation::ProgramWithCallbacks reduce_scatter_with_workers(
         edm_termination_mode);
     TT_ASSERT(num_edm_channels_per_link > 0);
 
-    const auto& device = input_tensor.device();
+    const auto& device =
+        input_tensor.mesh_device() ? input_tensor.mesh_device()->get_device(target_device_id) : input_tensor.device();
     auto const& topology_config = ttnn::ccl::RingTopology(
         device, topology, sender_device_id, receiver_device_id, num_links, ring_size, ring_index);
     bool is_linear = topology_config.is_linear;
@@ -769,9 +769,8 @@ operation::ProgramWithCallbacks reduce_scatter_with_workers(
         std::min(input_tensor_num_units_per_tensor_slice, (edm_buffer_size_bytes / op_config.get_page_size())) * 2;
     uint32_t cb_num_pages_per_packet = cb_num_pages / 2;
     log_trace(tt::LogOp, "cb_num_pages: {}", cb_num_pages);
-    auto const& [cb_src0_workers, cb_src1_workers, cb_dst0_sender_workers, cb_short_circuit_sender_workers, optional_cb_src0_workers_2, optional_cb_src1_workers_2, optional_cb_dst0_sender_workers_2, optional_cb_short_circuit_sender_workers_2] =
-        create_worker_circular_buffers(
-            input_tensor, op_config, worker_core_range, second_worker_core_range, cb_num_pages, program);
+    create_worker_circular_buffers(
+        input_tensor, op_config, worker_core_range, second_worker_core_range, cb_num_pages, program);
 
     uint32_t max_worker_slice_in_bytes = compute_maximum_worker_slice_in_bytes(
         topology, cb_num_pages, cb_num_pages, cb_num_pages, edm_buffer_size_bytes, op_config.get_page_size());

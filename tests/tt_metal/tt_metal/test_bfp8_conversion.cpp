@@ -2,14 +2,23 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include <algorithm>
-#include <functional>
-#include <random>
-
-#include <tt-metalium/host_api.hpp>
-#include <tt-metalium/bfloat8.hpp>
+#include <errno.h>
+#include <fmt/base.h>
+#include <stdint.h>
 #include <tt-metalium/bfloat16.hpp>
+#include <tt-metalium/bfloat8.hpp>
 #include <tt-metalium/tilize_utils.hpp>
+#include <algorithm>
+#include <cstring>
+#include <exception>
+#include <iterator>
+#include <type_traits>
+#include <vector>
+
+#include <tt-metalium/assert.hpp>
+#include <tt-logger/tt-logger.hpp>
+#include <tt_stl/span.hpp>
+#include <tt-metalium/tt_backend_api_types.hpp>
 
 using namespace tt;
 
@@ -17,9 +26,7 @@ int main(int argc, char** argv) {
     bool pass = true;
 
     try {
-        uint32_t single_bfp8_tile_size = tile_size(tt::DataFormat::Bfp8_b);
         uint32_t num_tiles = 1;
-        uint32_t size_in_bytes = num_tiles * single_bfp8_tile_size;
 
         int num_float_in_tile = 1024;
         int float_data_size = num_tiles * num_float_in_tile;
@@ -31,10 +38,10 @@ int main(int argc, char** argv) {
 
         std::vector<uint32_t> shape_vec = {1, 1, 32, 32};
         std::vector<float> tiled_fp32_vec = convert_layout(
-            tt::stl::MakeConstSpan(fp32_vec),
+            tt::stl::make_const_span(fp32_vec),
             shape_vec,
-            tests::utils::TensorLayoutType::LIN_ROW_MAJOR,
-            tests::utils::TensorLayoutType::TILED_NFACES);
+            TensorLayoutType::LIN_ROW_MAJOR,
+            TensorLayoutType::TILED_NFACES);
 
         std::vector<uint32_t> packed_bfp8b_tile_vec_rm_in =
             pack_fp32_vec_as_bfp8_tiles(fp32_vec, /*row_major_input=*/true, /*is_exp_a=*/false);
@@ -50,15 +57,15 @@ int main(int argc, char** argv) {
         // //                      Validation
         // ////////////////////////////////////////////////////////////////////////////
         std::vector<float> tiled_to_rm_fp32_vec = convert_layout(
-            tt::stl::MakeConstSpan(unpacked_bfp8b_tile_vec_tile_out),
+            tt::stl::make_const_span(unpacked_bfp8b_tile_vec_tile_out),
             shape_vec,
-            tests::utils::TensorLayoutType::TILED_NFACES,
-            tests::utils::TensorLayoutType::LIN_ROW_MAJOR);
+            TensorLayoutType::TILED_NFACES,
+            TensorLayoutType::LIN_ROW_MAJOR);
         std::vector<float> rm_to_tiled_fp32_vec = convert_layout(
-            tt::stl::MakeConstSpan(unpacked_bfp8b_tile_vec_rm_out),
+            tt::stl::make_const_span(unpacked_bfp8b_tile_vec_rm_out),
             shape_vec,
-            tests::utils::TensorLayoutType::LIN_ROW_MAJOR,
-            tests::utils::TensorLayoutType::TILED_NFACES);
+            TensorLayoutType::LIN_ROW_MAJOR,
+            TensorLayoutType::TILED_NFACES);
 
         // Ensure that passing in row_major_input=true and row_major_output=true are inverses of row_major_input=false
         // and row_major_output=false yield the same result

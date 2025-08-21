@@ -2,19 +2,35 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <chrono>
 #include <gtest/gtest.h>
-
-#include <algorithm>
-#include <functional>
-#include <random>
-
-#include "device_fixture.hpp"
-#include <tt-metalium/tt_metal.hpp>
-#include <tt-metalium/host_api.hpp>
+#include <stdint.h>
+#include <sys/types.h>
 #include <tt-metalium/allocator.hpp>
-#include "tt_metal/test_utils/comparison.hpp"
-#include "tt_metal/test_utils/df/df.hpp"
-#include "tt_metal/test_utils/print_helpers.hpp"
+#include <tt-metalium/host_api.hpp>
+#include <tt-metalium/tt_metal.hpp>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <tt-metalium/bfloat16.hpp>
+#include <tt-metalium/buffer.hpp>
+#include <tt-metalium/buffer_types.hpp>
+#include <tt-metalium/circular_buffer_config.hpp>
+#include <tt-metalium/core_coord.hpp>
+#include <tt-metalium/data_types.hpp>
+#include <tt-metalium/device.hpp>
+#include "device_fixture.hpp"
+#include <tt-metalium/hal_types.hpp>
+#include <tt-metalium/kernel_types.hpp>
+#include <tt-metalium/program.hpp>
+#include <tt_stl/span.hpp>
+#include <tt-metalium/tt_backend_api_types.hpp>
+#include "tt_metal/test_utils/df/float32.hpp"
 #include "tt_metal/test_utils/stimulus.hpp"
 
 using std::vector;
@@ -172,7 +188,7 @@ bool reader_writer(tt_metal::IDevice* device, const ReaderWriterConfig& test_con
     tt_metal::CircularBufferConfig l1_cb_config =
         tt_metal::CircularBufferConfig(byte_size, {{cb_index, test_config.l1_data_format}})
             .set_page_size(cb_index, test_config.tile_byte_size);
-    auto l1_cb = tt_metal::CreateCircularBuffer(program, test_config.core, l1_cb_config);
+    tt_metal::CreateCircularBuffer(program, test_config.core, l1_cb_config);
 
     auto reader_kernel = tt_metal::CreateKernel(
         program,
@@ -261,12 +277,12 @@ bool reader_datacopy_writer(tt_metal::IDevice* device, const ReaderDatacopyWrite
     tt_metal::CircularBufferConfig l1_input_cb_config =
         tt_metal::CircularBufferConfig(byte_size, {{input0_cb_index, test_config.l1_input_data_format}})
             .set_page_size(input0_cb_index, test_config.tile_byte_size);
-    auto l1_input_cb = tt_metal::CreateCircularBuffer(program, test_config.core, l1_input_cb_config);
+    tt_metal::CreateCircularBuffer(program, test_config.core, l1_input_cb_config);
 
     tt_metal::CircularBufferConfig l1_output_cb_config =
         tt_metal::CircularBufferConfig(byte_size, {{output_cb_index, test_config.l1_output_data_format}})
             .set_page_size(output_cb_index, test_config.tile_byte_size);
-    auto l1_output_cb = tt_metal::CreateCircularBuffer(program, test_config.core, l1_output_cb_config);
+    tt_metal::CreateCircularBuffer(program, test_config.core, l1_output_cb_config);
 
     auto reader_kernel = tt_metal::CreateKernel(
         program,
@@ -289,7 +305,7 @@ bool reader_datacopy_writer(tt_metal::IDevice* device, const ReaderDatacopyWrite
     vector<uint32_t> compute_kernel_args = {
         uint(test_config.num_tiles)  // per_core_tile_cnt
     };
-    auto datacopy_kernel = tt_metal::CreateKernel(
+    tt_metal::CreateKernel(
         program,
         "tests/tt_metal/tt_metal/test_kernels/compute/eltwise_copy.cpp",
         test_config.core,

@@ -11,7 +11,7 @@
 #include <variant>
 #include <limits>
 
-#include "cpp/ttnn/operations/ccl/common/types/ccl_types.hpp"
+#include "ttnn/operations/ccl/common/types/ccl_types.hpp"
 // For command dest type
 #include <tt-metalium/fabric_edm_packet_header.hpp>
 
@@ -526,7 +526,7 @@ struct CclCommandCoreDescriptorTypeMcast {
         return value;
     }
     static CclCommandCoreDescriptorTypeMcast from_uint32(uint32_t value) {
-        CclCommandCoreDescriptorTypeMcast mcast;
+        CclCommandCoreDescriptorTypeMcast mcast{};
         mcast.noc0_start_x = (value >> 0) & 0xFF;
         mcast.noc0_start_y = (value >> 8) & 0xFF;
         mcast.noc0_end_x = (value >> 16) & 0xFF;
@@ -611,7 +611,7 @@ struct CclCommandHeader {
         UnicastCommandDestArgs unicast;
         MulticastCommandDestArgs multicast;
         LocalOnlyCommandDestArgs local_only;
-    } command_dest_args;
+    } command_dest_args{};
 
     CclCommandHeader() :
         code(CclCommandCode::INVALID), dest_type(CclCommandDestType::CHIP_LOCAL_ONLY), arg_count(0) {}

@@ -4,6 +4,7 @@
 import os
 import torch
 from loguru import logger
+import pytest
 
 # Set Grok flags for CI, if CI environment is setup
 if os.getenv("CI") == "true":
@@ -21,13 +22,14 @@ from models.utility_functions import (
     comp_pcc,
     comp_allclose,
 )
+from tests.tests_common.skip_reasons import LEGACY_CCL_SKIP
 
 
-def test_grok_attention_inference(t3k_mesh_device, use_program_cache, reset_seeds):
-    t3k_mesh_device.enable_async(True)
+@pytest.mark.skip(reason=LEGACY_CCL_SKIP)
+def test_grok_attention_inference(t3k_mesh_device, reset_seeds):
     pcc = 0.99
     dtype = ttnn.bfloat8_b
-    model_args = TtModelArgs(t3k_mesh_device.get_device(0), dummy_weights=os.getenv("CI") == "true")
+    model_args = TtModelArgs(t3k_mesh_device, dummy_weights=os.getenv("CI") == "true")
     model_args.n_layers = 1
     state_dict = model_args.load_state_dict()
 

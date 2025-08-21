@@ -3,13 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-import ttnn._ttnn
 
 __all__ = []
 
 Topology = ttnn._ttnn.operations.ccl.Topology
-initialize_edm_fabric = ttnn._ttnn.operations.ccl.initialize_edm_fabric
-teardown_edm_fabric = ttnn._ttnn.operations.ccl.teardown_edm_fabric
 
 # TODO: Add golden functions (#12747)
 

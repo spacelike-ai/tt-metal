@@ -16,33 +16,18 @@ on:
       docker-image:
         required: true
         type: string
-  workflow_dispatch:
-    inputs:
-      arch:
+      build-artifact-name:
         required: true
-        type: choice
-        options:
-          - wormhole_b0
-          - blackhole
-      runner-label:
-        required: true
-        type: choice
-        options:
-          - N150
-          - N300
-          - BH
-      timeout:
-        required: false
-        type: number
-        default: 15
+        type: string
 
 jobs:
   umd-unit-tests:
     name: UMD tests ${{ inputs.arch }} ${{ inputs.runner-label }}
-    runs-on:
-      - ${{ inputs.runner-label }}
-      - cloud-virtual-machine
-      - in-service
+    runs-on: >-
+      ${{
+        ((inputs.runner-label == 'P150b') && format('tt-ubuntu-2204-{0}-stable', inputs.runner-label))
+        || fromJSON(format('["{0}", "in-service", "cloud-virtual-machine"]', inputs.runner-label))
+      }}
     container:
       image: ${{ inputs.docker-image }}
       env:
@@ -59,15 +44,11 @@ jobs:
         shell: bash
         working-directory: /work # https://github.com/actions/runner/issues/878
     steps:
-      - name: ⬇️ Checkout
-        uses: actions/checkout@v4
+      - name: ⬇️  Setup Job
+        uses: tenstorrent/tt-metal/.github/actions/setup-job@main
+        timeout-minutes: 10
         with:
-          submodules: recursive
-          path: docker-job # Here be dragons; keep it scoped to our desired volume, yet must be under github.workspace and be sure to clean up at the end
-      - name: Build UMD device and tests
-        run: |
-          cmake -B build -G Ninja -DTT_UMD_BUILD_TESTS=ON -DCMAKE_TOOLCHAIN_FILE=cmake/x86_64-linux-clang-17-libstdcpp-toolchain.cmake
-          cmake --build build --target umd_tests
+          build-artifact-name: ${{ inputs.build-artifact-name }}
       - name: Run UMD unit tests
         timeout-minutes: ${{ inputs.timeout }}
         run: build/test/umd/${{ inputs.arch }}/unit_tests

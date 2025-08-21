@@ -64,7 +64,7 @@ void MAIN {
     constexpr uint32_t cb_out = tt::CBIndex::c_16;
 
     constexpr uint32_t cb_ex_partial2 = tt::CBIndex::c_11;   // E[x^2] partial reduce
-    constexpr uint32_t cb_ex_external2 = tt::CBIndex::c_13;  // E[x^2] partials recieved from other cores
+    constexpr uint32_t cb_ex_external2 = tt::CBIndex::c_13;  // E[x^2] partials received from other cores
     const uint32_t cb_reduction_out = (!use_two_stage_reduce or is_second_stage_reader) ? cb_out : cb_ex2;
 
     // set block_h to volatile to disable automatically unroll of the loops, avoid code overflow
@@ -119,7 +119,7 @@ void MAIN {
 #endif
     // E[x],
     index_h_offset = 0;
-    reduce_init_delta<false>(cb_in0, cb_scaler, cb_ex_partial2);
+    reduce_init(cb_in0, cb_scaler, cb_ex_partial2);
 
     cb_reserve_back(cb_ex_partial2, block_h);
     for (uint32_t i = 0; i < block_h; i++) {
@@ -133,7 +133,7 @@ void MAIN {
         tile_regs_release();
         index_h_offset += block_w;
     }
-    reduce_revert_delta(cb_ex_partial2);
+    reduce_uninit();
     cb_push_back(cb_ex_partial2, block_h);
     reconfig_data_format_srcb(cb_scaler, cb_in);
 #else
@@ -177,7 +177,7 @@ void MAIN {
 
     cb_reserve_back(cb_ex_partial2, block_h);  // RMS E(x2) #Layernorm //E(x) and E(x^2)
 
-    reduce_init_delta<false>(cb_x2, cb_scaler, cb_ex_partial2);
+    reduce_init(cb_x2, cb_scaler, cb_ex_partial2);
     index_h_offset = 0;
     for (uint32_t i = 0; i < block_h; i++) {
         tile_regs_acquire();
@@ -191,7 +191,7 @@ void MAIN {
         tile_regs_release();
         index_h_offset += block_w;
     }
-    reduce_revert_delta(cb_ex_partial2);
+    reduce_uninit();
     cb_pop_front(cb_x2, num_tiles_per_block);
     cb_push_back(cb_ex_partial2, block_h);
 
@@ -200,7 +200,7 @@ void MAIN {
         cb_wait_front(cb_scaler_global, 1);
         reconfig_data_format_srca(cb_x2, cb_ex_external2);
         reconfig_data_format_srcb(cb_scaler, cb_scaler_global);
-        reduce_init_delta<false>(cb_ex_external2, cb_scaler_global, cb_reduction_out);
+        reduce_init(cb_ex_external2, cb_scaler_global, cb_reduction_out);
         cb_reserve_back(cb_reduction_out, num_tiles_per_partial_result * num_tiles_per_allgather_worker);
 
         for (uint32_t i = 0; i < num_tiles_per_allgather_worker; i++) {  // loops over height
@@ -225,7 +225,7 @@ void MAIN {
 #endif
             tile_regs_release();
         }
-        reduce_revert_delta(cb_reduction_out);
+        reduce_uninit();
         cb_push_back(cb_reduction_out, num_tiles_per_partial_result * num_tiles_per_allgather_worker);
     }
 }

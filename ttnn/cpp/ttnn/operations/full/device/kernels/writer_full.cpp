@@ -6,10 +6,10 @@
 
 #include "dataflow_api.h"
 
-typedef union {
+union value {
     float f;
     uint32_t u;
-} u;
+};
 constexpr uint32_t onetile = 1;
 
 void kernel_main() {
@@ -19,10 +19,10 @@ void kernel_main() {
     uint32_t start_id = get_arg_val<uint32_t>(3);
 
     constexpr uint32_t cb_value = get_compile_time_arg_val(0);
+    constexpr auto dst_args = TensorAccessorArgs<1>();
     const uint32_t cb_page_size = get_tile_size(cb_value);
-    const auto cb_data_format = get_dataformat(cb_value);
 
-    u val;
+    value val;
     val.u = fill_value;
 
     cb_reserve_back(cb_value, onetile);
@@ -49,8 +49,7 @@ void kernel_main() {
 #endif
     cb_push_back(cb_value, 1);
 
-    const InterleavedAddrGenFast<true> s = {
-        .bank_base_address = output_addr, .page_size = cb_page_size, .data_format = cb_data_format};
+    const auto s = TensorAccessor(dst_args, output_addr, cb_page_size);
 
     cb_wait_front(cb_value, 1);
 

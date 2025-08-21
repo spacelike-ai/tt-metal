@@ -3,10 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import List
+
 import ttnn
-from ttnn import ShardTensorToMesh
-from models.utility_functions import nearest_32
 from models.demos.t3000.falcon40b.tt.model_utils import matmul_2d_config
+from models.utility_functions import nearest_32
+from ttnn import ShardTensorToMesh
 
 
 class TtLlamaMLP_optimized:
@@ -215,13 +216,14 @@ class TtLlamaMLP_optimized:
             # Prefill Reshape fix (reverse)
             hidden_states_mm = ttnn.reshape(hidden_states_mm, (1, 1, seq_len, self.hidden_size))
 
-        hidden_states_reduced = ttnn.reduce_scatter(
-            hidden_states_mm,
-            dim=3,
-            math_op=ttnn.ReduceType.Sum,
-            num_links=1,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
+        # hidden_states_reduced = ttnn.reduce_scatter(
+        #     hidden_states_mm,
+        #     dim=3,
+        #     math_op=ttnn.ReduceType.Sum,
+        #     num_links=1,
+        #     memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        # )
+        assert False, "Legacy ccl call removed until new implementation is done"
 
         hidden_states_mm.deallocate(True)
 
@@ -249,7 +251,7 @@ class TtLlamaMLP_optimized:
             w1_out,
             w3_out,
             memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
-            input_tensor_a_activation=ttnn.UnaryOpType.SILU,
+            input_tensor_a_activations=[ttnn.UnaryOpType.SILU],
             dtype=ttnn.bfloat8_b,
         )
 
@@ -264,12 +266,13 @@ class TtLlamaMLP_optimized:
             compute_kernel_config=self.model_config["COMPUTE_KERNEL_CONFIG"],
         )
 
-        hidden_states_reduced = ttnn.reduce_scatter(
-            hidden_states,
-            dim=3,
-            math_op=ttnn.ReduceType.Sum,
-            num_links=1,
-            memory_config=self.model_config["RESIDUAL_16_CORES_OUTPUT_MEMCFG"],
-        )
+        # hidden_states_reduced = ttnn.reduce_scatter(
+        #     hidden_states,
+        #     dim=3,
+        #     math_op=ttnn.ReduceType.Sum,
+        #     num_links=1,
+        #     memory_config=self.model_config["RESIDUAL_16_CORES_OUTPUT_MEMCFG"],
+        # )
+        assert False, "Legacy ccl call removed until new implementation is done"
         hidden_states.deallocate(True)
         return hidden_states_reduced

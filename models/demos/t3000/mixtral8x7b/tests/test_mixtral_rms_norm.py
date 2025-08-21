@@ -1,27 +1,24 @@
 # SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
 
 # SPDX-License-Identifier: Apache-2.0
+import pytest
 import torch
 from loguru import logger
 
 import ttnn
-from ttnn import ReplicateTensorToMesh, ConcatMeshToTensor
-
 from models.common.rmsnorm import RMSNorm as TtRMSNorm
 from models.demos.t3000.mixtral8x7b.reference.model import RMSNorm as RefRMSNorm
+from models.demos.t3000.mixtral8x7b.tt.mixtral_ccl import TT_CCL
 from models.demos.t3000.mixtral8x7b.tt.model_config import TtModelArgs
-from models.utility_functions import (
-    comp_pcc,
-    comp_allclose,
-)
+from models.utility_functions import comp_allclose, comp_pcc
+from ttnn import ConcatMeshToTensor, ReplicateTensorToMesh
 
 
-def test_mixtral_rms_norm_inference(t3k_mesh_device, use_program_cache, reset_seeds):
-    t3k_mesh_device.enable_async(True)
-
+@pytest.mark.parametrize("device_params", [{"fabric_config": ttnn.FabricConfig.FABRIC_1D}], indirect=True)
+def test_mixtral_rms_norm_inference(t3k_mesh_device, reset_seeds):
     dtype = ttnn.bfloat16
 
-    model_args = TtModelArgs(t3k_mesh_device.get_device(0))
+    model_args = TtModelArgs(t3k_mesh_device)
     state_dict = model_args.load_state_dict()
 
     # Ref model needs partial state dict, but our models use full state dict keys as cached weight names
@@ -29,6 +26,7 @@ def test_mixtral_rms_norm_inference(t3k_mesh_device, use_program_cache, reset_se
     reference_model = RefRMSNorm(dim=model_args.dim)
     reference_model.load_state_dict(partial_state_dict)
 
+    tt_ccl = TT_CCL(t3k_mesh_device)
     tt_model = TtRMSNorm(
         device=t3k_mesh_device,
         dim=model_args.dim,
@@ -38,6 +36,7 @@ def test_mixtral_rms_norm_inference(t3k_mesh_device, use_program_cache, reset_se
         weight_cache_path=model_args.weight_cache_path(dtype),
         weight_memory_config=model_args.model_config["NORM_WEIGHTS_MEMCFG"],
         weight_dtype=dtype,
+        tt_ccl=tt_ccl,
     )
     input = torch.rand(1, 1, 32, 4096)
     reference_output = reference_model(input)[0]

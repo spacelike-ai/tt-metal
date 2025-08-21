@@ -2,15 +2,15 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-import json
-import csv
 import pathlib
+import pickle
 import os
 from datetime import datetime
 from typing import Optional, Union
 
 from loguru import logger
 
+from infra.data_collection.github.workflows import is_job_hanging_from_job_log
 from infra.data_collection.models import InfraErrorV1, TestErrorV1
 from infra.data_collection.pydantic_models import CompleteBenchmarkRun
 
@@ -93,9 +93,9 @@ def return_first_string_starts_with(starting_string, strings):
     raise Exception(f"{strings} do not have any that match {starting_string}")
 
 
-def get_job_failure_signature_(github_job, failure_description) -> Optional[Union[InfraErrorV1]]:
+def get_job_failure_signature_(github_job, failure_description, workflow_outputs_dir) -> Optional[Union[InfraErrorV1]]:
     error_snippet_to_signature_mapping = {
-        "timed out": str(InfraErrorV1.JOB_UNIT_TIMEOUT_FAILURE),
+        "has timed out": str(InfraErrorV1.JOB_UNIT_TIMEOUT_FAILURE),
         "exceeded the maximum execution time": str(InfraErrorV1.JOB_CUMULATIVE_TIMEOUT_FAILURE),
         "lost communication with the server": str(InfraErrorV1.RUNNER_COMM_FAILURE),
         "runner has received a shutdown signal": str(InfraErrorV1.RUNNER_SHUTDOWN_FAILURE),
@@ -107,7 +107,19 @@ def get_job_failure_signature_(github_job, failure_description) -> Optional[Unio
     # Check the mapping dictionary for specific failure signature types
     for error_snippet in error_snippet_to_signature_mapping:
         if error_snippet in failure_description:
-            return error_snippet_to_signature_mapping[error_snippet]
+            error_signature = error_snippet_to_signature_mapping[error_snippet]
+            # Determine if timeout is a hang
+            if error_signature in [
+                str(InfraErrorV1.JOB_CUMULATIVE_TIMEOUT_FAILURE),
+                str(InfraErrorV1.JOB_UNIT_TIMEOUT_FAILURE),
+            ] and is_job_hanging_from_job_log(
+                error_snippet,
+                workflow_outputs_dir=workflow_outputs_dir,
+                workflow_run_id=github_job["run_id"],
+                workflow_job_id=github_job["id"],
+            ):
+                error_signature = str(InfraErrorV1.JOB_HANG)
+            return error_signature
 
     # If failure occurred in runner setup, classify as set up failure
     for step in github_job["steps"]:
@@ -125,7 +137,9 @@ def get_job_failure_signature_(github_job, failure_description) -> Optional[Unio
     return str(InfraErrorV1.GENERIC_FAILURE)
 
 
-def get_failure_signature_and_description_from_annotations(github_job, github_job_id_to_annotations):
+def get_failure_signature_and_description_from_annotations(
+    github_job, github_job_id_to_annotations, workflow_outputs_dir
+):
     failure_signature, failure_description = None, None
 
     # Don't return any failure info if job passed
@@ -153,12 +167,14 @@ def get_failure_signature_and_description_from_annotations(github_job, github_jo
                     # Infrastructure error
                     failure_description = _annot.get("message")
                     if failure_description:
-                        failure_signature = get_job_failure_signature_(github_job, failure_description)
+                        failure_signature = get_job_failure_signature_(
+                            github_job, failure_description, workflow_outputs_dir
+                        )
                         return failure_signature, failure_description
     return failure_signature, failure_description
 
 
-def get_job_row_from_github_job(github_job, github_job_id_to_annotations):
+def get_job_row_from_github_job(github_job, github_job_id_to_annotations, workflow_outputs_dir):
     github_job_id = github_job["id"]
 
     logger.info(f"Processing github job with ID {github_job_id}")
@@ -191,6 +207,22 @@ def get_job_row_from_github_job(github_job, github_job_id_to_annotations):
     else:
         ubuntu_version = None
 
+    # Clean up ephemeral runner names
+    if host_name and (host_name.startswith("tt-beta") or host_name.startswith("tt-ubuntu")):
+        parts = host_name.split("-")
+        # Issue: https://github.com/tenstorrent/tt-metal/issues/21694
+        # Issue: https://github.com/tenstorrent/tt-metal/issues/26445
+        # Remove non-constant ephemeral runner suffix from tt-beta/tt-ubuntu runner names only if the second last part is "runner"
+        # We don't want to remove the suffix for non-ephemeral runners (e.g. tt-beta-ubuntu-2204-xlarge)
+        # E.g. tt-beta-ubuntu-2204-n150-large-stable-nk6pd-runner-5g5f9 -> tt-beta-ubuntu-2204-n150-large-stable-nk6pd
+        if len(parts) >= 2 and parts[-2] == "runner":
+            host_name = "-".join(parts[:-1])
+
+    # Cleanup GitHub-hosted runner names because we're sending the whole thing, which is unnecessary
+    # and clogs up the data with 1000s of hosts
+    if host_name and location == "github":
+        host_name = "GitHub Actions"
+
     os = ubuntu_version
 
     name = github_job["name"]
@@ -213,7 +245,7 @@ def get_job_row_from_github_job(github_job, github_job_id_to_annotations):
 
     if labels_have_overlap(["E150", "grayskull", "arch-grayskull"], labels):
         detected_arch = "grayskull"
-    elif labels_have_overlap(["N150", "N300", "wormhole_b0", "arch-wormhole_b0"], labels):
+    elif labels_have_overlap(["N150", "N300", "wormhole_b0", "arch-wormhole_b0", "config-t3000"], labels):
         detected_arch = "wormhole_b0"
     elif labels_have_overlap(["BH", "arch-blackhole"], labels):
         detected_arch = "blackhole"
@@ -226,8 +258,11 @@ def get_job_row_from_github_job(github_job, github_job_id_to_annotations):
     # In order of preference
     if detected_config:
         if not detected_arch:
-            raise Exception(f"There must be an arch detected for config {detected_config}")
-        card_type = f"{detected_config}-{detected_arch}"
+            # This will occur for jobs where runs-on: has a config-* label but doesn't have an arch-* or card-specific label
+            logger.warning(f"No arch label found for config {detected_config} in job label, unable to infer card type")
+            card_type = None
+        else:
+            card_type = f"{detected_config}-{detected_arch}"
     elif single_cards_overlap:
         logger.info(f"Detected overlap in single cards: {single_cards_overlap}")
         card_type = list(single_cards_overlap)[0]
@@ -243,11 +278,20 @@ def get_job_row_from_github_job(github_job, github_job_id_to_annotations):
     job_submission_ts_dt = get_datetime_from_github_datetime(job_submission_ts)
     job_start_ts_dt = get_datetime_from_github_datetime(job_start_ts)
 
-    if job_submission_ts_dt > job_start_ts_dt:
-        logger.warning(
-            f"Job {github_job_id} seems to have a start time that's earlier than submission. Setting equal for data"
-        )
-        job_submission_ts = job_start_ts
+    if job_submission_ts_dt > job_start_ts_dt or github_job["conclusion"] == "skipped":
+        if github_job["conclusion"] == "skipped":
+            # When the job is skipped, github may set the start timestamp to an invalid value
+            # In this case, just set the started_at timestamp to the created_at timestamp
+            # See https://github.com/tenstorrent/tt-metal/issues/24151 for an example
+            logger.warning(
+                f"Job {github_job_id} is skipped. Setting start timestamp equal to submission timestamp for data"
+            )
+            job_start_ts = job_submission_ts
+        else:
+            logger.warning(
+                f"Job {github_job_id} seems to have a start time that's earlier than submission. Setting start timestamp equal to submission timestamp for data"
+            )
+            job_submission_ts = job_start_ts
 
     job_end_ts = github_job["completed_at"]
 
@@ -266,7 +310,7 @@ def get_job_row_from_github_job(github_job, github_job_id_to_annotations):
     github_job_link = github_job["html_url"]
 
     failure_signature, failure_description = get_failure_signature_and_description_from_annotations(
-        github_job, github_job_id_to_annotations
+        github_job, github_job_id_to_annotations, workflow_outputs_dir
     )
 
     return {
@@ -291,14 +335,17 @@ def get_job_row_from_github_job(github_job, github_job_id_to_annotations):
     }
 
 
-def get_job_rows_from_github_info(github_pipeline_json, github_jobs_json, github_job_id_to_annotations):
+def get_job_rows_from_github_info(workflow_outputs_dir, github_jobs_json, github_job_id_to_annotations):
     job_rows = list(
-        map(lambda job: get_job_row_from_github_job(job, github_job_id_to_annotations), github_jobs_json["jobs"])
+        map(
+            lambda job: get_job_row_from_github_job(job, github_job_id_to_annotations, workflow_outputs_dir),
+            github_jobs_json["jobs"],
+        )
     )
     return [x for x in job_rows if x is not None]
 
 
-def get_github_partial_benchmark_json_filenames():
+def get_github_partial_benchmark_data_filenames():
     logger.info("We are assuming generated/benchmark_data exists from previous passing test")
 
     current_utils_path = pathlib.Path(__file__)
@@ -306,15 +353,15 @@ def get_github_partial_benchmark_json_filenames():
     assert benchmark_data_dir.exists()
     assert benchmark_data_dir.is_dir()
 
-    benchmark_json_paths = list(benchmark_data_dir.glob("partial_run_*.json"))
+    benchmark_data_paths = list(benchmark_data_dir.glob("partial_run_*.pkl"))
     assert len(
-        benchmark_json_paths
-    ), f"There needs to be at least one benchmark data json since we're completing the environment data for each one"
+        benchmark_data_paths
+    ), f"There needs to be at least one benchmark data pkl since we're completing the environment data for each one"
 
     logger.info(
-        f"The following partial benchmark data JSONs should be completed with environment data: {benchmark_json_paths}"
+        f"The following partial benchmark data PKLs should be completed with environment data: {benchmark_data_paths}"
     )
-    return benchmark_json_paths
+    return benchmark_data_paths
 
 
 def get_github_runner_environment():
@@ -326,7 +373,7 @@ def get_github_runner_environment():
     }
 
 
-def create_json_with_github_benchmark_environment(github_partial_benchmark_json_filename):
+def create_json_with_github_benchmark_environment(github_partial_benchmark_data_filename):
     assert "GITHUB_REPOSITORY" in os.environ
     git_repo_name = os.environ["GITHUB_REPOSITORY"]
 
@@ -368,30 +415,36 @@ def create_json_with_github_benchmark_environment(github_partial_benchmark_json_
 
     device_info = {"card_type": device_type, "dram_size": device_memory_size}
 
-    with open(github_partial_benchmark_json_filename, "r") as f:
-        partial_benchmark_data = json.load(f)
+    with open(github_partial_benchmark_data_filename, "rb") as f:
+        partial_benchmark_data = pickle.load(f)
 
-    partial_benchmark_data["git_repo_name"] = git_repo_name
-    partial_benchmark_data["git_commit_hash"] = git_commit_hash
-    partial_benchmark_data["git_commit_ts"] = git_commit_ts
-    partial_benchmark_data["git_branch_name"] = git_branch_name
-    partial_benchmark_data["github_pipeline_id"] = github_pipeline_id
-    partial_benchmark_data["github_pipeline_link"] = github_pipeline_link
-    partial_benchmark_data["github_job_id"] = github_job_id
-    partial_benchmark_data["user_name"] = user_name
-    partial_benchmark_data["docker_image"] = docker_image
-    partial_benchmark_data["device_hostname"] = device_hostname
-    partial_benchmark_data["device_ip"] = device_ip
-    partial_benchmark_data["device_info"] = device_info
+    partial_benchmark_data = partial_benchmark_data.model_copy(
+        update={
+            "git_repo_name": git_repo_name,
+            "git_commit_hash": git_commit_hash,
+            "git_commit_ts": git_commit_ts,
+            "git_branch_name": git_branch_name,
+            "github_pipeline_id": github_pipeline_id,
+            "github_pipeline_link": github_pipeline_link,
+            "github_job_id": github_job_id,
+            "user_name": user_name,
+            "docker_image": docker_image,
+            "device_hostname": device_hostname,
+            "device_ip": device_ip,
+            "device_info": device_info,
+        }
+    )
 
-    complete_benchmark_run = CompleteBenchmarkRun(**partial_benchmark_data)
+    complete_benchmark_run = CompleteBenchmarkRun(**partial_benchmark_data.model_dump())
 
     json_data = complete_benchmark_run.model_dump_json()
 
     # Save complete run json
-    output_path = pathlib.Path(str(github_partial_benchmark_json_filename).replace("partial_run_", "complete_run_"))
+    output_path = pathlib.Path(
+        str(github_partial_benchmark_data_filename).replace("partial_run_", "complete_run_")
+    ).with_suffix(".json")
     with open(output_path, "w") as f:
         f.write(json_data)
 
-    # Delete partial run json
-    os.remove(github_partial_benchmark_json_filename)
+    # Delete partial run pkl
+    os.remove(github_partial_benchmark_data_filename)

@@ -8,7 +8,6 @@ import torch
 
 import ttnn
 from models.utility_functions import comp_pcc
-from models.utility_functions import is_grayskull
 import ttnn
 
 
@@ -33,13 +32,9 @@ def generate_input_shapes():
 @pytest.mark.parametrize("in0_dtype", [ttnn.bfloat16, ttnn.bfloat8_b])
 @pytest.mark.parametrize("in1_dtype", [ttnn.bfloat16, ttnn.bfloat8_b])
 @pytest.mark.parametrize("out_dtype", [ttnn.bfloat16, ttnn.bfloat8_b])
-@pytest.mark.parametrize(
-    "enable_async, num_loops",
-    ((True, 20), (False, 1)),
-)
-def test_attn_matmul(num_loops, enable_async, in0_dtype, in1_dtype, out_dtype, device):
+@pytest.mark.parametrize("num_loops", [20])
+def test_attn_matmul(num_loops, in0_dtype, in1_dtype, out_dtype, device):
     torch.manual_seed(0)
-    device.enable_async(enable_async)
 
     for input_shape_a, input_shape_b in generate_input_shapes():
         for _ in range(num_loops):
@@ -67,18 +62,11 @@ def test_attn_matmul(num_loops, enable_async, in0_dtype, in1_dtype, out_dtype, d
             allclose, output = comp_pcc(tt_output_tensor, golden_output_tensor)
             assert allclose, f"FAILED: {output}"
 
-    device.enable_async(False)
 
-
-@pytest.mark.skipif(is_grayskull(), reason="GS does not support fp32")
 @pytest.mark.parametrize("in_dtype", [ttnn.float32, ttnn.bfloat16, ttnn.bfloat8_b])
-@pytest.mark.parametrize(
-    "enable_async, num_loops",
-    ((True, 20), (False, 1)),
-)
-def test_attn_matmul_fp32(num_loops, enable_async, in_dtype, device):
+@pytest.mark.parametrize("num_loops", [20])
+def test_attn_matmul_fp32(num_loops, in_dtype, device):
     torch.manual_seed(0)
-    device.enable_async(enable_async)
 
     for input_shape_a, input_shape_b in generate_input_shapes():
         for _ in range(num_loops):
@@ -112,21 +100,13 @@ def test_attn_matmul_fp32(num_loops, enable_async, in_dtype, device):
             allclose, output = comp_pcc(tt_output_tensor, golden_output_tensor)
             assert allclose, f"FAILED: {output}"
 
-    device.enable_async(False)
-
 
 @pytest.mark.parametrize("in0_dtype", [ttnn.bfloat16, ttnn.bfloat8_b])
 @pytest.mark.parametrize("in1_dtype", [ttnn.bfloat16, ttnn.bfloat8_b])
 @pytest.mark.parametrize("out_dtype", [ttnn.bfloat16, ttnn.bfloat8_b])
-@pytest.mark.parametrize(
-    "enable_async, num_loops",
-    ((True, 20), (False, 1)),
-)
-def test_attn_matmul_with_program_cache(
-    num_loops, enable_async, in0_dtype, in1_dtype, out_dtype, device, use_program_cache
-):
+@pytest.mark.parametrize("num_loops", [20])
+def test_attn_matmul_with_program_cache(num_loops, in0_dtype, in1_dtype, out_dtype, device):
     torch.manual_seed(0)
-    device.enable_async(enable_async)
     for input_shape_a, input_shape_b in generate_input_shapes():
         for _ in range(num_loops):
             input_tensor_a = torch.randn(input_shape_a).bfloat16()
@@ -150,7 +130,6 @@ def test_attn_matmul_with_program_cache(
 
             allclose, output = comp_pcc(tt_output_tensor, golden_output_tensor)
             assert allclose, f"FAILED: {output}"
-    device.enable_async(False)
 
 
 @pytest.mark.parametrize(
@@ -177,13 +156,9 @@ def test_attn_matmul_with_program_cache(
         (32, 64, 128, 16, 1),
     ),
 )
-@pytest.mark.parametrize(
-    "enable_async, num_loops",
-    ((True, 5), (False, 1)),
-)
+@pytest.mark.parametrize("num_loops", [5])
 def test_group_attn_matmul(
     num_loops,
-    enable_async,
     batch,
     K,
     seq_len,
@@ -196,8 +171,6 @@ def test_group_attn_matmul(
     device,
 ):
     torch.manual_seed(0)
-
-    device.enable_async(enable_async)
 
     compute_grid_size = device.compute_with_storage_grid_size()
 
@@ -271,23 +244,14 @@ def test_group_attn_matmul(
         allclose, output = comp_pcc(tt_output_tensor, golden_output_tensor)
         assert allclose, f"FAILED: {output}"
 
-    device.enable_async(False)
-
 
 @pytest.mark.parametrize("sharded", [False, True])
 @pytest.mark.parametrize("output_dtype", [ttnn.bfloat16, ttnn.bfloat8_b])
 @pytest.mark.parametrize("in1_dtype", [ttnn.bfloat16, ttnn.bfloat8_b])
 @pytest.mark.parametrize("in0_dtype", [ttnn.bfloat16, ttnn.bfloat8_b])
-@pytest.mark.parametrize(
-    "enable_async, num_loops",
-    ((True, 5), (False, 1)),
-)
-def test_group_attn_matmul_with_program_cache(
-    num_loops, enable_async, in0_dtype, in1_dtype, output_dtype, sharded, device, use_program_cache
-):
+@pytest.mark.parametrize("num_loops", [5])
+def test_group_attn_matmul_with_program_cache(num_loops, in0_dtype, in1_dtype, output_dtype, sharded, device):
     torch.manual_seed(0)
-
-    device.enable_async(enable_async)
 
     compute_grid_size = device.compute_with_storage_grid_size()
 
@@ -365,10 +329,7 @@ def test_group_attn_matmul_with_program_cache(
 
     assert num_cache_entries == 1
 
-    device.enable_async(False)
 
-
-@pytest.mark.skipif(is_grayskull(), reason="GS does not support fp32")
 @pytest.mark.parametrize("in_dtype", [ttnn.float32, ttnn.bfloat16])
 @pytest.mark.parametrize(
     "shard_orientation",
@@ -394,13 +355,9 @@ def test_group_attn_matmul_with_program_cache(
         (32, 32, 32, 2, 1),
     ),
 )
-@pytest.mark.parametrize(
-    "enable_async, num_loops",
-    ((True, 5), (False, 1)),
-)
+@pytest.mark.parametrize("num_loops", [5])
 def test_group_attn_matmul_fp32(
     num_loops,
-    enable_async,
     batch,
     K,
     seq_len,
@@ -414,8 +371,6 @@ def test_group_attn_matmul_fp32(
     device,
 ):
     torch.manual_seed(0)
-
-    device.enable_async(enable_async)
 
     compute_grid_size = device.compute_with_storage_grid_size()
 
@@ -492,4 +447,3 @@ def test_group_attn_matmul_fp32(
 
         allclose, output = comp_pcc(tt_output_tensor, golden_output_tensor)
         assert allclose, f"FAILED: {output}"
-    device.enable_async(False)

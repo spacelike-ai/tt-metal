@@ -2,11 +2,25 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include "debug_tools_fixture.hpp"
-#include "gtest/gtest.h"
-#include "debug_tools_test_utils.hpp"
-#include <tt-metalium/tt_metal.hpp>
+#include <fmt/base.h>
 #include <tt-metalium/host_api.hpp>
+#include <functional>
+#include <string>
+#include <unordered_set>
+#include <variant>
+#include <vector>
+
+#include <tt-metalium/core_coord.hpp>
+#include <tt-metalium/data_types.hpp>
+#include "debug_tools_fixture.hpp"
+#include "debug_tools_test_utils.hpp"
+#include <tt-metalium/device.hpp>
+#include "gtest/gtest.h"
+#include <tt-metalium/kernel_types.hpp>
+#include <tt-logger/tt-logger.hpp>
+#include <tt-metalium/program.hpp>
+#include "umd/device/types/arch.h"
+#include "umd/device/types/xy_pair.h"
 
 ////////////////////////////////////////////////////////////////////////////////
 // A test for printing from ethernet cores.
@@ -32,13 +46,12 @@ SETW:
 HEX/OCT/DEC:
 1e240361100123456)";
 
-static void RunTest(
+void RunTest(
     DPrintFixture* fixture,
     IDevice* device,
     bool active,
     DataMovementProcessor processor = DataMovementProcessor::RISCV_0) {
     // Try printing on all ethernet cores on this device
-    int count = 0;
     std::unordered_set<CoreCoord> test_cores;
     tt_metal::EthernetConfig config = {.noc = tt_metal::NOC::NOC_0, .processor = processor};
     if (active) {
@@ -53,11 +66,7 @@ static void RunTest(
         Program program = Program();
 
         // Create the kernel
-        KernelHandle erisc_kernel_id = CreateKernel(
-            program,
-            "tests/tt_metal/tt_metal/test_kernels/misc/erisc_print.cpp",
-            core,
-            config);
+        CreateKernel(program, "tests/tt_metal/tt_metal/test_kernels/misc/erisc_print.cpp", core, config);
 
         // Run the program
         log_info(
@@ -79,7 +88,7 @@ static void RunTest(
         );
 
         // Clear the log file for the next core's test
-        DPrintServerClearLogFile();
+        MetalContext::instance().dprint_server()->clear_log_file();
     }
 }
 }

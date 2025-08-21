@@ -3,10 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+
 import torch
+
 import ttnn
-from ttnn import ShardTensorToMesh
 from models.demos.t3000.falcon40b.tt.model_utils import matmul_2d_config_from_tensor_shapes
+from ttnn import ShardTensorToMesh
 
 
 class TtLlamaAttention_optimized:
@@ -540,12 +542,13 @@ class TtLlamaAttention_optimized:
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )  # seqlen, 1, batch, hidden_size
 
-        attn_output = ttnn.all_gather(
-            attn_output,
-            dim=3,
-            num_links=self.model_config["ALL_GATHER_NUM_LINKS"],
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
+        # attn_output = ttnn.all_gather(
+        #     attn_output,
+        #     dim=3,
+        #     num_links=self.model_config["ALL_GATHER_NUM_LINKS"],
+        #     memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        # )
+        assert False, "Legacy ccl call removed until new implementation is done"
 
         _, _, seq_len, _ = attn_output.shape
         max_mm_seq_len = self.model_config["MAX_MM_SEQ_LEN"]

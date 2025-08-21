@@ -2,11 +2,43 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <fmt/base.h>
 #include <gtest/gtest.h>
-
-#include "device_fixture.hpp"
-#include <tt-metalium/host_api.hpp>
+#include <limits.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <tt-metalium/bfloat16.hpp>
+#include <tt-metalium/host_api.hpp>
+#include <algorithm>
+#include <cstring>
+#include <exception>
+#include <functional>
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <tt-metalium/buffer.hpp>
+#include <tt-metalium/buffer_types.hpp>
+#include <tt-metalium/circular_buffer_config.hpp>
+#include <tt-metalium/core_coord.hpp>
+#include <tt-metalium/data_types.hpp>
+#include "device_fixture.hpp"
+#include "hostdevcommon/kernel_structs.h"
+#include <tt-metalium/kernel_types.hpp>
+#include <tt-logger/tt-logger.hpp>
+#include <tt-metalium/program.hpp>
+#include <tt_stl/span.hpp>
+#include <tt-metalium/tt_backend_api_types.hpp>
+#include <tt-metalium/tt_metal.hpp>
+
+namespace tt {
+namespace tt_metal {
+class IDevice;
+}  // namespace tt_metal
+}  // namespace tt
 
 namespace tt::tt_metal {
 
@@ -40,8 +72,7 @@ bool check_dropout(
         if (resf == 0.0f) {
             zero_count++;
         } else if (!is_close(resf, srcf * scale_factor)) {
-            tt::log_error(
-                tt::LogTest, "Invalid scaling for dropout src={}, res={}, scaling={}", srcf, resf, scale_factor);
+            log_error(tt::LogTest, "Invalid scaling for dropout src={}, res={}, scaling={}", srcf, resf, scale_factor);
             pass = false;
             break;
         }
@@ -50,13 +81,13 @@ bool check_dropout(
     float dropout_rate = (float)zero_count / (float)vec_size;
     bool rate_ok = is_close(probability, dropout_rate, 0.05f, 0.05f);
     if (!rate_ok) {
-        tt::log_error(
+        log_error(
             tt::LogTest,
             "Dropout rate & probability mismatch probability={}, dropout_rate={}",
             probability,
             dropout_rate);
     } else {
-        tt::log_info(tt::LogTest, "dropout probability={}, dropout_rate={} ", probability, dropout_rate);
+        log_info(tt::LogTest, "dropout probability={}, dropout_rate={} ", probability, dropout_rate);
     }
 
     pass &= rate_ok;
@@ -88,10 +119,8 @@ bool test_dropout_standalone(
             .buffer_type = tt_metal::BufferType::DRAM};
 
         std::shared_ptr<tt::tt_metal::Buffer> src0_dram_buffer = CreateBuffer(dram_config);
-        const uint32_t dram_buffer_src0_addr = src0_dram_buffer->address();
 
         std::shared_ptr<tt::tt_metal::Buffer> dst_dram_buffer = CreateBuffer(dram_config);
-        const uint32_t dram_buffer_dst_addr = dst_dram_buffer->address();
 
         /*
          * Use circular buffers to set input and output buffers that the
@@ -102,14 +131,14 @@ bool test_dropout_standalone(
         CircularBufferConfig cb_src0_config =
             CircularBufferConfig(num_input_tiles * single_tile_size, {{src0_cb_index, tt::DataFormat::Float16_b}})
                 .set_page_size(src0_cb_index, single_tile_size);
-        CBHandle cb_src0 = tt_metal::CreateCircularBuffer(program, core, cb_src0_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_src0_config);
 
         constexpr uint32_t output_cb_index = CBIndex::c_16;
         constexpr uint32_t num_output_tiles = 2;
         CircularBufferConfig cb_output_config =
             CircularBufferConfig(num_output_tiles * single_tile_size, {{output_cb_index, tt::DataFormat::Float16_b}})
                 .set_page_size(output_cb_index, single_tile_size);
-        CBHandle cb_output = tt_metal::CreateCircularBuffer(program, core, cb_output_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_output_config);
 
         /*
          * Specify data movement kernels for reading/writing data to/from
@@ -137,9 +166,9 @@ bool test_dropout_standalone(
             {"SFPU_OP_DROPOUT_INCLUDE", "1"},
         };
 
-        KernelHandle eltwise_sfpu_kernel_id = CreateKernel(
+        CreateKernel(
             program,
-            "/tests/tt_metal/tt_metal/test_kernels/compute/dropout_sfpu.cpp",
+            "tests/tt_metal/tt_metal/test_kernels/compute/dropout_sfpu.cpp",
             core,
             ComputeConfig{
                 .math_approx_mode = math_approx_mode,
@@ -192,8 +221,8 @@ bool test_dropout_standalone(
         res_vec = result_vec_bfloat16;
         pass &= check_dropout(src0_vec_bfloat16, result_vec_bfloat16, probability, scale_factor_f);
     } catch (const std::exception& e) {
-        tt::log_error(tt::LogTest, "Test failed with exception!");
-        tt::log_error(tt::LogTest, "{}", e.what());
+        log_error(tt::LogTest, "Test failed with exception!");
+        log_error(tt::LogTest, "{}", e.what());
         throw;
     }
 
@@ -212,10 +241,9 @@ void test_dropout(tt_metal::IDevice* device, const DropoutConfig& test_config) {
     pass &= test_dropout_standalone(device, probability, seed_0, fill_constant, res_1);
     bool repeatable = std::equal(res_0.begin(), res_0.end(), res_1.begin());
     if (!repeatable) {
-        tt::log_error(
-            tt::LogTest, "Same parameters gave different results probability={}, seed={}", probability, seed_0);
+        log_error(tt::LogTest, "Same parameters gave different results probability={}, seed={}", probability, seed_0);
     } else {
-        tt::log_info(tt::LogTest, "Two attempts with same parameters matched");
+        log_info(tt::LogTest, "Two attempts with same parameters matched");
     }
     pass &= repeatable;
 
@@ -223,14 +251,14 @@ void test_dropout(tt_metal::IDevice* device, const DropoutConfig& test_config) {
         pass &= test_dropout_standalone(device, probability, seed_1, fill_constant, res_2);
         bool unique = !std::equal(res_0.begin(), res_0.end(), res_2.begin());
         if (!unique) {
-            tt::log_error(
+            log_error(
                 tt::LogTest,
                 "Different seed gave same result probability={}, seed_0={}, seed_1={}",
                 probability,
                 seed_0,
                 seed_1);
         } else {
-            tt::log_info(tt::LogTest, "Different seed gave different results");
+            log_info(tt::LogTest, "Different seed gave different results");
         }
         pass &= unique;
     }

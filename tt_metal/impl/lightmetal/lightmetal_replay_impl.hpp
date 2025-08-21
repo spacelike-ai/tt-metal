@@ -10,7 +10,7 @@
 #include <optional>
 #include <tt-metalium/lightmetal_binary.hpp>
 
-#include <tt-metalium/program_impl.hpp>
+#include <tt-metalium/program.hpp>
 #include <tt-metalium/device.hpp>
 
 namespace tt::tt_metal {
@@ -40,7 +40,6 @@ struct CreateCircularBufferCommand;
 struct LightMetalCompareCommand;
 struct RuntimeArg;
 
-struct TraceDescriptor;
 struct TraceDescriptorByTraceId;
 struct LightMetalBinary;
 }  // namespace tt::tt_metal::flatbuffer
@@ -61,6 +60,7 @@ public:
     bool run();
 
     // Executor functions for all traced host API calls (commands)
+    // Trace APIs are no longer supported due to trace API deprecation. See Issue #24955
     void execute(const tt::tt_metal::flatbuffer::Command* command);
     void execute(const tt::tt_metal::flatbuffer::EnqueueTraceCommand* command);
     void execute(const tt::tt_metal::flatbuffer::ReplayTraceCommand* command);
@@ -103,10 +103,11 @@ public:
     void remove_cb_handle_from_map(uint32_t global_id);
 
     // Return the TraceDescriptor for a given trace_id from flatbuffer.
+    // No longer supported due to trace API deprecation. See Issue #24955
     std::optional<TraceDescriptor> get_trace_by_id(uint32_t target_trace_id);
 
     // fromFlatBuffer that need class state
-    std::shared_ptr<RuntimeArgs> rt_args_from_flatbuffer(const FlatbufferRuntimeArgVector flatbuffer_args);
+    std::shared_ptr<RuntimeArgs> rt_args_from_flatbuffer(FlatbufferRuntimeArgVector flatbuffer_args);
 
     // Workload related members --------------------
     const tt::tt_metal::flatbuffer::LightMetalBinary* parse_flatbuffer_binary();

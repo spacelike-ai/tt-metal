@@ -2,12 +2,19 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include "umd/device/tt_xy_pair.h"
+#include <stdint.h>
+#include <algorithm>
+#include <cstddef>
+#include <vector>
+
 #include "gtest/gtest.h"
-#include "ttnn/cpp/ttnn/operations/ccl/shared_with_host/hetergeneous_data_structs.hpp"
-#include "ttnn/cpp/ttnn/operations/ccl/ccl_common.hpp"
-#include "ttnn/cpp/ttnn/operations/ccl/ccl_host_datastructures.hpp"
 #include "tests/tt_metal/test_utils/env_vars.hpp"
+#include <tt-metalium/tt_backend_api_types.hpp>
+#include "ttnn/operations/ccl/ccl_common.hpp"
+#include "ttnn/operations/ccl/ccl_host_datastructures.hpp"
+#include "ttnn/operations/ccl/shared_with_host/hetergeneous_data_structs.hpp"
+#include "umd/device/tt_xy_pair.h"
+#include "umd/device/types/arch.h"
 
 TEST(CclHelpers, CreateEriscDatamoverBuilder_Chan4_PageSize2048_RRBufferSharingMode) {
     std::size_t num_channels = 4;
@@ -213,7 +220,6 @@ TEST(CclHelper_AdvanceSliceRowMajor, InnerOffset_0_0__InnerShape_1_1__OuterShape
     ASSERT_EQ(result.y, expected.y);
 }
 TEST(CclHelper_AdvanceSliceRowMajor, InnerOffset_1_1__InnerShape_1_1__OuterShape_2_2__NumActiveSlices_3) {
-    const auto expected = ttnn::ccl::coord_t(1, 1);
     const auto outer_shape = ttnn::ccl::coord_t(2, 2);
     const auto inner_offset = ttnn::ccl::coord_t(1, 1);
     const auto inner_shape = ttnn::ccl::coord_t(1, 1);
@@ -339,7 +345,6 @@ TEST(CclHelper_AdvanceWrappedSliceRowMajor, InnerOffset_0_0__InnerShape_1_1__Out
     ASSERT_EQ(result.y, expected.y);
 }
 TEST(CclHelper_AdvanceWrappedSliceRowMajor, InnerOffset_1_1__InnerShape_1_1__OuterShape_2_2__NumActiveSlices_3) {
-    const auto expected = ttnn::ccl::coord_t(1, 1);
     const auto outer_shape = ttnn::ccl::coord_t(2, 2);
     const auto inner_offset = ttnn::ccl::coord_t(1, 1);
     const auto inner_shape = ttnn::ccl::coord_t(1, 1);

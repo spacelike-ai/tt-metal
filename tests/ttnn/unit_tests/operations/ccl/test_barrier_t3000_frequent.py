@@ -9,6 +9,7 @@ import ttnn
 from tests.tt_eager.python_api_testing.sweep_tests.comparison_funcs import comp_equal, comp_pcc
 from models.utility_functions import skip_for_grayskull
 from tests.ttnn.unit_tests.operations.ccl.test_all_gather import is_unsupported_case_t3k
+from tests.tests_common.skip_reasons import LEGACY_CCL_SKIP
 from ttnn.distributed.distributed import ShardTensorToMesh
 
 
@@ -20,23 +21,21 @@ def sharded_impl(
     shard_grid,
     dim,
     num_links,
-    use_program_cache,
     function_level_defaults,
     orientation,
     input_dtype,
     tensor_layout,
     tensor_mem_layout,
     all_gather_topology,
-    enable_async,
     trace_mode,
     num_iter,
     tile=(32, 32),
 ):
+    pytest.skip(LEGACY_CCL_SKIP)
     if device.get_num_devices() < num_devices:
         pytest.skip("Not T3000!")
     n_worker = None
     n_buffer = None
-    device.enable_async(enable_async)
     unchunked_input_shape = list(input_shape)
     unchunked_input_shape[dim] *= num_devices
 
@@ -92,15 +91,17 @@ def sharded_impl(
     else:
         ## Alternate between barrier and all gather in a loop
         for i in range(num_iter):
-            tt_out_tensor = ttnn.all_gather(
-                input_tensor_mesh,
-                dim,
-                num_links=num_links,
-                memory_config=mem_config,
-                num_workers=n_worker,
-                num_buffers_per_channel=n_buffer,
-                topology=all_gather_topology,
-            )
+            # Legacy ccl call removed until new implementation is done - see https://github.com/tenstorrent/tt-metal/issues/26649
+            assert False, "Legacy ccl call removed until new implementation is done"
+            # tt_out_tensor = ttnn.all_gather(
+            #     input_tensor_mesh,
+            #     dim,
+            #     num_links=num_links,
+            #     memory_config=mem_config,
+            #     num_workers=n_worker,
+            #     num_buffers_per_channel=n_buffer,
+            #     topology=all_gather_topology,
+            # )
             ttnn.barrier(
                 input_tensor_mesh,
                 memory_config=mem_config,
@@ -120,15 +121,12 @@ def run_normal(
     layout,
     num_iters,
     all_gather_topology,
-    enable_async,
     tile=(32, 32),
 ):
     print("Running barrier test")
     if num_iters < 1:
         pytest.fail("num_iters must be >= 1")
 
-    if enable_async:
-        logger.info(f"Using Async Mode for Barrier Op Dispatch")
     logger.info(f"Input shape: {input_shape}")
     logger.info(f"dim: {dim}")
 
@@ -136,7 +134,6 @@ def run_normal(
     logger.info(f"dim: {dim}")
     input_tensor = torch.rand(input_shape).bfloat16()
     # Use Async mode based on test input config
-    device.enable_async(enable_async)
     input_tensor_mesh = ttnn.from_torch(
         input_tensor,
         device=device,
@@ -157,17 +154,20 @@ def run_normal(
 def run_with_trace(
     device, all_gather_topology, input_tensor_mesh, dim, num_links, output_mem_config, n_worker, n_buffer, num_iter
 ):
+    pytest.skip(LEGACY_CCL_SKIP)
     # Compile Run
     logger.info("Compiling model")
-    tt_out_tensor = ttnn.all_gather(
-        input_tensor_mesh,
-        dim,
-        num_links=num_links,
-        memory_config=output_mem_config,
-        num_workers=n_worker,
-        num_buffers_per_channel=n_buffer,
-        topology=all_gather_topology,
-    )
+    # Legacy ccl call removed until new implementation is done - see https://github.com/tenstorrent/tt-metal/issues/26649
+    assert False, "Legacy ccl call removed until new implementation is done"
+    # tt_out_tensor = ttnn.all_gather(
+    #     input_tensor_mesh,
+    #     dim,
+    #     num_links=num_links,
+    #     memory_config=output_mem_config,
+    #     num_workers=n_worker,
+    #     num_buffers_per_channel=n_buffer,
+    #     topology=all_gather_topology,
+    # )
     ttnn.barrier(
         input_tensor_mesh,
         memory_config=output_mem_config,
@@ -179,16 +179,18 @@ def run_with_trace(
     logger.info("Capturing trace")
     trace_id = ttnn.begin_trace_capture(device, cq_id=0)
     for i in range(num_iter):
+        # Legacy ccl call removed until new implementation is done - see https://github.com/tenstorrent/tt-metal/issues/26649
+        assert False, "Legacy ccl call removed until new implementation is done"
         # Alternate between barrier and all gather in a loop
-        tt_out_tensor = ttnn.all_gather(
-            input_tensor_mesh,
-            dim,
-            num_links=num_links,
-            memory_config=output_mem_config,
-            num_workers=n_worker,
-            num_buffers_per_channel=n_buffer,
-            topology=all_gather_topology,
-        )
+        # tt_out_tensor = ttnn.all_gather(
+        #     input_tensor_mesh,
+        #     dim,
+        #     num_links=num_links,
+        #     memory_config=output_mem_config,
+        #     num_workers=n_worker,
+        #     num_buffers_per_channel=n_buffer,
+        #     topology=all_gather_topology,
+        # )
         ttnn.barrier(
             input_tensor_mesh,
             memory_config=output_mem_config,
@@ -231,7 +233,6 @@ def run_with_trace(
         ),
     ),
 )
-@pytest.mark.parametrize("enable_async", [True])
 @pytest.mark.parametrize("all_gather_topology", [ttnn.Topology.Ring])
 @pytest.mark.parametrize("num_iters", [1000])
 @pytest.mark.parametrize("mem_config", [ttnn.MemoryConfig(buffer_type=ttnn.BufferType.DRAM)])
@@ -247,7 +248,6 @@ def test_run_barrier_impl(
     layout,
     num_iters,
     all_gather_topology,
-    enable_async,
 ):
     if t3k_mesh_device.get_num_devices() < num_devices:
         pytest.skip("Not T3000!")
@@ -261,7 +261,6 @@ def test_run_barrier_impl(
         layout,
         num_iters,
         all_gather_topology,
-        enable_async,
     )
 
 
@@ -291,7 +290,6 @@ def test_run_barrier_impl(
         ),
     ),
 )
-@pytest.mark.parametrize("enable_async", [True])
 @pytest.mark.parametrize("all_gather_topology", [ttnn.Topology.Ring])
 @pytest.mark.parametrize("num_iters", [1000])
 @pytest.mark.parametrize("mem_config", [ttnn.MemoryConfig(buffer_type=ttnn.BufferType.DRAM)])
@@ -307,7 +305,6 @@ def test_run_barrier_impl_pcie(
     layout,
     num_iters,
     all_gather_topology,
-    enable_async,
 ):
     if pcie_mesh_device.get_num_devices() < num_devices:
         pytest.skip("Not T3000!")
@@ -321,7 +318,6 @@ def test_run_barrier_impl_pcie(
         layout,
         num_iters,
         all_gather_topology,
-        enable_async,
     )
 
 
@@ -353,7 +349,6 @@ def test_run_barrier_impl_pcie(
     ),
 )
 @pytest.mark.parametrize("trace_mode", [True, False])
-@pytest.mark.parametrize("enable_async", [True])
 @pytest.mark.parametrize("num_iter", [1000])
 @pytest.mark.parametrize("all_gather_topology", [ttnn.Topology.Ring])
 @pytest.mark.parametrize("device_params", [{"trace_region_size": 7840768}], indirect=True)
@@ -365,14 +360,12 @@ def test_barrier_sharded(
     shard_grid,
     dim,
     num_links,
-    use_program_cache,
     function_level_defaults,
     orientation,
     input_dtype,
     tensor_layout,
     tensor_mem_layout,
     all_gather_topology,
-    enable_async,
     trace_mode,
     num_iter,
 ):
@@ -384,14 +377,12 @@ def test_barrier_sharded(
         shard_grid,
         dim,
         num_links,
-        use_program_cache,
         function_level_defaults,
         orientation,
         input_dtype,
         tensor_layout,
         tensor_mem_layout,
         all_gather_topology,
-        enable_async,
         trace_mode,
         num_iter,
     )
@@ -423,7 +414,6 @@ def test_barrier_sharded(
         ),
     ),
 )
-@pytest.mark.parametrize("enable_async", [True])
 @pytest.mark.parametrize("all_gather_topology", [ttnn.Topology.Ring])
 @pytest.mark.parametrize("num_iters", [1000])
 @pytest.mark.parametrize("mem_config", [ttnn.MemoryConfig(buffer_type=ttnn.BufferType.DRAM)])
@@ -440,7 +430,6 @@ def test_run_barrier_tiny_tile(
     layout,
     num_iters,
     all_gather_topology,
-    enable_async,
     tile_h,
 ):
     if t3k_mesh_device.get_num_devices() < num_devices:
@@ -455,6 +444,5 @@ def test_run_barrier_tiny_tile(
         layout,
         num_iters,
         all_gather_topology,
-        enable_async,
         tile=(tile_h, 32),
     )

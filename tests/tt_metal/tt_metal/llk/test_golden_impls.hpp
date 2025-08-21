@@ -15,11 +15,12 @@ namespace unit_tests::compute {
 
 // Used if golden function needs tile details
 struct GoldenConfig {
-    int num_tiles_r_dim;
-    int num_tiles_c_dim;
+    int num_tiles_r_dim{};
+    int num_tiles_c_dim{};
     int face_r_dim = 16;
     int face_c_dim = 16;
     int num_faces = 4;
+    bool tiny_tile = false;
 };
 
 std::vector<uint32_t> gold_standard_untilize(const std::vector<uint32_t>& src_vec, const GoldenConfig& config);

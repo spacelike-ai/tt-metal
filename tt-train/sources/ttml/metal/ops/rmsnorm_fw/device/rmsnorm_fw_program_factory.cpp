@@ -7,7 +7,10 @@
 #include <bit>
 #include <cstdint>
 
+#include "metal/ops/common/program_utils.hpp"
 #include "rmsnorm_fw_device_operation_types.hpp"
+
+#include <enchantum/enchantum.hpp>
 
 namespace {
 
@@ -54,22 +57,6 @@ const std::string kReturnRMSDefineKey = "RETURN_RMS";
 const std::string kEverythingFitsInL1DefineKey = "EVERYTHING_FITS_IN_L1";
 const std::string kEverythingExceptGammaFitsInL1DefineKey = "EVERYTHING_EXCEPT_GAMMA_FITS_IN_L1";
 
-uint32_t pack_two_bfloat16_to_uint32(float value) {
-    uint32_t uint32_data = std::bit_cast<uint32_t>(value);
-    uint32_t casted_uint16_data = uint32_data >> 16U;
-    return casted_uint16_data | (casted_uint16_data << 16);
-}
-
-uint32_t get_block_size(uint32_t num_inner) {
-    const uint32_t max_block_size = 4U;  // 4 is the maximum block size for enabled fp32 dest acc
-    for (uint32_t block_size = max_block_size; block_size > 1; block_size--) {
-        if (num_inner % block_size == 0) {
-            return block_size;
-        }
-    }
-    return 1U;
-}
-
 }  // namespace
 
 namespace ttml::metal::ops::rmsnorm_fw::device {
@@ -84,71 +71,6 @@ struct RMSNormForwardKernels {
     tt::tt_metal::KernelHandle compute_group_1;
     tt::tt_metal::KernelHandle compute_group_2;
 };
-
-/**
- *   Create and configure a circular buffer, returning both the configuration and the handle.
- */
-tt::tt_metal::CBHandle create_circular_buffer(
-    tt::tt_metal::Program& program,
-    const tt::tt_metal::CoreRangeSet& core_ranges,
-    uint32_t cb_index,
-    tt::DataFormat data_format,
-    uint32_t single_tile_size,
-    uint32_t num_tiles) {
-    tt::tt_metal::CircularBufferConfig cb_config =
-        tt::tt_metal::CircularBufferConfig(num_tiles * single_tile_size, {{cb_index, data_format}})
-            .set_page_size(cb_index, single_tile_size);
-
-    auto cb_handle = CreateCircularBuffer(program, core_ranges, cb_config);
-    return cb_handle;
-}
-
-/**
- *   Create a reader kernel with the given compile-time arguments.
- */
-tt::tt_metal::KernelHandle create_reader_kernel(
-    tt::tt_metal::Program& program,
-    const tt::tt_metal::CoreRangeSet& core_ranges,
-    const std::vector<uint32_t>& compile_time_args,
-    const std::map<std::string, std::string>& defines,
-    const std::string& kernel_path) {
-    return tt::tt_metal::CreateKernel(
-        program, kernel_path, core_ranges, tt::tt_metal::ReaderDataMovementConfig(compile_time_args, defines));
-}
-
-/**
- *   Create a writer kernel with the given compile-time arguments.
- */
-tt::tt_metal::KernelHandle create_writer_kernel(
-    tt::tt_metal::Program& program,
-    const tt::tt_metal::CoreRangeSet& core_ranges,
-    const std::vector<uint32_t>& compile_time_args,
-    const std::map<std::string, std::string>& defines,
-    const std::string& kernel_path) {
-    return tt::tt_metal::CreateKernel(
-        program, kernel_path, core_ranges, tt::tt_metal::WriterDataMovementConfig(compile_time_args, defines));
-}
-
-/**
- * Create a compute kernel with the given compile-time arguments.
- */
-tt::tt_metal::KernelHandle create_compute_kernel(
-    tt::tt_metal::Program& program,
-    const tt::tt_metal::CoreRangeSet& core_ranges,
-    const std::vector<uint32_t>& compile_time_args,
-    const std::map<std::string, std::string>& defines,
-    const std::string& kernel_path) {
-    return tt::tt_metal::CreateKernel(
-        program,
-        kernel_path,
-        core_ranges,
-        tt::tt_metal::ComputeConfig{
-            .math_fidelity = MathFidelity::HiFi4,
-            .fp32_dest_acc_en = true,
-            .math_approx_mode = false,
-            .compile_args = compile_time_args,
-            .defines = defines});
-}
 
 /**
  * Set up the runtime arguments for the 4 relevant kernels (reader, writer, compute G1, compute G2)
@@ -210,14 +132,14 @@ RMSNormForwardProgramFactory::cached_program_t RMSNormForwardProgramFactory::cre
 
     tt::tt_metal::Program program{};
 
-    tt::DataFormat input_data_format = datatype_to_dataformat_converter(input.get_dtype());
+    tt::DataFormat input_data_format = datatype_to_dataformat_converter(input.dtype());
     TT_FATAL(input_data_format == tt::DataFormat::Float16_b, "Input data format must be Float16_b");
 
     uint32_t bfloat16_single_tile_size_bytes = tt::tt_metal::detail::TileSize(tt::DataFormat::Float16_b);
     uint32_t float32_single_tile_size_bytes = tt::tt_metal::detail::TileSize(tt::DataFormat::Float32);
 
-    auto padded_tensor_shape = input.get_padded_shape();
-    auto padded_tensor_volume = input.volume();
+    auto padded_tensor_shape = input.padded_shape();
+    auto padded_tensor_volume = input.physical_volume();
     TT_FATAL(
         padded_tensor_volume % tt::constants::TILE_HW == 0, "Padded input tensor volume must be divisible by TILE_HW");
     TT_FATAL(padded_tensor_shape.rank() == 4U, "Input tensor must be 4D");
@@ -230,13 +152,13 @@ RMSNormForwardProgramFactory::cached_program_t RMSNormForwardProgramFactory::cre
     uint32_t num_cores_x = compute_with_storage_grid_size.x;
     uint32_t num_cores_y = compute_with_storage_grid_size.y;
 
-    uint32_t num_inner = input.get_logical_shape()[-1];
+    uint32_t num_inner = input.logical_shape()[-1];
 
     // compile arguments
     uint32_t packed_scaler = pack_two_bfloat16_to_uint32(1.F / static_cast<float>(num_inner));
     uint32_t packed_eps = pack_two_bfloat16_to_uint32(args.epsilon);
     uint32_t mask_w = num_inner % tt::constants::TILE_WIDTH;
-    uint32_t block_size = get_block_size(Wt);
+    uint32_t block_size = get_block_size(Wt, 3U);
 
     auto [num_cores, all_cores, core_group_1, core_group_2, num_rows_per_core_group_1, num_rows_per_core_group_2] =
         tt::tt_metal::split_work_to_cores(compute_with_storage_grid_size, total_rows_to_process);
@@ -268,7 +190,7 @@ RMSNormForwardProgramFactory::cached_program_t RMSNormForwardProgramFactory::cre
 
     const uint32_t num_input_tiles =
         (everything_fits_in_l1 | everything_except_gamma_fits_in_l1) ? Wt : twice_block_size;
-    const uint32_t num_gamma_tiles = everything_except_gamma_fits_in_l1 ? Wt : twice_block_size;
+    const uint32_t num_gamma_tiles = everything_fits_in_l1 ? Wt : twice_block_size;
 
     auto data_format = input_data_format;
     auto precise_data_format = tt::DataFormat::Float32;
@@ -328,25 +250,25 @@ RMSNormForwardProgramFactory::cached_program_t RMSNormForwardProgramFactory::cre
     TT_FATAL(
         input_buffer->buffer_type() == ttnn::BufferType::DRAM,
         "Input buffer must be in DRAM. Input buffer of type {}",
-        magic_enum::enum_name(input_buffer->buffer_type()));
+        enchantum::to_string(input_buffer->buffer_type()));
 
     auto* gamma_buffer = gamma.buffer();
     TT_FATAL(
         gamma_buffer->buffer_type() == ttnn::BufferType::DRAM,
         "Gamma buffer must be in DRAM. Gamma buffer of type {}",
-        magic_enum::enum_name(gamma_buffer->buffer_type()));
+        enchantum::to_string(gamma_buffer->buffer_type()));
 
     auto* output_buffer = output.front().buffer();
     TT_FATAL(
         output_buffer->buffer_type() == ttnn::BufferType::DRAM,
         "Output buffer must be in DRAM. Output buffer of type {}",
-        magic_enum::enum_name(output_buffer->buffer_type()));
+        enchantum::to_string(output_buffer->buffer_type()));
 
     auto* rms_output_buffer = output.back().buffer();
     TT_FATAL(
         rms_output_buffer->buffer_type() == ttnn::BufferType::DRAM,
         "RMS output buffer must be in DRAM. RMS output buffer of type {}",
-        magic_enum::enum_name(rms_output_buffer->buffer_type()));
+        enchantum::to_string(rms_output_buffer->buffer_type()));
 
     // configure defines
     std::map<std::string, std::string> defines;
@@ -392,8 +314,8 @@ RMSNormForwardProgramFactory::cached_program_t RMSNormForwardProgramFactory::cre
         Wt                          // num_inner / TILE_W
     };
 
-    kernels.compute_group_1 =
-        create_compute_kernel(program, core_group_1, compute_group_1_args, defines, kComputeKernelPath);
+    kernels.compute_group_1 = create_compute_kernel(
+        program, core_group_1, compute_group_1_args, defines, kComputeKernelPath, /*fp32_dest_acc_en=*/true);
 
     // Group 2 (if present) compile-time arguments
     if (!core_group_2.ranges().empty()) {
@@ -403,8 +325,8 @@ RMSNormForwardProgramFactory::cached_program_t RMSNormForwardProgramFactory::cre
             Wt                          // num_inner / TILE_W
         };
 
-        kernels.compute_group_2 =
-            create_compute_kernel(program, core_group_2, compute_group_2_args, defines, kComputeKernelPath);
+        kernels.compute_group_2 = create_compute_kernel(
+            program, core_group_2, compute_group_2_args, defines, kComputeKernelPath, /*fp32_dest_acc_en=*/true);
     }
 
     // -------------------------------------------------------------------------

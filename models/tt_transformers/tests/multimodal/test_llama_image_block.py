@@ -1,23 +1,20 @@
 # SPDX-FileCopyrightText: © 2023 Tenstorrent Inc.
 
 # SPDX-License-Identifier: Apache-2.0
-import torch
-import pytest
-from loguru import logger
 import os
-import ttnn
 
 import llama_models.llama3.reference_impl.multimodal.model as llama_reference_mod
+import pytest
+import torch
 from llama_models.llama3.reference_impl.multimodal import encoder_utils
-from models.tt_transformers.tt.multimodal.llama_image_block import TtLlamaImageTransformerBlock
-from models.tt_transformers.tt.multimodal.llama_vision_encoder import pad_seq_one_tile, mask_tile_padding
-from models.tt_transformers.tt.model_config import ModelArgs
+from loguru import logger
 
-from models.utility_functions import (
-    comp_pcc,
-    comp_allclose,
-)
-from models.utility_functions import skip_for_grayskull
+import ttnn
+from models.tt_transformers.tt.ccl import TT_CCL
+from models.tt_transformers.tt.model_config import ModelArgs
+from models.tt_transformers.tt.multimodal.llama_image_block import TtLlamaImageTransformerBlock
+from models.tt_transformers.tt.multimodal.llama_vision_encoder import mask_tile_padding, pad_seq_one_tile
+from models.utility_functions import comp_allclose, comp_pcc, skip_for_grayskull
 
 
 @skip_for_grayskull("Requires wormhole_b0 to run")
@@ -38,14 +35,13 @@ from models.utility_functions import skip_for_grayskull
     ],
     indirect=True,
 )
-def test_block_inference(batch, num_chunks, mesh_device, gated, use_program_cache, reset_seeds, ensure_gc):
+@pytest.mark.parametrize("device_params", [{"fabric_config": True}], indirect=True)
+def test_block_inference(batch, num_chunks, mesh_device, gated, reset_seeds, ensure_gc):
     dtype = ttnn.bfloat16
     pcc_required = 0.99
 
-    mesh_device.enable_async(True)
-
     model_args = ModelArgs(mesh_device)
-    state_dict = torch.load(model_args.consolidated_weights_path, map_location=torch.device("cpu"))
+    state_dict = model_args.load_state_dict()
 
     # Ref model needs partial state dict, but our models use full state dict keys as cached weight names
     if gated:
@@ -64,8 +60,10 @@ def test_block_inference(batch, num_chunks, mesh_device, gated, use_program_cach
     )
     reference_model.load_state_dict(partial_state_dict)
 
+    tt_ccl = TT_CCL(mesh_device)
     tt_model = TtLlamaImageTransformerBlock(
         mesh_device,
+        tt_ccl,
         state_dict,
         state_dict_prefix=first_layer_prefix,
         weight_cache_path=model_args.weight_cache_path(dtype),

@@ -17,16 +17,16 @@ void kernel_main() {
 
     constexpr uint32_t cb_out = tt::CBIndex::c_16;
 
-    constexpr bool dst_is_dram = get_compile_time_arg_val(0) == 1;
     uint32_t num_bytes_per_tile = get_tile_size(cb_out);
 
-    const InterleavedAddrGen<dst_is_dram> s0 = {.bank_base_address = dst_addr, .page_size = num_bytes_per_tile};
+    constexpr auto dst_args = TensorAccessorArgs<0>();
+    const auto s0 = TensorAccessor(dst_args, dst_addr, num_bytes_per_tile);
 
-    typedef union {
+    union value {
         float f;
         uint32_t u;
-    } u;
-    u start_u, step_u;
+    };
+    value start_u, step_u;
 
     start_u.u = start;
     step_u.u = step;
@@ -42,13 +42,13 @@ void kernel_main() {
         auto ptr = reinterpret_cast<uint16_t*>(w_addr);
         for (uint32_t w = 0; w < 16; w++) {
             int32_t idx = w + tile_idx * TILE_WIDTH;
-            u val;
+            value val;
             val.f = start_u.f + step_u.f * idx;
             ptr[w] = uint16_t(val.u >> 16);
         }
         for (uint32_t w = 0; w < 16; w++) {
             int32_t idx = (w + 16) + tile_idx * TILE_WIDTH;
-            u val;
+            value val;
             val.f = start_u.f + step_u.f * idx;
             ptr[w + 256] = uint16_t(val.u >> 16);
         }
@@ -72,13 +72,13 @@ void kernel_main() {
         auto ptr = reinterpret_cast<uint32_t*>(w_addr);
         for (uint32_t w = 0; w < 16; w++) {
             int32_t idx = w + tile_idx * TILE_WIDTH;
-            u val;
+            value val;
             val.f = start_u.f + step_u.f * idx;
             ptr[w] = val.u;
         }
         for (uint32_t w = 0; w < 16; w++) {
             int32_t idx = (w + 16) + tile_idx * TILE_WIDTH;
-            u val;
+            value val;
             val.f = start_u.f + step_u.f * idx;
             ptr[w + 256] = val.u;
         }

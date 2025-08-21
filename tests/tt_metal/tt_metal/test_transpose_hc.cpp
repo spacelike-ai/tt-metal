@@ -2,16 +2,45 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include <algorithm>
-#include <functional>
-#include <random>
-
-#include <tt-metalium/host_api.hpp>
+#include <errno.h>
+#include <fmt/base.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <sys/types.h>
 #include <tt-metalium/bfloat16.hpp>
-#include "test_gold_impls.hpp"
-#include <tt-metalium/tt_metal.hpp>
-
+#include <tt-metalium/host_api.hpp>
 #include <tt-metalium/tilize_utils.hpp>
+#include <tt-metalium/tt_metal.hpp>
+#include <algorithm>
+#include <cstring>
+#include <exception>
+#include <functional>
+#include <map>
+#include <memory>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <tt-metalium/assert.hpp>
+#include <tt-metalium/buffer.hpp>
+#include <tt-metalium/buffer_types.hpp>
+#include <tt-metalium/circular_buffer_config.hpp>
+#include <tt-metalium/core_coord.hpp>
+#include <tt-metalium/data_types.hpp>
+#include "hostdevcommon/kernel_structs.h"
+#include <tt-metalium/kernel_types.hpp>
+#include <tt-logger/tt-logger.hpp>
+#include <tt-metalium/program.hpp>
+#include <tt_stl/span.hpp>
+#include "test_gold_impls.hpp"
+#include <tt-metalium/tt_backend_api_types.hpp>
+
+namespace tt {
+namespace tt_metal {
+class IDevice;
+}  // namespace tt_metal
+}  // namespace tt
 
 using std::vector;
 using namespace tt;
@@ -78,7 +107,7 @@ int main(int argc, char** argv) {
             tt_metal::CircularBufferConfig(
                 num_buffer_tiles * single_tile_bytes, {{src0_cb_index, tt::DataFormat::Float16_b}})
                 .set_page_size(src0_cb_index, single_tile_bytes);
-        auto cb_src0 = tt_metal::CreateCircularBuffer(program, core, cb_src0_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_src0_config);
 
         uint32_t ouput_cb_index = tt::CBIndex::c_16;
         // this buffer is used in writer_unary.cpp BRISC kernel
@@ -86,7 +115,7 @@ int main(int argc, char** argv) {
             tt_metal::CircularBufferConfig(
                 num_buffer_tiles * single_tile_bytes, {{ouput_cb_index, tt::DataFormat::Float16_b}})
                 .set_page_size(ouput_cb_index, single_tile_bytes);
-        auto cb_output = tt_metal::CreateCircularBuffer(program, core, cb_output_config);
+        tt_metal::CreateCircularBuffer(program, core, cb_output_config);
 
         uint32_t W = shape[3], H = shape[2], C = shape[1], N = shape[0];
         uint32_t HW = H * W;
@@ -110,7 +139,7 @@ int main(int argc, char** argv) {
 
         vector<uint32_t> compute_kernel_args = {uint(num_tensor_tiles)};
 
-        auto blank_binary_kernel = tt_metal::CreateKernel(
+        tt_metal::CreateKernel(
             program,
             "tests/tt_metal/tt_metal/test_kernels/compute/eltwise_copy.cpp",
             core,
@@ -155,20 +184,14 @@ int main(int argc, char** argv) {
         };
 
         // recover a linear view of input vector for consumption by gold_ function
-        vector<uint16_t> src_linear = convert_layout<uint16_t>(
-            src_4f_16,
-            shape,
-            tests::utils::TensorLayoutType::TILED_NFACES,
-            tests::utils::TensorLayoutType::LIN_ROW_MAJOR);
+        vector<uint16_t> src_linear =
+            convert_layout<uint16_t>(src_4f_16, shape, TensorLayoutType::TILED_NFACES, TensorLayoutType::LIN_ROW_MAJOR);
         vector<uint16_t> gold_reduced = gold_transpose_hc(src_linear, shape);  // result is uint16_t untilized
 
         // Tilize from row major and convert to pairs (uint32_t)
         vector<uint32_t> shapeR{shape[0], shape[2], shape[1], shape[3]};
         auto gold_16_4f = convert_layout<uint16_t>(
-            gold_reduced,
-            shapeR,
-            tests::utils::TensorLayoutType::LIN_ROW_MAJOR,
-            tests::utils::TensorLayoutType::TILED_NFACES);
+            gold_reduced, shapeR, TensorLayoutType::LIN_ROW_MAJOR, TensorLayoutType::TILED_NFACES);
         auto gold_4f_u32 = u32_from_u16_vector(gold_16_4f);
         auto u16_result = u16_from_u32_vector(result_vec);
 

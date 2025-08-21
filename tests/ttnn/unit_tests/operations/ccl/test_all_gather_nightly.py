@@ -7,12 +7,16 @@ import pytest
 from loguru import logger
 import ttnn
 from tests.tt_eager.python_api_testing.sweep_tests.comparison_funcs import comp_equal, comp_pcc
+from tests.tests_common.skip_reasons import LEGACY_CCL_SKIP
 from models.utility_functions import skip_for_grayskull
 from tests.ttnn.unit_tests.operations.ccl.test_all_gather import (
     is_unsupported_case,
     run_all_gather_on_t3000_impl,
 )
 from ttnn import ShardTensorToMesh
+
+
+pytestmark = pytest.mark.skip(reason=LEGACY_CCL_SKIP)
 
 
 # Enumerate the post-commit cases explicitly
@@ -47,7 +51,6 @@ from ttnn import ShardTensorToMesh
         ttnn.MemoryConfig(buffer_type=ttnn.BufferType.L1),
     ],
 )
-@pytest.mark.parametrize("enable_async", [True, False])
 @pytest.mark.parametrize("tile_h", [32])
 def test_line_all_gather_on_t3000_nightly(
     t3k_mesh_device,
@@ -58,9 +61,7 @@ def test_line_all_gather_on_t3000_nightly(
     input_dtype,
     layout,
     mem_config,
-    use_program_cache,
     function_level_defaults,
-    enable_async,
     tile_h,
     num_iters=1,
 ):
@@ -73,10 +74,8 @@ def test_line_all_gather_on_t3000_nightly(
         input_dtype,
         layout,
         mem_config,
-        use_program_cache,
         function_level_defaults,
         all_gather_topology=ttnn.Topology.Linear,
-        enable_async=enable_async,
         num_iters=num_iters,
         tile=(tile_h, 32),
     )
@@ -109,7 +108,6 @@ def test_line_all_gather_on_t3000_nightly(
         ttnn.MemoryConfig(buffer_type=ttnn.BufferType.L1),
     ],
 )
-@pytest.mark.parametrize("enable_async", [True, False])
 def test_line_all_gather_on_t3000_nightly_two_link(
     pcie_mesh_device,
     num_devices,
@@ -119,9 +117,7 @@ def test_line_all_gather_on_t3000_nightly_two_link(
     input_dtype,
     layout,
     mem_config,
-    use_program_cache,
     function_level_defaults,
-    enable_async,
     num_iters=1,
 ):
     run_all_gather_on_t3000_impl(
@@ -133,11 +129,9 @@ def test_line_all_gather_on_t3000_nightly_two_link(
         input_dtype,
         layout,
         mem_config,
-        use_program_cache,
         function_level_defaults,
         all_gather_topology=ttnn.Topology.Linear,
         num_iters=num_iters,
-        enable_async=enable_async,
     )
 
 
@@ -151,16 +145,12 @@ def run_line_all_gather_instances(
     input_dtype,
     layout,
     mem_config,
-    use_program_cache,
     function_level_defaults,
-    enable_async,
     num_iters=1,
     tile=(32, 32),
 ):
     if t3k_mesh_device.get_num_devices() != 8:
         pytest.skip("Not T3000!")
-
-    t3k_mesh_device.enable_async(enable_async)
 
     logger.info(f"Input shape: {input_shape}")
     logger.info(f"dim: {dim}")
@@ -173,7 +163,7 @@ def run_line_all_gather_instances(
 
     t3k_device = []
 
-    for device in t3k_mesh_device.get_devices():
+    for device in t3k_mesh_device.get_device_ids():
         t3k_device.append(device)
     t3k_device[4:] = t3k_device[::-1][:4]
     t3000_device_rows = [
@@ -193,11 +183,13 @@ def run_line_all_gather_instances(
     result_mesh_tensors = []
     for loop in range(num_iters):
         for i, devices in enumerate(t3000_device_rows):
-            tt_out_tensor = ttnn.all_gather(
-                input_tensor_mesh, dim, num_links=num_links, memory_config=mem_config, topology=ttnn.Topology.Linear
-            )
-            result_mesh_tensors.append(tt_out_tensor)
-
+            pytest.skip(LEGACY_CCL_SKIP)
+            # Legacy ccl call removed until new implementation is done - see https://github.com/tenstorrent/tt-metal/issues/26649
+            # tt_out_tensor = ttnn.all_gather(
+            #     input_tensor_mesh, dim, num_links=num_links, memory_config=mem_config, topology=ttnn.Topology.Linear
+            # )
+            # result_mesh_tensors.append(tt_out_tensor)
+            assert False, "Legacy ccl call removed until new implementation is done"
     for loop in range(num_iters):
         ## Wait for completion
         ttnn.synchronize_device(t3k_mesh_device)
@@ -240,7 +232,6 @@ def run_line_all_gather_instances(
         ttnn.MemoryConfig(buffer_type=ttnn.BufferType.L1),
     ],
 )
-@pytest.mark.parametrize("enable_async", [True, False])
 def test_line_all_gather_on_t3000_nightly_instances(
     t3k_mesh_device,
     num_devices,
@@ -251,9 +242,7 @@ def test_line_all_gather_on_t3000_nightly_instances(
     input_dtype,
     layout,
     mem_config,
-    use_program_cache,
     function_level_defaults,
-    enable_async,
     num_iters=1,
 ):
     run_line_all_gather_instances(
@@ -266,8 +255,6 @@ def test_line_all_gather_on_t3000_nightly_instances(
         input_dtype,
         layout,
         mem_config,
-        use_program_cache,
         function_level_defaults,
-        enable_async,
         num_iters,
     )

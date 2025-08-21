@@ -8,14 +8,19 @@ if(DEFINED ENV{CMAKE_C_COMPILER} AND DEFINED ENV{CMAKE_CXX_COMPILER})
 endif()
 
 if(CMAKE_CXX_COMPILER AND CMAKE_C_COMPILER)
-    message(STATUS "Using specifed C++ compiler: ${CMAKE_CXX_COMPILER}")
-    message(STATUS "Using specifed C compiler: ${CMAKE_C_COMPILER}")
+    message(STATUS "Using specified C++ compiler: ${CMAKE_CXX_COMPILER}")
+    message(STATUS "Using specified C compiler: ${CMAKE_C_COMPILER}")
 else()
     message(STATUS "No C or C++ compiler specified, defaulting to Clang-17")
     find_and_set_clang17()
 endif()
 
-project(ml-framework-cpp)
+project(
+    ml-framework-cpp
+    LANGUAGES
+        C
+        CXX
+)
 CHECK_COMPILERS()
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")

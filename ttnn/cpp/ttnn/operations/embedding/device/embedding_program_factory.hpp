@@ -4,14 +4,17 @@
 
 #pragma once
 
+#include <enchantum/enchantum.hpp>
 #include "ttnn/operations/core/core.hpp"
 #include "ttnn/operations/embedding/device/embedding_device_operation.hpp"
 #include "ttnn/operations/math.hpp"
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/constants.hpp>
 #include <tt-metalium/util.hpp>
-#include <tt-metalium/host_api.hpp>
 #include <tt-metalium/work_split.hpp>
+#include <tt-metalium/tensor_accessor_args.hpp>
+
+#include <tracy/Tracy.hpp>
 
 using namespace tt;
 using namespace tt::tt_metal;
@@ -83,8 +86,6 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_fused(
     //                 Buffer Setup
     ////////////////////////////////////////////////////////////////////////////
 
-    tt_metal::Buffer* a_buffer = a.buffer();
-    tt_metal::Buffer* weights_buffer = weights.buffer();
     tt_metal::Buffer* out_buffer = output.buffer();
 
     ////////////////////////////////////////////////////////////////////////////
@@ -92,16 +93,11 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_fused(
     ////////////////////////////////////////////////////////////////////////////
     // This should allocate a DRAM buffer on the device
     IDevice* device = a.device();
-    auto dst_addr = output.buffer()->address();
 
     ////////////////////////////////////////////////////////////////////////////
     //                      Application Setup
     ////////////////////////////////////////////////////////////////////////////
     Program program{};
-
-    bool in0_is_dram = a.buffer()->buffer_type() == tt_metal::BufferType::DRAM ? 1 : 0;
-    bool weights_is_dram = weights.buffer()->buffer_type() == tt_metal::BufferType::DRAM ? 1 : 0;
-    bool out_is_dram = output.buffer()->buffer_type() == tt_metal::BufferType::DRAM ? 1 : 0;
 
     bool output_sharded = is_sharded(output.buffer()->buffer_layout());
 
@@ -109,14 +105,13 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_fused(
     uint32_t weights_element_size_bytes = weights.element_size();
 
     // row major, page size is last dim
-    uint32_t input_page_size = a.get_padded_shape()[-1] * input_element_size_bytes;
-    uint32_t weight_page_size = weights.get_padded_shape()[-1] * weights_element_size_bytes;
+    uint32_t input_page_size = a.padded_shape()[-1] * input_element_size_bytes;
+    uint32_t weight_page_size = weights.padded_shape()[-1] * weights_element_size_bytes;
 
     // weights shape is [1, 1, num_embeddings, num_dim]
-    uint32_t num_embeddings = weights.get_padded_shape()[-2];
 
-    uint32_t batch_size = a.get_padded_shape()[0];
-    uint32_t num_output_rows_per_batch = a.get_padded_shape()[-1];
+    uint32_t batch_size = a.padded_shape()[0];
+    uint32_t num_output_rows_per_batch = a.padded_shape()[-1];
     uint32_t num_output_rows = num_output_rows_per_batch * batch_size;
     // Note: num_blocks is just blocks along height
     uint32_t num_blocks = num_output_rows / TILE_HEIGHT;
@@ -135,8 +130,6 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_fused(
         row_major = shard_spec.orientation == ShardOrientation::ROW_MAJOR;
     } else {
         auto compute_with_storage_grid_size = device->compute_with_storage_grid_size();
-        uint32_t num_cores_x = compute_with_storage_grid_size.x;
-        uint32_t num_cores_y = compute_with_storage_grid_size.y;
         std::tie(
             num_cores,
             all_cores,
@@ -145,25 +138,24 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_fused(
             num_blocks_per_core_group_1,
             num_blocks_per_core_group_2) =
             tt::tt_metal::split_work_to_cores(compute_with_storage_grid_size, num_blocks);
-        num_tiles_per_block = weights.get_padded_shape()[-1] / TILE_WIDTH;
+        num_tiles_per_block = weights.padded_shape()[-1] / TILE_WIDTH;
         row_major = false;
     }
     uint32_t g1_numcores = core_group_1.num_cores();
-    uint32_t g2_numcores = core_group_2.num_cores();
 
     // Create Buffers
-    tt::DataFormat input_cb_data_format = tt_metal::datatype_to_dataformat_converter(a.get_dtype());
+    tt::DataFormat input_cb_data_format = tt_metal::datatype_to_dataformat_converter(a.dtype());
 
     EmbeddingsIndexType embeddings_index_type;
-    if (a.get_dtype() == DataType::BFLOAT16) {
+    if (a.dtype() == DataType::BFLOAT16) {
         embeddings_index_type = EmbeddingsIndexType::BFP16;
     } else {
         embeddings_index_type = EmbeddingsIndexType::UINT32;
     }
 
-    tt::DataFormat weights_cb_data_format = tt_metal::datatype_to_dataformat_converter(weights.get_dtype());
+    tt::DataFormat weights_cb_data_format = tt_metal::datatype_to_dataformat_converter(weights.dtype());
     uint32_t weights_single_tile_size = tt_metal::detail::TileSize(weights_cb_data_format);
-    tt::DataFormat output_cb_data_format = tt_metal::datatype_to_dataformat_converter(output.get_dtype());
+    tt::DataFormat output_cb_data_format = tt_metal::datatype_to_dataformat_converter(output.dtype());
     uint32_t output_single_tile_size = tt_metal::detail::TileSize(output_cb_data_format);
 
     // Hardcoded limit to reduce L1 usage. Should be updated to be tuned based on overall L1 usage
@@ -175,13 +167,13 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_fused(
         tt_metal::CircularBufferConfig(
             buffering * num_tiles_per_block * weights_single_tile_size, {{src0_cb_index, weights_cb_data_format}})
             .set_page_size(src0_cb_index, weights_single_tile_size);
-    auto cb_src0 = tt_metal::CreateCircularBuffer(program, all_cores, cb_src0_config);
+    tt_metal::CreateCircularBuffer(program, all_cores, cb_src0_config);
 
     constexpr uint32_t src1_cb_index = CBIndex::c_1;
     tt_metal::CircularBufferConfig cb_src1_config =
         tt_metal::CircularBufferConfig(TILE_HEIGHT * input_element_size_bytes, {{src1_cb_index, input_cb_data_format}})
             .set_page_size(src1_cb_index, TILE_HEIGHT * input_element_size_bytes);
-    auto cb_src1 = tt_metal::CreateCircularBuffer(program, all_cores, cb_src1_config);
+    tt_metal::CreateCircularBuffer(program, all_cores, cb_src1_config);
 
     constexpr uint32_t output_cb_index = CBIndex::c_2;
     uint32_t output_cb_size;
@@ -204,13 +196,13 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_fused(
         tt_metal::CircularBufferConfig cb_src2_config =
             tt_metal::CircularBufferConfig(cache_page_size, {{src2_cb_index, weights_cb_data_format}})
                 .set_page_size(src2_cb_index, cache_page_size);
-        auto cb_src2 = tt_metal::CreateCircularBuffer(program, all_cores, cb_src2_config);
+        tt_metal::CreateCircularBuffer(program, all_cores, cb_src2_config);
     } else if (embeddings_type == EmbeddingsType::BINARY) {
         uint32_t cache_page_size = round_up_to_mul32(weight_page_size);
         tt_metal::CircularBufferConfig cb_src2_config =
             tt_metal::CircularBufferConfig(2 * cache_page_size, {{src2_cb_index, weights_cb_data_format}})
                 .set_page_size(src2_cb_index, cache_page_size);
-        auto cb_src2 = tt_metal::CreateCircularBuffer(program, all_cores, cb_src2_config);
+        tt_metal::CreateCircularBuffer(program, all_cores, cb_src2_config);
     }
     uint32_t weight_block_size;
     if (output_sharded) {
@@ -227,17 +219,17 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_fused(
         (std::uint32_t)src0_cb_index,
         (std::uint32_t)src1_cb_index,
         (std::uint32_t)src2_cb_index,
-        (std::uint32_t)in0_is_dram,
         (std::uint32_t)input_page_size,
-        (std::uint32_t)weights_is_dram,
         (std::uint32_t)weight_page_size,
         (std::uint32_t)weight_block_size,
         (std::uint32_t)num_tiles_per_block,
         (std::uint32_t)input_block_size_bytes};
+    TensorAccessorArgs(*a.buffer()).append_to(embedding_compile_time_args);
+    TensorAccessorArgs(*weights.buffer()).append_to(embedding_compile_time_args);
 
-    std::map<string, string> embedding_defines = {
-        {magic_enum::enum_name(embeddings_type).data(), "1"},
-        {magic_enum::enum_name(embeddings_index_type).data(), "1"}};
+    std::map<std::string, std::string> embedding_defines = {
+        {enchantum::to_string(embeddings_type).data(), "1"},
+        {enchantum::to_string(embeddings_index_type).data(), "1"}};
 
     auto reader_kernel_id = tt_metal::CreateKernel(
         program,
@@ -252,7 +244,7 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_fused(
             uint32_t(num_blocks_per_core_group_1),  // per_core_block_cnt
             uint32_t(num_tiles_per_block)           // per_core_block_tile_cnt
         };
-        auto tilize_kernel_id_1 = tt_metal::CreateKernel(
+        tt_metal::CreateKernel(
             program,
             "ttnn/cpp/ttnn/operations/data_movement/tilize/device/kernels/compute/tilize.cpp",
             core_group_1,
@@ -266,7 +258,7 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_fused(
             uint32_t(num_blocks_per_core_group_2),  // per_core_block_cnt
             uint32_t(num_tiles_per_block)           // per_core_block_tile_cnt
         };
-        auto tilize_kernel_id_2 = tt_metal::CreateKernel(
+        tt_metal::CreateKernel(
             program,
             "ttnn/cpp/ttnn/operations/data_movement/tilize/device/kernels/compute/tilize.cpp",
             core_group_2,
@@ -275,7 +267,8 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_fused(
     KernelHandle writer_kernel_id = 0;
     // TODO: We can use the second risc to do more work in parallel
     if (!output_sharded) {
-        std::vector<uint32_t> writer_compile_time_args = {(std::uint32_t)output_cb_index, (std::uint32_t)out_is_dram};
+        std::vector<uint32_t> writer_compile_time_args = {(std::uint32_t)output_cb_index};
+        tt::tt_metal::TensorAccessorArgs(*output.buffer()).append_to(writer_compile_time_args);
 
         // Tilized writer
         writer_kernel_id = tt_metal::CreateKernel(
@@ -381,8 +374,6 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_rm(
     //                 Buffer Setup
     ////////////////////////////////////////////////////////////////////////////
 
-    tt_metal::Buffer* a_buffer = a.buffer();
-    tt_metal::Buffer* weights_buffer = weights.buffer();
     tt_metal::Buffer* out_buffer = output.buffer();
 
     ////////////////////////////////////////////////////////////////////////////
@@ -390,31 +381,27 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_rm(
     ////////////////////////////////////////////////////////////////////////////
     // This should allocate a DRAM buffer on the device
     IDevice* device = a.device();
-    auto dst_addr = output.buffer()->address();
 
     ////////////////////////////////////////////////////////////////////////////
     //                      Application Setup
     ////////////////////////////////////////////////////////////////////////////
     Program program{};
 
-    bool in0_is_dram = a.buffer()->buffer_type() == tt_metal::BufferType::DRAM ? 1 : 0;
-    bool weights_is_dram = weights.buffer()->buffer_type() == tt_metal::BufferType::DRAM ? 1 : 0;
-    bool out_is_dram = output.buffer()->buffer_type() == tt_metal::BufferType::DRAM ? 1 : 0;
+    bool output_sharded = is_sharded(output.buffer()->buffer_layout());
 
     uint32_t input_element_size_bytes = a.element_size();
     uint32_t weights_element_size_bytes = weights.element_size();
     uint32_t output_element_size_bytes = output.element_size();
 
     // row major, page size is last dim
-    uint32_t input_page_size = a.get_padded_shape()[-1] * input_element_size_bytes;
-    uint32_t weight_page_size = weights.get_padded_shape()[-1] * weights_element_size_bytes;
-    uint32_t output_page_size = output.get_padded_shape()[-1] * output_element_size_bytes;
+    uint32_t input_page_size = a.padded_shape()[-1] * input_element_size_bytes;
+    uint32_t weight_page_size = weights.padded_shape()[-1] * weights_element_size_bytes;
+    uint32_t output_page_size = output.padded_shape()[-1] * output_element_size_bytes;
 
     // weights shape is [1, 1, num_embeddings, num_dim]
-    uint32_t num_embeddings = weights.get_padded_shape()[-2];
 
-    uint32_t batch_size = a.get_padded_shape()[0];
-    uint32_t num_output_rows_per_batch = a.get_padded_shape()[-1];
+    uint32_t batch_size = a.padded_shape()[0];
+    uint32_t num_output_rows_per_batch = a.padded_shape()[-1];
     uint32_t num_output_rows = num_output_rows_per_batch * batch_size;
     auto alignment = a.buffer()->alignment();
     uint32_t block_height = (alignment / input_element_size_bytes);
@@ -422,41 +409,62 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_rm(
     uint32_t num_blocks_per_batch = num_output_rows_per_batch;
 
     // setup problem and grid size
-    uint32_t start_core_x = 0;
-    uint32_t start_core_y = 0;
 
     uint32_t problem_size = num_blocks;
 
     auto compute_with_storage_grid_size = device->compute_with_storage_grid_size();
-    uint32_t num_cores_x = compute_with_storage_grid_size.x;
-    uint32_t num_cores_y = compute_with_storage_grid_size.y;
 
-    auto [num_cores, all_cores, core_group_1, core_group_2, num_blocks_per_core_group_1, num_blocks_per_core_group_2] =
-        tt::tt_metal::split_work_to_cores(compute_with_storage_grid_size, problem_size);
+    uint32_t num_cores, num_blocks_per_core_group_1, num_blocks_per_core_group_2;
+    CoreRangeSet all_cores, core_group_1, core_group_2;
+    bool row_major = false;
+    if (output_sharded) {
+        const auto& shard_spec = output.shard_spec().value();
+        all_cores = shard_spec.grid;
+        core_group_1 = all_cores;
+        num_cores = all_cores.num_cores();
+        num_blocks_per_core_group_1 = shard_spec.shape[0];
+        num_blocks_per_core_group_2 = 0;
+        row_major = shard_spec.orientation == ShardOrientation::ROW_MAJOR;
+    } else {
+        std::tie(
+            num_cores,
+            all_cores,
+            core_group_1,
+            core_group_2,
+            num_blocks_per_core_group_1,
+            num_blocks_per_core_group_2) =
+            tt::tt_metal::split_work_to_cores(compute_with_storage_grid_size, problem_size);
+    }
     uint32_t g1_numcores = core_group_1.num_cores();
-    uint32_t g2_numcores = core_group_2.num_cores();
 
     // Create Buffers
-    tt::DataFormat input_cb_data_format = tt_metal::datatype_to_dataformat_converter(a.get_dtype());
+    tt::DataFormat input_cb_data_format = tt_metal::datatype_to_dataformat_converter(a.dtype());
 
-    tt::DataFormat weights_cb_data_format = tt_metal::datatype_to_dataformat_converter(weights.get_dtype());
-    tt::DataFormat output_cb_data_format = tt_metal::datatype_to_dataformat_converter(output.get_dtype());
+    tt::DataFormat weights_cb_data_format = tt_metal::datatype_to_dataformat_converter(weights.dtype());
 
-    constexpr uint32_t src0_cb_index = CBIndex::c_0;
+    constexpr uint32_t out_cb_index = CBIndex::c_0;
     uint32_t rounded_weight_page_size = round_up_to_mul32(weight_page_size);
-    tt_metal::CircularBufferConfig cb_src0_config =
-        tt_metal::CircularBufferConfig(2 * rounded_weight_page_size, {{src0_cb_index, weights_cb_data_format}})
-            .set_page_size(src0_cb_index, rounded_weight_page_size);
-    auto cb_src0 = tt_metal::CreateCircularBuffer(program, all_cores, cb_src0_config);
+    uint32_t out_cb_size;
+    if (output_sharded) {
+        out_cb_size = output.buffer()->aligned_size_per_bank();
+    } else {
+        uint32_t buffering_size = (num_blocks_per_core_group_1 > 1 || num_blocks_per_core_group_2 > 1) ? 2 : 1;
+        out_cb_size = buffering_size * rounded_weight_page_size;
+    }
+    tt_metal::CircularBufferConfig cb_out_config =
+        tt_metal::CircularBufferConfig(out_cb_size, {{out_cb_index, weights_cb_data_format}})
+            .set_page_size(out_cb_index, rounded_weight_page_size);
+    if (output_sharded) {
+        cb_out_config.set_globally_allocated_address(*out_buffer);
+    }
+    auto cb_out = tt_metal::CreateCircularBuffer(program, all_cores, cb_out_config);
 
     constexpr uint32_t src1_cb_index = CBIndex::c_1;
     uint32_t index_page_size = round_up_to_mul32(input_element_size_bytes);
     tt_metal::CircularBufferConfig cb_src1_config =
         tt_metal::CircularBufferConfig(block_height * index_page_size, {{src1_cb_index, input_cb_data_format}})
             .set_page_size(src1_cb_index, block_height * index_page_size);
-    auto cb_src1 = tt_metal::CreateCircularBuffer(program, all_cores, cb_src1_config);
-
-    constexpr uint32_t output_cb_index = src0_cb_index;
+    tt_metal::CreateCircularBuffer(program, all_cores, cb_src1_config);
 
     constexpr uint32_t src2_cb_index = CBIndex::c_2;
     if (embeddings_type == EmbeddingsType::PADDED) {
@@ -464,38 +472,38 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_rm(
         tt_metal::CircularBufferConfig cb_src2_config =
             tt_metal::CircularBufferConfig(cache_page_size, {{src2_cb_index, weights_cb_data_format}})
                 .set_page_size(src2_cb_index, cache_page_size);
-        auto cb_src2 = tt_metal::CreateCircularBuffer(program, all_cores, cb_src2_config);
+        tt_metal::CreateCircularBuffer(program, all_cores, cb_src2_config);
     } else if (embeddings_type == EmbeddingsType::BINARY) {
         uint32_t cache_page_size = round_up_to_mul32(weight_page_size);
         tt_metal::CircularBufferConfig cb_src2_config =
             tt_metal::CircularBufferConfig(2 * cache_page_size, {{src2_cb_index, weights_cb_data_format}})
                 .set_page_size(src2_cb_index, cache_page_size);
-        auto cb_src2 = tt_metal::CreateCircularBuffer(program, all_cores, cb_src2_config);
+        tt_metal::CreateCircularBuffer(program, all_cores, cb_src2_config);
     }
 
     // Create Kernels
     // reader
     std::vector<uint32_t> embedding_compile_time_args = {
-        (std::uint32_t)src0_cb_index,
+        (std::uint32_t)out_cb_index,
         (std::uint32_t)src1_cb_index,
         (std::uint32_t)src2_cb_index,
-        (std::uint32_t)in0_is_dram,
         (std::uint32_t)input_page_size,
-        (std::uint32_t)weights_is_dram,
         (std::uint32_t)weight_page_size,
         (std::uint32_t)block_height,
         (std::uint32_t)block_height * input_element_size_bytes};
+    TensorAccessorArgs(*a.buffer()).append_to(embedding_compile_time_args);
+    TensorAccessorArgs(*weights.buffer()).append_to(embedding_compile_time_args);
 
     EmbeddingsIndexType embeddings_index_type;
-    if (a.get_dtype() == DataType::BFLOAT16) {
+    if (a.dtype() == DataType::BFLOAT16) {
         embeddings_index_type = EmbeddingsIndexType::BFP16;
     } else {
         embeddings_index_type = EmbeddingsIndexType::UINT32;
     }
 
-    std::map<string, string> embedding_defines = {
-        {magic_enum::enum_name(embeddings_type).data(), "1"},
-        {magic_enum::enum_name(embeddings_index_type).data(), "1"}};
+    std::map<std::string, std::string> embedding_defines = {
+        {enchantum::to_string(embeddings_type).data(), "1"},
+        {enchantum::to_string(embeddings_index_type).data(), "1"}};
 
     auto reader_kernel_id = tt_metal::CreateKernel(
         program,
@@ -503,26 +511,22 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_rm(
         all_cores,
         tt_metal::ReaderDataMovementConfig(embedding_compile_time_args, embedding_defines));
 
-    bool output_stick_size_is_power_of_two = is_power_of_two_at_least_32(output_page_size);
-    uint32_t output_log2_stick_size =
-        output_stick_size_is_power_of_two ? (std::uint32_t)std::log2(output_page_size) : 0;
-    std::vector<uint32_t> writer_compile_time_args = {
-        (std::uint32_t)output_cb_index,
-        (std::uint32_t)out_is_dram,
-        (std::uint32_t)output_stick_size_is_power_of_two,
-        (std::uint32_t)output_log2_stick_size};
-
     // Tilized writer
-    auto writer_kernel_id = tt_metal::CreateKernel(
-        program,
-        "ttnn/cpp/ttnn/deprecated/tt_dnn/kernels/dataflow/writer_unary_stick_layout_interleaved_start_id.cpp",
-        all_cores,
-        tt_metal::WriterDataMovementConfig(writer_compile_time_args));
+    KernelHandle writer_kernel_id = 0;
+    if (!output_sharded) {
+        std::vector<uint32_t> writer_compile_time_args = {(std::uint32_t)out_cb_index, (std::uint32_t)output_page_size};
+        TensorAccessorArgs(*output.buffer()).append_to(writer_compile_time_args);
+
+        writer_kernel_id = tt_metal::CreateKernel(
+            program,
+            "ttnn/cpp/ttnn/deprecated/tt_dnn/kernels/dataflow/writer_unary_stick_layout_interleaved_start_id.cpp",
+            all_cores,
+            tt_metal::WriterDataMovementConfig(writer_compile_time_args));
+    }
 
     uint32_t input_offset = 0;
-    uint32_t weight_offset = 0;
 
-    auto cores = grid_to_cores(num_cores, num_cores_x, num_cores_y, false);
+    auto cores = corerange_to_cores(all_cores, std::nullopt, row_major);
     std::vector<uint32_t> reader_runtime_args = {
         (std::uint32_t)a.buffer()->address(),
         (std::uint32_t)weights.buffer()->address(),
@@ -553,7 +557,7 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_rm(
         }
 
         // Writer
-        {
+        if (!output_sharded) {
             writer_runtime_args[2] = local_num_blocks;
             writer_runtime_args[3] = input_offset;
             tt_metal::SetRuntimeArgs(program, writer_kernel_id, core, writer_runtime_args);
@@ -563,15 +567,20 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_rm(
     }
 
     auto override_runtime_arguments_callback =
-        [reader_kernel_id, writer_kernel_id, cores](
+        [reader_kernel_id, writer_kernel_id, cores, cb_out, output_sharded](
             const void* operation,
             Program& program,
             const std::vector<Tensor>& input_tensors,
             const std::vector<std::optional<const Tensor>>& optional_input_tensors,
             const std::vector<Tensor>& output_tensors) {
-            auto output_buffer_address = output_tensors.at(0).buffer()->address();
+            auto output_buffer = output_tensors.at(0).buffer();
+            auto output_buffer_address = output_buffer->address();
             auto input_buffer_address = input_tensors.at(0).buffer()->address();
             auto weights_buffer_address = input_tensors.at(1).buffer()->address();
+
+            if (output_sharded) {
+                UpdateDynamicCircularBufferAddress(program, cb_out, *output_buffer);
+            }
 
             auto& reader_runtime_args = GetRuntimeArgs(program, reader_kernel_id);
             auto& writer_runtime_args = GetRuntimeArgs(program, writer_kernel_id);
@@ -583,7 +592,7 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_rm(
                     runtime_args[1] = weights_buffer_address;
                 }
 
-                {
+                if (!output_sharded) {
                     auto& runtime_args = writer_runtime_args[core.x][core.y];
                     runtime_args[0] = output_buffer_address;
                 }
@@ -603,47 +612,33 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_tilized_indices(
     //                 Buffer Setup
     ////////////////////////////////////////////////////////////////////////////
 
-    tt_metal::Buffer* a_buffer = a.buffer();
-    tt_metal::Buffer* weights_buffer = weights.buffer();
-    tt_metal::Buffer* out_buffer = output.buffer();
-
     ////////////////////////////////////////////////////////////////////////////
     //                      Grayskull Device Setup
     ////////////////////////////////////////////////////////////////////////////
     // This should allocate a DRAM buffer on the device
     auto device = a.device();
-    auto dst_addr = output.buffer()->address();
 
     ////////////////////////////////////////////////////////////////////////////
     //                      Application Setup
     ////////////////////////////////////////////////////////////////////////////
     Program program{};
 
-    bool in0_is_dram = a.buffer()->buffer_type() == tt_metal::BufferType::DRAM ? 1 : 0;
-    bool weights_is_dram = weights.buffer()->buffer_type() == tt_metal::BufferType::DRAM ? 1 : 0;
-    bool out_is_dram = output.buffer()->buffer_type() == tt_metal::BufferType::DRAM ? 1 : 0;
-
     uint32_t input_element_size_bytes = a.element_size();
     uint32_t weights_element_size_bytes = weights.element_size();
     uint32_t output_element_size_bytes = output.element_size();
 
     // row major, page size is last dim
-    uint32_t input_page_size = a.get_logical_shape()[-1] * input_element_size_bytes;
-    uint32_t weight_page_size = weights.get_padded_shape()[-1] * weights_element_size_bytes;
-    uint32_t output_page_size = output.get_padded_shape()[-1] * output_element_size_bytes;
+    uint32_t input_page_size = a.logical_shape()[-1] * input_element_size_bytes;
+    uint32_t weight_page_size = weights.padded_shape()[-1] * weights_element_size_bytes;
+    uint32_t output_page_size = output.padded_shape()[-1] * output_element_size_bytes;
 
     // weights shape is [1, 1, num_embeddings, num_dim]
-    uint32_t num_embeddings = weights.get_padded_shape()[-2];
 
-    uint32_t batch_size = a.get_logical_shape()[0];  // num rows
-    uint32_t num_cols = a.get_logical_shape()[-1];
+    uint32_t batch_size = a.logical_shape()[0];  // num rows
+    uint32_t num_cols = a.logical_shape()[-1];
     uint32_t volume = num_cols * batch_size;
 
-    auto num_embedding_dims = weights.get_padded_shape()[-1];
-
     // setup problem and grid size
-    uint32_t start_core_x = 0;
-    uint32_t start_core_y = 0;
 
     uint32_t problem_size = volume;
 
@@ -661,27 +656,25 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_tilized_indices(
     uint32_t num_blocks_per_core_group_2 = work.units_per_core_group_2;
 
     uint32_t g1_numcores = core_group_1.num_cores();
-    uint32_t g2_numcores = core_group_2.num_cores();
 
     // Create Buffers
-    tt::DataFormat input_cb_data_format = tt_metal::datatype_to_dataformat_converter(a.get_dtype());
+    tt::DataFormat input_cb_data_format = tt_metal::datatype_to_dataformat_converter(a.dtype());
 
-    tt::DataFormat weights_cb_data_format = tt_metal::datatype_to_dataformat_converter(weights.get_dtype());
-    tt::DataFormat output_cb_data_format = tt_metal::datatype_to_dataformat_converter(output.get_dtype());
+    tt::DataFormat weights_cb_data_format = tt_metal::datatype_to_dataformat_converter(weights.dtype());
 
     constexpr uint32_t src0_cb_index = CBIndex::c_0;
     uint32_t rounded_weight_page_size = round_up_to_mul32(weight_page_size);
     tt_metal::CircularBufferConfig cb_src0_config =
         tt_metal::CircularBufferConfig(2 * rounded_weight_page_size, {{src0_cb_index, weights_cb_data_format}})
             .set_page_size(src0_cb_index, rounded_weight_page_size);
-    auto cb_src0 = tt_metal::CreateCircularBuffer(program, all_cores, cb_src0_config);
+    tt_metal::CreateCircularBuffer(program, all_cores, cb_src0_config);
 
     constexpr uint32_t src1_cb_index = CBIndex::c_1;
     uint32_t index_page_size = round_up_to_mul32(input_element_size_bytes);
     tt_metal::CircularBufferConfig cb_src1_config =
         tt_metal::CircularBufferConfig(FACE_HEIGHT * index_page_size, {{src1_cb_index, input_cb_data_format}})
             .set_page_size(src1_cb_index, FACE_HEIGHT * index_page_size);
-    auto cb_src1 = tt_metal::CreateCircularBuffer(program, all_cores, cb_src1_config);
+    tt_metal::CreateCircularBuffer(program, all_cores, cb_src1_config);
 
     constexpr uint32_t src2_cb_index = CBIndex::c_2;
     if (embeddings_type == EmbeddingsType::PADDED) {
@@ -689,22 +682,16 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_tilized_indices(
         tt_metal::CircularBufferConfig cb_src2_config =
             tt_metal::CircularBufferConfig(cache_page_size, {{src2_cb_index, weights_cb_data_format}})
                 .set_page_size(src2_cb_index, cache_page_size);
-        auto cb_src2 = tt_metal::CreateCircularBuffer(program, all_cores, cb_src2_config);
+        tt_metal::CreateCircularBuffer(program, all_cores, cb_src2_config);
     } else if (embeddings_type == EmbeddingsType::BINARY) {
         uint32_t cache_page_size = round_up_to_mul32(weight_page_size);
         tt_metal::CircularBufferConfig cb_src2_config =
             tt_metal::CircularBufferConfig(2 * cache_page_size, {{src2_cb_index, weights_cb_data_format}})
                 .set_page_size(src2_cb_index, cache_page_size);
-        auto cb_src2 = tt_metal::CreateCircularBuffer(program, all_cores, cb_src2_config);
+        tt_metal::CreateCircularBuffer(program, all_cores, cb_src2_config);
     }
 
     uint32_t output_cb_index = src0_cb_index;
-
-    bool input_stick_size_is_power_of_two = is_power_of_two_at_least_32(input_page_size);
-    uint32_t input_log2_stick_size = input_stick_size_is_power_of_two ? (std::uint32_t)std::log2(input_page_size) : 0;
-    bool weight_stick_size_is_power_of_two = is_power_of_two_at_least_32(weight_page_size);
-    uint32_t weight_log2_stick_size =
-        weight_stick_size_is_power_of_two ? (std::uint32_t)std::log2(weight_page_size) : 0;
 
     // Create Kernels
     // reader
@@ -712,23 +699,23 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_tilized_indices(
         (std::uint32_t)src0_cb_index,
         (std::uint32_t)src1_cb_index,
         (std::uint32_t)src2_cb_index,
-        (std::uint32_t)in0_is_dram,
         (std::uint32_t)input_page_size,
-        (std::uint32_t)weights_is_dram,
         (std::uint32_t)weight_page_size,
-        (std::uint32_t)a.get_logical_shape()[-1],  // width/length of a row
+        (std::uint32_t)a.logical_shape()[-1],  // width/length of a row
         (std::uint32_t)FACE_HEIGHT};
+    TensorAccessorArgs(*a.buffer()).append_to(embedding_compile_time_args);
+    TensorAccessorArgs(*weights.buffer()).append_to(embedding_compile_time_args);
 
     EmbeddingsIndexType embeddings_index_type;
-    if (a.get_dtype() == DataType::BFLOAT16) {
+    if (a.dtype() == DataType::BFLOAT16) {
         embeddings_index_type = EmbeddingsIndexType::BFP16;
     } else {
         embeddings_index_type = EmbeddingsIndexType::UINT32;
     }
 
-    std::map<string, string> embedding_defines = {
-        {magic_enum::enum_name(embeddings_type).data(), "1"},
-        {magic_enum::enum_name(embeddings_index_type).data(), "1"}};
+    std::map<std::string, std::string> embedding_defines = {
+        {enchantum::to_string(embeddings_type).data(), "1"},
+        {enchantum::to_string(embeddings_index_type).data(), "1"}};
 
     auto reader_kernel_id = tt_metal::CreateKernel(
         program,
@@ -736,14 +723,8 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_tilized_indices(
         all_cores,
         tt_metal::ReaderDataMovementConfig(embedding_compile_time_args, embedding_defines));
 
-    bool output_stick_size_is_power_of_two = is_power_of_two_at_least_32(output_page_size);
-    uint32_t output_log2_stick_size =
-        output_stick_size_is_power_of_two ? (std::uint32_t)std::log2(output_page_size) : 0;
-    std::vector<uint32_t> writer_compile_time_args = {
-        (std::uint32_t)output_cb_index,
-        (std::uint32_t)out_is_dram,
-        (std::uint32_t)output_stick_size_is_power_of_two,
-        (std::uint32_t)output_log2_stick_size};
+    std::vector<uint32_t> writer_compile_time_args = {(std::uint32_t)output_cb_index, (std::uint32_t)output_page_size};
+    TensorAccessorArgs(*output.buffer()).append_to(writer_compile_time_args);
 
     // Tilized writer
     auto writer_kernel_id = tt_metal::CreateKernel(
@@ -844,7 +825,7 @@ tt::tt_metal::operation::ProgramWithCallbacks embeddings_(
     bool tilized,
     EmbeddingsType embeddings_type,
     std::optional<uint32_t> pad_token) {
-    if (a.get_layout() == ttnn::TILE_LAYOUT) {
+    if (a.layout() == ttnn::TILE_LAYOUT) {
         return embeddings_tilized_indices(a, weights, output, embeddings_type, pad_token);
     } else if (tilized) {
         return embeddings_fused(a, weights, output, embeddings_type, pad_token);

@@ -2,13 +2,32 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <stdint.h>
+#include <tt-metalium/allocator.hpp>
+#include <tt-metalium/circular_buffer.hpp>
+#include <tt-metalium/host_api.hpp>
+#include <tt-metalium/tt_metal.hpp>
+#include <map>
+#include <memory>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <tt-metalium/circular_buffer_constants.h>
 #include "circular_buffer_test_utils.hpp"
+#include <tt-metalium/circular_buffer_config.hpp>
+#include <tt-metalium/core_coord.hpp>
+#include <tt-metalium/device.hpp>
 #include "device_fixture.hpp"
 #include "gtest/gtest.h"
-#include <tt-metalium/tt_metal.hpp>
-#include <tt-metalium/allocator.hpp>
-#include <tt-metalium/host_api.hpp>
-#include <tt-metalium/circular_buffer.hpp>
+#include <tt-metalium/hal_types.hpp>
+#include "hostdevcommon/kernel_structs.h"
+#include <tt-metalium/program.hpp>
+#include "umd/device/tt_core_coordinates.h"
+
+namespace tt {
+enum class DataFormat : uint8_t;
+}  // namespace tt
 
 using std::vector;
 using namespace tt::tt_metal;
@@ -89,11 +108,11 @@ TEST_F(DeviceFixture, TensixTestCreateCircularBufferAtValidIndices) {
 
     EXPECT_TRUE(actual_config == expected_config);
 
-    auto cb = CreateCircularBuffer(program, cr_set, actual_config);
+    CreateCircularBuffer(program, cr_set, actual_config);
 
     for (unsigned int id = 0; id < num_devices_; id++) {
         detail::CompileProgram(devices_.at(id), program);
-        program_dispatch::finalize_program_offsets(program, devices_.at(id));
+        program.finalize_offsets(devices_.at(id));
         EXPECT_TRUE(test_cb_config_written_to_core(program, this->devices_.at(id), cr_set, golden_cb_config));
     }
 }
@@ -131,9 +150,22 @@ TEST_F(DeviceFixture, TensixTestCreateCircularBufferAtOverlappingIndex) {
                                        .set_page_size(2, cb_config.page_size)
                                        .set_page_size(16, cb_config.page_size);
 
-    auto valid_cb = CreateCircularBuffer(program, cr_set, config1);
+    CreateCircularBuffer(program, cr_set, config1);
 
     EXPECT_ANY_THROW(CreateCircularBuffer(program, cr_set, config2));
+}
+
+TEST_F(DeviceFixture, TensixTestCreateCircularBufferWithTooManyPages) {
+    Program program;
+    CBConfig cb_config;
+
+    CoreRange cr({0, 0}, {1, 1});
+    CoreRangeSet cr_set({cr});
+
+    CircularBufferConfig config = CircularBufferConfig(cb_config.page_size * (1 << 16), {{0, cb_config.data_format}})
+                                      .set_page_size(0, cb_config.page_size);
+
+    EXPECT_ANY_THROW(CreateCircularBuffer(program, cr_set, config));
 }
 
 }  // end namespace basic_tests::circular_buffer

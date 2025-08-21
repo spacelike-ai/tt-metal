@@ -11,9 +11,9 @@
 #include <unordered_map>
 #include <vector>
 
-#include "core_coord.hpp"
-#include "core_descriptor.hpp"
-#include "dispatch_core_common.hpp"
+#include <tt-metalium/core_coord.hpp>
+#include <tt-metalium/core_descriptor.hpp>
+#include <tt-metalium/dispatch_core_common.hpp>
 #include <umd/device/tt_core_coordinates.h>
 #include <umd/device/tt_xy_pair.h>
 #include <umd/device/types/cluster_descriptor_types.h>
@@ -44,15 +44,10 @@ struct dispatch_core_placement_t {
     std::optional<tt_cxy_pair> dispatcher =
         std::nullopt;  // Relays work to worker cores on device that command is targeting. Currently for MMIO devices,
                        // dispatcher == completion_queue_writer
-    std::optional<tt_cxy_pair> mux = std::nullopt;       // Mux
-    std::optional<tt_cxy_pair> demux = std::nullopt;     // Demux
-    std::optional<tt_cxy_pair> tunneler = std::nullopt;  // ethernet tunneler
     std::optional<tt_cxy_pair> prefetcher_d = std::nullopt;
     std::optional<tt_cxy_pair> dispatcher_d = std::nullopt;
     std::optional<tt_cxy_pair> dispatcher_s = std::nullopt;
-    std::optional<tt_cxy_pair> mux_d = std::nullopt;       // Mux
-    std::optional<tt_cxy_pair> demux_d = std::nullopt;     // Demux
-    std::optional<tt_cxy_pair> tunneler_d = std::nullopt;  // ethernet tunneler
+    std::unordered_map<int, tt_cxy_pair> fabric_mux;       // Fabric Mux indexed by tunnel / link index
 };
 
 class dispatch_core_manager {
@@ -62,11 +57,15 @@ public:
     dispatch_core_manager(const dispatch_core_manager&) = delete;
     dispatch_core_manager(dispatch_core_manager&& other) noexcept = delete;
 
+    /// @brief dispatch_core_manager constructor initializes a list of cores per device that are designated for any
+    /// dispatch functionality
+    ///         This list contains dispatch cores that have not been assigned to a particular dispatch function
+    /// @param num_hw_cqs is used to get the correct collection of dispatch cores for a particular device
+    /// @param dispatch_core_config specfies the core type that is designated for dispatch functionality
+    dispatch_core_manager(const DispatchCoreConfig& dispatch_core_config, uint8_t num_hw_cqs);
+
     // TODO: this should probably be in command_queue_interface.hpp, but it's here for now due to circular dependency
     static constexpr uint8_t MAX_NUM_HW_CQS = 2;
-    static void initialize(const DispatchCoreConfig& dispatch_core_config, uint8_t num_hw_cqs) noexcept;
-
-    static dispatch_core_manager& instance();
 
     /// @brief Gets the location of the kernel desginated to read from the issue queue region from a particular command
     /// queue
@@ -90,49 +89,6 @@ public:
     const tt_cxy_pair& prefetcher_d_core(chip_id_t device_id, uint16_t channel, uint8_t cq_id);
 
     bool is_prefetcher_d_core_allocated(chip_id_t device_id, uint16_t channel, uint8_t cq_id);
-
-    /// @brief Gets the location of the kernel desginated for multiplexing issue queue traffic to tunneler.
-    /// @param device_id ID of the device that a fast dispatch command targets
-    /// @param channel assigned to the command queue where commands are enqueued
-    /// @param cq_id ID of the command queue within the channel
-    /// @return tt_cxy_pair logical location (chip + core coordinate) of the mux core
-    const tt_cxy_pair& mux_core(chip_id_t device_id, uint16_t channel, uint8_t cq_id);
-
-    bool is_mux_core_allocated(chip_id_t device_id, uint16_t channel, uint8_t cq_id);
-
-    /// @brief Gets the location of the kernel desginated for multiplexing traffic back towards mmio chip.
-    /// @param device_id ID of the device that a fast dispatch command targets
-    /// @param channel assigned to the command queue where commands are enqueued
-    /// @param cq_id ID of the command queue within the channel
-    /// @return tt_cxy_pair logical location (chip + core coordinate) of the mux_d core
-
-    const tt_cxy_pair& mux_d_core(chip_id_t device_id, uint16_t channel, uint8_t cq_id);
-
-    /// @brief Gets the location of the kernel desginated for demultiplexing traffic to completion queues.
-    /// @param device_id ID of the device that a fast dispatch command targets
-    /// @param channel assigned to the command queue where commands are enqueued
-    /// @param cq_id ID of the command queue within the channel
-    /// @return tt_cxy_pair logical location (chip + core coordinate) of the mux core
-    const tt_cxy_pair& demux_core(chip_id_t device_id, uint16_t channel, uint8_t cq_id);
-
-    bool is_demux_core_allocated(chip_id_t device_id, uint16_t channel, uint8_t cq_id);
-
-    /// @brief Gets the location of the kernel desginated for demultiplexing traffic on remote chip.
-    /// @param device_id ID of the device that a fast dispatch command targets
-    /// @param channel assigned to the command queue where commands are enqueued
-    /// @param cq_id ID of the command queue within the channel
-    /// @return tt_cxy_pair logical location (chip + core coordinate) of the demux_d core
-    const tt_cxy_pair& demux_d_core(chip_id_t device_id, uint16_t channel, uint8_t cq_id);
-
-    /// @brief Gets the location of the kernel desginated for tunneling over ethernet.
-    /// @param device_id ID of the device that a fast dispatch command targets
-    /// @param channel assigned to the command queue where commands are enqueued
-    /// @param cq_id ID of the command queue within the channel
-    /// @return tt_cxy_pair logical location (chip + core coordinate) of the ethernet tunnel core
-    const tt_cxy_pair& tunneler_core(
-        chip_id_t upstream_device_id, chip_id_t device_id, uint16_t channel, uint8_t cq_id);
-
-    const tt_cxy_pair& us_tunneler_core_local(chip_id_t device_id, uint16_t channel, uint8_t cq_id);
 
     /// @brief Gets the location of the kernel desginated to write to the completion queue region for a particular
     /// command queue
@@ -173,6 +129,17 @@ public:
 
     const tt_cxy_pair& dispatcher_s_core(chip_id_t device_id, uint16_t channel, uint8_t cq_id);
 
+    /// @brief Gets the location of the kernel designated to relay fast dispatch commands to worker cores from a
+    /// particular command queue
+    /// @param device_id ID of the device that this core is on
+    /// @param channel assigned to the command queue where commands are enqueued
+    /// @param cq_id ID of the command queue within the channel
+    /// @param tunnel ID of the tunnel which this fabric mux will send data through
+    /// @return tt_cxy_pair logical location (chip + core coordinate) of the fabric mux core
+    const tt_cxy_pair& fabric_mux_core(chip_id_t device_id, uint16_t channel, uint8_t cq_id, int tunnel);
+
+    bool is_fabric_mux_core_allocated(chip_id_t device_id, uint16_t channel, uint8_t cq_id, int tunnel);
+
     CoreType get_dispatch_core_type();
 
     DispatchCoreConfig get_dispatch_core_config();
@@ -185,13 +152,6 @@ public:
     std::vector<CoreCoord> get_all_logical_dispatch_cores(chip_id_t device_id);
 
 private:
-    /// @brief dispatch_core_manager constructor initializes a list of cores per device that are designated for any
-    /// dispatch functionality
-    ///         This list contains dispatch cores that have not been assigned to a particular dispatch function
-    /// @param num_hw_cqs is used to get the correct collection of dispatch cores for a particular device
-    /// @param dispatch_core_config specfies the core type that is designated for dispatch functionality
-    dispatch_core_manager(const DispatchCoreConfig& dispatch_core_config, uint8_t num_hw_cqs);
-
     /// @brief reset_dispatch_core_manager initializes vector of cores per device for dispatch kernels
     /// @param dispatch_core_config specfies the core type for dispatch kernels
     void reset_dispatch_core_manager(const DispatchCoreConfig& dispatch_core_config, uint8_t num_hw_cqs);
@@ -216,7 +176,7 @@ private:
         dispatch_core_assignments;
     std::unordered_map<chip_id_t, std::list<CoreCoord>> available_dispatch_cores_by_device;
     DispatchCoreConfig dispatch_core_config_;
-    uint8_t num_hw_cqs;
+    uint8_t num_hw_cqs{};
     static dispatch_core_manager* _inst;
 };
 

@@ -6,7 +6,7 @@
 
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/global_semaphore.hpp>
-#include "llrt/hal.hpp"
+#include "impl/context/metal_context.hpp"
 
 namespace tt::tt_metal {
 
@@ -78,7 +78,6 @@ inline std::tuple<Program, Program, Program, GlobalSemaphore> create_basic_eth_s
     IDevice* device, const SubDevice& sub_device_1, const SubDevice& sub_device_2) {
     auto waiter_coord = sub_device_2.cores(HalProgrammableCoreType::ACTIVE_ETH).ranges().at(0).start_coord;
     auto waiter_core = CoreRangeSet(CoreRange(waiter_coord, waiter_coord));
-    auto waiter_core_physical = device->ethernet_core_from_logical_core(waiter_coord);
     auto tensix_waiter_coord = sub_device_2.cores(HalProgrammableCoreType::TENSIX).ranges().at(0).start_coord;
     auto tensix_waiter_core = CoreRangeSet(CoreRange(tensix_waiter_coord, tensix_waiter_coord));
     auto tensix_waiter_core_physical = device->worker_core_from_logical_core(tensix_waiter_coord);
@@ -102,7 +101,7 @@ inline std::tuple<Program, Program, Program, GlobalSemaphore> create_basic_eth_s
         syncer_core_physical.y,
         tensix_waiter_core_physical.x,
         tensix_waiter_core_physical.y,
-        hal_ref.get_dev_addr(tt::tt_metal::HalProgrammableCoreType::ACTIVE_ETH, tt::tt_metal::HalL1MemAddrType::UNRESERVED)
+        MetalContext::instance().hal().get_dev_addr(tt::tt_metal::HalProgrammableCoreType::ACTIVE_ETH, tt::tt_metal::HalL1MemAddrType::UNRESERVED)
     };
     SetRuntimeArgs(waiter_program, waiter_kernel, waiter_core, waiter_rt_args);
 

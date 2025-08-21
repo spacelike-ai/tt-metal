@@ -52,6 +52,12 @@ inline uint32_t READ_REG(uint32_t addr) {
     return ptr[0];
 }
 
+// This enum is used to specify the dest location type for inline writes.
+// It is needed because inline writes use all 4 memory ports and may hang on Blackhole when there is back-pressure.
+// This hang only manifests when the inline writes are issued to a L1 location. The workaround on BH is for inline
+// writes to L1 to use noc async writes.
+enum class InlineWriteDst : uint8_t { DEFAULT = 0, L1 = 1, REG = 2 };
+
 inline uint32_t dram_io_incr_ptr(uint32_t curr_ptr, uint32_t incr, uint32_t buf_size_q_slots) {
     uint32_t next_ptr = curr_ptr + incr;
     uint32_t double_buf_size_q_slots = 2 * buf_size_q_slots;
@@ -145,6 +151,17 @@ inline uint32_t special_mult(uint32_t a, uint32_t special_b) {
     return 0;
 }
 
+// Invalidates Blackhole's entire L1 cache
+// Blackhole L1 cache is a small write-through cache (4x16B L1 lines). The cache covers all of L1 (no
+// MMU or range registers).
+//  Writing an address on one proc and reading it from another proc only requires the reader to invalidate.
+//  Need to invalidate any address written by noc that may have been previously read by riscv
+inline __attribute__((always_inline)) void invalidate_l1_cache() {
+#if defined(ARCH_BLACKHOLE) && !defined(DISABLE_L1_DATA_CACHE)
+    asm("fence");
+#endif
+}
+
 // risc_init function isn't required for TRISCS
 #if !defined(COMPILE_FOR_TRISC)  // BRISC, NCRISC, ERISC, IERISC
 #include "noc_nonblocking_api.h"
@@ -175,49 +192,16 @@ inline void riscv_wait(uint32_t cycles) {
     } while (wall_clock < (wall_clock_timestamp + cycles));
 }
 
-// Invalidates Blackhole's entire L1 cache
-// Blackhole L1 cache is a small write-through cache (4x16B L1 lines). The cache covers all of L1 (no
-// MMU or range registers).
-//  Writing an address on one proc and reading it from another proc only requires the reader to invalidate.
-//  Need to invalidate any address written by noc that may have been previously read by riscv
-inline __attribute__((always_inline)) void invalidate_l1_cache() {
-#if defined(ARCH_BLACKHOLE) && !defined(DISABLE_L1_DATA_CACHE)
-    asm("fence");
-#endif
-}
-
-inline __attribute__((always_inline)) void configure_l1_data_cache() {
-#if defined(ARCH_BLACKHOLE)
-#if defined(DISABLE_L1_DATA_CACHE)
-    // Disables Blackhole's L1 cache. Grayskull and Wormhole do not have L1 cache
-    // L1 cache can be disabled by setting `TT_METAL_DISABLE_L1_DATA_CACHE_RISCVS` env var
-    // export TT_METAL_DISABLE_L1_DATA_CACHE_RISCVS=<BR,NC,TR*,ER*>
-    asm(R"ASM(
-        li t1, 0x8
-        csrrs zero, 0x7c0, t1
-         )ASM" ::
-            : "t1");
-#elif !defined(ENABLE_HW_CACHE_INVALIDATION)
-    // Disable gathering to stop HW from invalidating the data cache after 128 transactions
-    // This is default enabled
-    asm(R"ASM(
-        lui  t1, 0x40
-        csrrs zero, 0x7c0, t1
-         )ASM" ::
-            : "t1");
-#endif
-#endif
-}
-
 // Flush i$ on ethernet riscs
 inline __attribute__((always_inline)) void flush_erisc_icache() {
 #ifdef ARCH_BLACKHOLE
-// Kernel start instructions on WH are not cached because we apply a 1 cache line (32B) padding
-//  between FW end and Kernel start.
-// This works because risc tries to prefetch 1 cache line.
-// The 32B still get cached but they are never executed
 #pragma GCC unroll 2048
     for (int i = 0; i < 2048; i++) {
+        asm("nop");
+    }
+#else
+#pragma GCC unroll 128
+    for (int i = 0; i < 128; i++) {
         asm("nop");
     }
 #endif

@@ -2,17 +2,19 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include "cpp/ttnn/operations/ccl/ccl_common.hpp"
+#include "ttnn/operations/ccl/ccl_common.hpp"
 
 #include <cstdint>
 #include <cmath>
 
 #include "ccl_host_datastructures.hpp"
 #include <tt-metalium/erisc_datamover_builder.hpp>
+#include <tt-metalium/fabric.hpp>
 #include "ttnn/operations/data_movement/slice/slice.hpp"
 #include "ttnn/operations/data_movement/concat/concat.hpp"
 
 #include "tt-metalium/hal.hpp"
+#include "ttnn/types.hpp"
 
 namespace ttnn {
 namespace ccl {
@@ -25,19 +27,19 @@ void SyncModeSpec::add_signal(uint32_t sem_id, uint32_t wait_count) {
 
 LineTopology::LineTopology(size_t line_size, size_t line_index) : _line_size(line_size), _line_index(line_index) {}
 
-bool LineTopology::is_first_device_in_line(ttnn::ccl::EdmLineFabricOpInterface::Direction direction) const {
-    if (direction == ttnn::ccl::EdmLineFabricOpInterface::Direction::FORWARD) {
+bool LineTopology::is_first_device_in_line(ttnn::ccl::LineDirection direction) const {
+    if (direction == ttnn::ccl::LineDirection::FORWARD) {
         return _line_index == 0;
     } else {
-        TT_ASSERT(direction == ttnn::ccl::EdmLineFabricOpInterface::Direction::BACKWARD);
+        TT_ASSERT(direction == ttnn::ccl::LineDirection::BACKWARD);
         return _line_index == _line_size - 1;
     }
 }
-bool LineTopology::is_last_device_in_line(ttnn::ccl::EdmLineFabricOpInterface::Direction direction) const {
-    if (direction == ttnn::ccl::EdmLineFabricOpInterface::Direction::BACKWARD) {
+bool LineTopology::is_last_device_in_line(ttnn::ccl::LineDirection direction) const {
+    if (direction == ttnn::ccl::LineDirection::BACKWARD) {
         return _line_index == 0;
     } else {
-        TT_ASSERT(direction == ttnn::ccl::EdmLineFabricOpInterface::Direction::FORWARD);
+        TT_ASSERT(direction == ttnn::ccl::LineDirection::FORWARD);
         return _line_index == _line_size - 1;
     }
 }
@@ -48,8 +50,8 @@ size_t LineTopology::line_size() const { return _line_size; }
 
 size_t LineTopology::line_index() const { return _line_index; }
 
-size_t LineTopology::get_distance_to_end_of_line(ttnn::ccl::EdmLineFabricOpInterface::Direction direction) const {
-    if (direction == ttnn::ccl::EdmLineFabricOpInterface::Direction::FORWARD) {
+size_t LineTopology::get_distance_to_end_of_line(ttnn::ccl::LineDirection direction) const {
+    if (direction == ttnn::ccl::LineDirection::FORWARD) {
         return (_line_size - _line_index) - 1;
     } else {
         return _line_index;
@@ -58,38 +60,112 @@ size_t LineTopology::get_distance_to_end_of_line(ttnn::ccl::EdmLineFabricOpInter
 
 ttnn::ccl::Topology LineTopology::topology() const { return ttnn::ccl::Topology::Linear; }
 
-std::tuple<uint32_t, std::optional<chip_id_t>, std::optional<chip_id_t>> get_device_index_and_sender_receiver_ids(
-    const Tensor& input_tensor, const std::vector<IDevice*>& devices, const ttnn::ccl::Topology& topology) {
+tt::tt_metal::operation::MeshWorkloadWithCallbacks create_mesh_workload_from_programs(
+    const ttnn::MeshCoordinateRangeSet& tensor_coords,
+    const std::vector<Tensor>& input_tensors,
+    std::vector<Tensor>& output_tensors,
+    const std::function<tt::tt_metal::operation::ProgramWithCallbacks(const ttnn::MeshCoordinate&)>& create_program) {
+    tt::tt_metal::operation::MeshWorkloadWithCallbacks workload_with_callbacks;
+    for (const auto& range : tensor_coords.ranges()) {
+        for (const auto& coord : range) {
+            const ttnn::MeshCoordinateRange program_range(coord, coord);
+            auto program_with_callbacks = create_program(coord);
+            workload_with_callbacks.workload.add_program(program_range, std::move(program_with_callbacks.program));
+            if (program_with_callbacks.override_runtime_arguments_callback.has_value()) {
+                workload_with_callbacks.per_program_callbacks.emplace(
+                    program_range, std::move(*program_with_callbacks.override_runtime_arguments_callback));
+            }
+        }
+    }
+    return workload_with_callbacks;
+}
+
+SenderReceiverConfig get_device_sender_receiver_config(
+    const IDevice* target_device, const std::vector<IDevice*>& devices, ttnn::ccl::Topology topology) {
     uint32_t num_devices = devices.size();
     bool is_linear = topology == ttnn::ccl::Topology::Linear;
-    uint32_t device_index = 0;  // Initialize device index
+    SenderReceiverConfig config;
     for (uint32_t i = 0; i < num_devices; ++i) {
-        if (devices.at(i) == input_tensor.device()) {
-            device_index = i;
+        if (devices.at(i) == target_device) {
+            config.device_index = i;
             bool is_last_chip_in_clockwise_direction = is_linear && i == (num_devices - 1);
             bool is_last_chip_in_counter_clockwise_direction = is_linear && i == 0;
 
-            std::optional<chip_id_t> receiver_device_id =
-                is_last_chip_in_clockwise_direction ? std::nullopt
-                                                    : std::optional<chip_id_t>(devices.at((i + 1) % num_devices)->id());
+            config.receiver_device_id = is_last_chip_in_clockwise_direction
+                                            ? std::nullopt
+                                            : std::optional<chip_id_t>(devices.at((i + 1) % num_devices)->id());
 
-            std::optional<chip_id_t> sender_device_id =
+            config.sender_device_id =
                 is_last_chip_in_counter_clockwise_direction
                     ? std::nullopt
                     : std::optional<chip_id_t>(devices.at((i + num_devices - 1) % num_devices)->id());
-
-            return {device_index, sender_device_id, receiver_device_id};
         }
     }
 
-    return {device_index, std::nullopt, std::nullopt};  // Return null if the device is not found
+    return config;
+}
+
+SenderReceiverConfig get_device_sender_receiver_config_in_ring(
+    const MeshCoordinate& mesh_coord,
+    const distributed::MeshDevice* mesh_device,
+    uint32_t cluster_axis,
+    int ring_size) {
+    SenderReceiverConfig config;
+    const auto& mesh_view = mesh_device->get_view();
+    TT_FATAL(
+        mesh_view.is_mesh_2d(),
+        "CLL operation invoked with cluster_axis API on >2D mesh, which is currently unsupported");
+    config.device_index = (cluster_axis == 0) ? mesh_coord[0] : mesh_coord[1];
+
+    auto get_chip_id = [&](std::size_t line_index) -> std::optional<chip_id_t> {
+        auto new_row = mesh_coord[0];
+        auto new_col = mesh_coord[1];
+        if (cluster_axis == 0) {
+            new_row = line_index % ring_size;
+        } else {
+            new_col = line_index % ring_size;
+        }
+        auto* device = mesh_view.get_device(MeshCoordinate(new_row, new_col));
+        TT_FATAL(device != nullptr, "Device not found at coordinate {}", MeshCoordinate(new_row, new_col));
+        return device->id();
+    };
+
+    bool is_last_chip_in_clockwise_direction = config.device_index == (ring_size - 1);
+    bool is_last_chip_in_counter_clockwise_direction = config.device_index == 0;
+    config.receiver_device_id =
+        is_last_chip_in_clockwise_direction ? std::nullopt : get_chip_id(config.device_index + 1);
+    config.sender_device_id =
+        is_last_chip_in_counter_clockwise_direction ? std::nullopt : get_chip_id(config.device_index + ring_size - 1);
+    return config;
+}
+
+std::vector<IDevice*> get_active_physical_devices(const Tensor& tensor) {
+    auto mesh_device = tensor.mesh_device();
+    std::vector<IDevice*> devices = {};
+    devices.reserve(tensor.device_storage().coords.size());
+    for (const auto& coord : tensor.device_storage().coords) {
+        devices.push_back(mesh_device->get_device(coord));
+    }
+    return devices;
+}
+
+std::vector<IDevice*> get_active_physical_devices(const std::vector<Tensor>& tensor_shards) {
+    std::vector<IDevice*> devices;
+    devices.reserve(tensor_shards.size());
+    for (const auto& tensor : tensor_shards) {
+        TT_FATAL(
+            tensor.mesh_device()->shape().mesh_size() == 1,
+            "Running a CCL over individual tensor shards requires the shards to be allocated on unit-meshes.");
+        devices.push_back(tensor.mesh_device()->get_device(MeshCoordinate(0, 0)));
+    }
+    return devices;
 }
 
 std::vector<ttnn::Tensor> unpad_output_tensor(
     const std::vector<ttnn::Tensor>& output_tensor,
     const uint32_t num_devices,
     const ttnn::SmallVector<uint32_t>& unpad_elements,
-    const int dim){
+    const int dim) {
     std::vector<ttnn::Tensor> combined_tensors;
 
     ttnn::SmallVector<uint32_t> begins = {0, 0, 0, 0};
@@ -98,7 +174,7 @@ std::vector<ttnn::Tensor> unpad_output_tensor(
     ends = unpad_elements;
 
     for (int i = 0; i < num_devices; ++i) {
-        begins[dim] = i * output_tensor.at(0).get_logical_shape()[dim] / num_devices;
+        begins[dim] = i * output_tensor.at(0).logical_shape()[dim] / num_devices;
         ends[dim] = begins[dim] + unpad_elements[dim];
 
         ttnn::Tensor sliced_tensor = ttnn::slice(output_tensor.at(0), begins, ends, step);
@@ -140,6 +216,13 @@ RingTopology::RingTopology(
         if (!is_linear || ring_index != ring_size - 1) {
             uint32_t receiver_device = receiver_device_id.value();
             auto const& sockets = device->get_ethernet_sockets(receiver_device);
+            TT_FATAL(
+                sender_socket_idx < sockets.size(),
+                "Sender socket index out of bounds. Device {} has {} ethernet cores but tried to access core at "
+                "index {}",
+                device->id(),
+                sockets.size(),
+                sender_socket_idx);
             auto eth_sender_core = sockets.at(sender_socket_idx);
             eth_sender_cores.push_back(eth_sender_core);
             log_trace(tt::LogOp, "\teth_sender_core on link {}: (x={},y={})", l, eth_sender_core.x, eth_sender_core.y);
@@ -147,6 +230,13 @@ RingTopology::RingTopology(
         if (!is_linear || ring_index != 0) {
             uint32_t sender_device = sender_device_id.value();
             auto const& sockets = device->get_ethernet_sockets(sender_device);
+            TT_FATAL(
+                receiver_socket_idx < sockets.size(),
+                "Receiver socket index out of bounds. Device {} has {} ethernet cores but tried to access core at "
+                "index {}",
+                device->id(),
+                sockets.size(),
+                receiver_socket_idx);
             auto eth_receiver_core = sockets.at(receiver_socket_idx);
             eth_receiver_cores.push_back(eth_receiver_core);
             log_trace(
@@ -172,11 +262,11 @@ bool RingTopology::is_last_device_in_line(bool in_clockwise_direction) const {
                                (!in_clockwise_direction && this->ring_index == 0));
 }
 
-CclOpTensorConfig::CclOpTensorConfig(Tensor const& tensor) :
+CclOpTensorConfig::CclOpTensorConfig(const Tensor& tensor) :
     buffer_start_address(tensor.buffer()->address()),
-    df(tt::tt_metal::datatype_to_dataformat_converter(tensor.get_dtype())) {
-    if (tensor.get_layout() == Layout::TILE) {
-        this->tile = tensor.get_tensor_spec().tile();
+    df(tt::tt_metal::datatype_to_dataformat_converter(tensor.dtype())) {
+    if (tensor.layout() == Layout::TILE) {
+        this->tile = tensor.tensor_spec().tile();
         this->page_size = this->tile.get_tile_size(this->df);
         this->tile_size = this->tile.get_tile_hw();
     } else {
@@ -217,23 +307,19 @@ void generate_edm_kernels_for_ring_or_linear_topology(
     std::optional<uint32_t> sender_device_id) {
     auto sender_noc = tt::tt_metal::detail::GetPreferredNOCForDRAMRead(tt::tt_metal::hal::get_arch());
     auto receiver_noc = tt::tt_metal::detail::GetPreferredNOCForDRAMWrite(tt::tt_metal::hal::get_arch());
-    uint32_t sender_socket_idx = 0;
-    uint32_t receiver_socket_idx = 0;
-    if (receiver_device_id == sender_device_id) {
-        if (topology_config.ring_index == 0) {
-            receiver_socket_idx = 1;
-        } else {
-            sender_socket_idx = 1;
-        }
-    }
     for (uint32_t i = 0; i < topology_config.num_links; ++i) {
         bool is_clockwise_direction_edm_enabled =
             !topology_config.is_linear || topology_config.ring_index != topology_config.ring_size - 1;
         if (is_clockwise_direction_edm_enabled) {
             auto eth_sender_core = topology_config.eth_sender_cores.at(i);
             log_trace(tt::LogOp, "EDM CLOCKWISE KERNEL RT ARGS: ");
-            auto eth_sender_kernel =
-                generate_edm_kernel(program, device, clockwise_edm_builders.at(i), eth_sender_core, sender_noc);
+            generate_edm_kernel(
+                program,
+                device,
+                clockwise_edm_builders.at(i),
+                eth_sender_core,
+                tt::tt_metal::DataMovementProcessor::RISCV_0,
+                sender_noc);
             log_trace(
                 tt::LogOp,
                 "RingIndex: {}. Link {}. Clockwise EDM Core (x={},y={})",
@@ -247,8 +333,13 @@ void generate_edm_kernels_for_ring_or_linear_topology(
         if (is_counter_clockwise_direction_edm_enabled) {
             log_trace(tt::LogOp, "EDM COUNTER CLOCKWISE KERNEL RT ARGS: ");
             auto eth_receiver_core = topology_config.eth_receiver_cores.at(i);
-            auto eth_receiver_kernel = generate_edm_kernel(
-                program, device, counter_clockwise_edm_builders.at(i), eth_receiver_core, receiver_noc);
+            generate_edm_kernel(
+                program,
+                device,
+                counter_clockwise_edm_builders.at(i),
+                eth_receiver_core,
+                tt::tt_metal::DataMovementProcessor::RISCV_0,
+                receiver_noc);
             log_trace(
                 tt::LogOp,
                 "RingIndex: {}. Link {}. Counter-clockwise EDM Core (x={},y={})",
@@ -260,27 +351,28 @@ void generate_edm_kernels_for_ring_or_linear_topology(
     }
 }
 
-template <typename EDMBuilder>
-tt::tt_metal::KernelHandle generate_edm_kernel_impl(
+static tt::tt_metal::KernelHandle generate_edm_kernel_impl(
     Program& program,
     const IDevice* device,
-    const EDMBuilder& edm_builder,
+    const ccl::EriscDatamoverBuilder& edm_builder,
     const std::string& kernel_path,
     const CoreCoord& eth_core,
+    tt::tt_metal::DataMovementProcessor risc_id,
     tt::tt_metal::NOC noc_id,
     std::optional<tt::tt_metal::KernelBuildOptLevel> opt_level = std::nullopt) {
     edm_builder.dump_to_log();
 
     std::vector<uint32_t> const edm_kernel_rt_args = edm_builder.get_runtime_args();
     // Ethernet Kernels
-    std::vector<uint32_t> const eth_sender_ct_args = edm_builder.get_compile_time_args();
+    const std::vector<uint32_t> eth_sender_ct_args = edm_builder.get_compile_time_args((uint32_t)risc_id);
     log_trace(tt::LogOp, "EDM core (x={},y={}):", eth_core.x, eth_core.y);
     log_trace(tt::LogOp, "CT ARGS:");
-    for (auto const& s : eth_sender_ct_args) {
+    for ([[maybe_unused]] const auto& s : eth_sender_ct_args) {
         log_trace(tt::LogOp, "\t{}", s);
     }
 
-    auto kernel_config = tt::tt_metal::EthernetConfig{.noc = noc_id, .compile_args = eth_sender_ct_args};
+    auto kernel_config =
+        tt::tt_metal::EthernetConfig{.noc = noc_id, .processor = risc_id, .compile_args = eth_sender_ct_args};
     if (opt_level.has_value()) {
         kernel_config.opt_level = opt_level.value();
     }
@@ -305,27 +397,18 @@ tt::tt_metal::KernelHandle generate_edm_kernel_impl(
 tt::tt_metal::KernelHandle generate_edm_kernel(
     Program& program,
     const IDevice* device,
-    const tt::tt_fabric::FabricEriscDatamoverBuilder& edm_builder,
+    const ccl::EriscDatamoverBuilder& edm_builder,
     const CoreCoord& eth_core,
+    const tt::tt_metal::DataMovementProcessor risc_id,
     tt::tt_metal::NOC noc_id) {
     return generate_edm_kernel_impl(
         program,
         device,
         edm_builder,
-        "tt_metal/fabric/impl/kernels/edm_fabric/fabric_erisc_datamover.cpp",
+        "ttnn/cpp/ttnn/operations/ccl/kernels/edm/erisc_datamover.cpp",
         eth_core,
-        noc_id,
-        tt::tt_metal::KernelBuildOptLevel::O3);
-}
-
-tt::tt_metal::KernelHandle generate_edm_kernel(
-    Program& program,
-    const IDevice* device,
-    const ccl::EriscDatamoverBuilder& edm_builder,
-    const CoreCoord& eth_core,
-    tt::tt_metal::NOC noc_id) {
-    return generate_edm_kernel_impl(
-        program, device, edm_builder, "ttnn/cpp/ttnn/operations/ccl/kernels/edm/erisc_datamover.cpp", eth_core, noc_id);
+        risc_id,
+        noc_id);
 }
 
 ccl::EriscDatamoverBuilder create_erisc_datamover_builder(
@@ -381,17 +464,17 @@ RingReduceScatterBaseTensorSlicer<DERIVED_SLICER_T>::RingReduceScatterBaseTensor
     uint32_t half_cb_n_pages) :
     LegacyCclTensorSlicer() {
     TT_ASSERT(max_slice_size_in_bytes > 0);
-    TT_ASSERT(input_tensor.get_padded_shape().rank() == 4);
-    this->row_major = input_tensor.get_layout() == Layout::ROW_MAJOR;
-    this->slice_dim_is_width = input_tensor.get_padded_shape().rank() - 1 == slice_dim;
+    TT_ASSERT(input_tensor.padded_shape().rank() == 4);
+    this->row_major = input_tensor.layout() == Layout::ROW_MAJOR;
+    this->slice_dim_is_width = input_tensor.padded_shape().rank() - 1 == slice_dim;
     this->is_sharded = input_tensor.is_sharded();
 
     this->input_page_size = input_tensor.buffer()->page_size();
     log_trace(tt::LogOp, "input_page_size={}", input_page_size);
     if (row_major) {
-        this->num_cols = input_tensor.get_padded_shape()[-1];
-        auto input_shape = input_tensor.get_padded_shape();
-        auto output_shape = output_tensor.get_padded_shape();
+        this->num_cols = input_tensor.padded_shape()[-1];
+        const auto& input_shape = input_tensor.padded_shape();
+        const auto& output_shape = output_tensor.padded_shape();
         this->num_rows =
             std::accumulate(input_shape.cbegin() + slice_dim, input_shape.cend() - 1, 1, std::multiplies<uint32_t>());
         this->row_offset =
@@ -399,13 +482,12 @@ RingReduceScatterBaseTensorSlicer<DERIVED_SLICER_T>::RingReduceScatterBaseTensor
                 output_shape.cbegin() + slice_dim, output_shape.cend() - 1, 1, std::multiplies<uint32_t>()) -
             num_rows;
     } else {
-        auto input_tile = input_tensor.get_tensor_spec().tile();
-        const uint32_t num_tiles_x = input_tensor.get_padded_shape()[-1] / input_tile.get_width();
-        uint32_t num_tiles_y = (input_tensor.get_padded_shape()[-2] / input_tile.get_height());
-        for (std::size_t i = 0;
-             input_tensor.get_padded_shape().rank() > 2 && i < input_tensor.get_padded_shape().rank() - 2;
+        auto input_tile = input_tensor.tensor_spec().tile();
+        const uint32_t num_tiles_x = input_tensor.padded_shape()[-1] / input_tile.get_width();
+        uint32_t num_tiles_y = (input_tensor.padded_shape()[-2] / input_tile.get_height());
+        for (std::size_t i = 0; input_tensor.padded_shape().rank() > 2 && i < input_tensor.padded_shape().rank() - 2;
              i++) {
-            num_tiles_y *= input_tensor.get_padded_shape()[i];
+            num_tiles_y *= input_tensor.padded_shape()[i];
         }
         TT_ASSERT(num_tiles_x >= ring_size);
         this->tensor_slice_shape.x = slice_dim == 3 ? (num_tiles_x / ring_size) : num_tiles_x;
@@ -417,7 +499,6 @@ RingReduceScatterBaseTensorSlicer<DERIVED_SLICER_T>::RingReduceScatterBaseTensor
     // The `output_page_offset` will be the starting page offset for this slice index (corresponds to )
     // ring index). Each worker will operate out of that slice and then advance to the next slice for
     // for the next ring index/timestep
-    uint32_t slice_size_in_bytes = std::numeric_limits<uint32_t>::max();
     if (row_major) {
         if (slice_dim_is_width) {
             TT_THROW("Reduce scatter row-major interleaved does not yet support a width dim");
@@ -431,7 +512,7 @@ RingReduceScatterBaseTensorSlicer<DERIVED_SLICER_T>::RingReduceScatterBaseTensor
         log_trace(tt::LogOp, "\tmax_slice_size_in_bytes={}", max_slice_size_in_bytes);
         log_trace(tt::LogOp, "\tinput_page_size={}", input_page_size);
         this->worker_slice_shapes = DERIVED_SLICER_T::create_worker_slice_shapes_for_tile_layout(
-            input_tensor.get_padded_shape(),
+            input_tensor.padded_shape(),
             this->tensor_slice_shape,
             total_num_workers,
             max_slice_size_in_bytes / input_page_size,
@@ -440,15 +521,13 @@ RingReduceScatterBaseTensorSlicer<DERIVED_SLICER_T>::RingReduceScatterBaseTensor
 
     if (row_major) {
         this->flattened_tensor_shape = tt_xy_pair{
-            input_tensor.get_padded_shape()[3],
-            input_tensor.get_padded_shape()[0] * input_tensor.get_padded_shape()[1] *
-                input_tensor.get_padded_shape()[2]};
+            input_tensor.padded_shape()[3],
+            input_tensor.padded_shape()[0] * input_tensor.padded_shape()[1] * input_tensor.padded_shape()[2]};
     } else {
-        auto input_tile = input_tensor.get_tensor_spec().tile();
+        auto input_tile = input_tensor.tensor_spec().tile();
         this->flattened_tensor_shape = tt_xy_pair{
-            input_tensor.get_padded_shape()[3] / input_tile.get_width(),
-            (input_tensor.get_padded_shape()[0] * input_tensor.get_padded_shape()[1] *
-             input_tensor.get_padded_shape()[2]) /
+            input_tensor.padded_shape()[3] / input_tile.get_width(),
+            (input_tensor.padded_shape()[0] * input_tensor.padded_shape()[1] * input_tensor.padded_shape()[2]) /
                 input_tile.get_height()};
     }
 
@@ -625,8 +704,6 @@ std::vector<tt_xy_pair> RingReduceScatterTensorSlicer::create_worker_slice_shape
     // Add padding for filler pages
 
     TT_ASSERT(max_slice_size_in_tiles > 0);
-    std::size_t max_width_in_tiles = std::min<std::size_t>(max_slice_size_in_tiles, tensor_slice_shape_in_tiles.x);
-    std::size_t max_height_in_tiles = std::min<std::size_t>(max_slice_size_in_tiles, tensor_slice_shape_in_tiles.y);
 
     uint32_t num_tiles_accounted_for = 0;  // for validation
     if (tensor_slice_shape_in_tiles.y >= num_workers) {
@@ -1145,12 +1222,10 @@ GenericWrappedTensorSlicer::GenericWrappedTensorSlicer(
 
 tt_xy_pair GenericWrappedTensorSlicer::calculate_tensor_slice_shape(
     const Tensor& input_tensor, int slice_dim, uint32_t partition_size) {
-    const uint32_t num_tiles_x = input_tensor.get_padded_shape()[-1] / tt::constants::TILE_WIDTH;
-    uint32_t num_tiles_y = (input_tensor.get_padded_shape()[-2] / tt::constants::TILE_HEIGHT);
-    for (std::size_t i = 0;
-         input_tensor.get_padded_shape().rank() > 2 && i < input_tensor.get_padded_shape().rank() - 2;
-         i++) {
-        num_tiles_y *= input_tensor.get_padded_shape()[i];
+    const uint32_t num_tiles_x = input_tensor.padded_shape()[-1] / tt::constants::TILE_WIDTH;
+    uint32_t num_tiles_y = (input_tensor.padded_shape()[-2] / tt::constants::TILE_HEIGHT);
+    for (std::size_t i = 0; input_tensor.padded_shape().rank() > 2 && i < input_tensor.padded_shape().rank() - 2; i++) {
+        num_tiles_y *= input_tensor.padded_shape()[i];
     }
     TT_ASSERT(num_tiles_x >= partition_size);
     tt_xy_pair tensor_slice_shape;
@@ -1169,7 +1244,7 @@ void GenericWrappedTensorSlicer::initialize(
     uint32_t max_slice_size_in_bytes,
     uint32_t half_cb_n_pages) {
     // Configure layout parameters
-    this->row_major = (input_tensor.get_layout() == Layout::ROW_MAJOR);
+    this->row_major = (input_tensor.layout() == Layout::ROW_MAJOR);
     this->input_page_size = input_tensor.buffer()->page_size();
     this->partition_index = partition_index;
     this->partition_size = partition_size;
@@ -1181,7 +1256,7 @@ void GenericWrappedTensorSlicer::initialize(
 
     // Calculate worker slice shapes (tile layout)
     this->worker_slice_shapes = create_worker_slice_shapes_for_tile_layout(
-        input_tensor.get_padded_shape(),
+        input_tensor.padded_shape(),
         this->tensor_slice_shape,
         total_num_workers,
         max_slice_size_in_bytes / this->input_page_size,
@@ -1189,8 +1264,8 @@ void GenericWrappedTensorSlicer::initialize(
 
     // Flattened tensor shape (tile layout)
     this->flattened_tensor_shape = tt_xy_pair{
-        input_tensor.get_padded_shape()[3] / tt::constants::TILE_WIDTH,
-        (input_tensor.get_padded_shape()[0] * input_tensor.get_padded_shape()[1] * input_tensor.get_padded_shape()[2]) /
+        input_tensor.padded_shape()[3] / tt::constants::TILE_WIDTH,
+        (input_tensor.padded_shape()[0] * input_tensor.padded_shape()[1] * input_tensor.padded_shape()[2]) /
             tt::constants::TILE_HEIGHT};
 
     this->worker_slice_offsets = compute_worker_slice_offsets(this->worker_slice_shapes, this->tensor_slice_shape);
@@ -1324,7 +1399,7 @@ void GenericWrappedTensorSlicerV2::initialize(
     uint32_t total_num_workers)
 {
     // Configure layout parameters
-    this->row_major = (input_tensor.get_layout() == Layout::ROW_MAJOR);
+    this->row_major = (input_tensor.layout() == Layout::ROW_MAJOR);
     this->input_page_size = input_tensor.buffer()->page_size();
     this->partition_index = partition_index;
     this->partition_size = partition_size;
@@ -1333,7 +1408,7 @@ void GenericWrappedTensorSlicerV2::initialize(
     TT_FATAL(!this->row_major, "Row major not supported yet");
 
     // Record the input tensor shape
-    auto input_shape = input_tensor.get_padded_shape();
+    auto input_shape = input_tensor.padded_shape();
     this->tensor_shape = Shape4D<uint32_t>(input_shape[0], input_shape[1], input_shape[2]/tt::constants::TILE_HEIGHT, input_shape[3]/tt::constants::TILE_WIDTH);
 
     // Calculate tensor slice shape
@@ -1415,6 +1490,137 @@ std::vector<Shape4D<uint32_t>> GenericWrappedTensorSlicerV2::create_worker_slice
     log_trace(tt::LogOp, "--------------------------------");
 
     return worker_slice_shapes;
+}
+
+std::tuple<size_t, size_t, bool> get_forward_backward_configuration(
+    size_t ring_size, size_t ring_index, Topology topology) {
+    // Used for experimentation for optimal perf
+    // May be uplifted to an op parameter if needed
+    constexpr bool enable_dynamic_alternate = false;
+    bool dynamic_alternate = false;
+    size_t num_targets_forward = 0;
+    size_t num_targets_backward = 0;
+    if (topology == Topology::Linear) {
+        LineTopology line_topology(ring_size, ring_index);
+        num_targets_forward = line_topology.get_distance_to_end_of_line(ttnn::ccl::LineDirection::FORWARD);
+        num_targets_backward = line_topology.get_distance_to_end_of_line(ttnn::ccl::LineDirection::BACKWARD);
+    } else if (topology == ccl::Topology::Ring) {
+        // TODO: Commonize
+        num_targets_forward = tt::div_up(ring_size - 1, 2);
+        num_targets_backward = ring_size - 1 - num_targets_forward;
+        constexpr bool static_alternate = true;
+        if constexpr (static_alternate) {
+            if (ring_index % 2 == 0) {
+                std::swap(num_targets_forward, num_targets_backward);
+            }
+        }
+        if constexpr (enable_dynamic_alternate) {
+            // Even ring size will result in uneven fwd/backward distances
+            dynamic_alternate = ring_size % 2 == 0;
+        }
+    }
+    return std::make_tuple(num_targets_forward, num_targets_backward, dynamic_alternate);
+}
+
+std::tuple<std::array<uint32_t, 2>, std::array<uint32_t, 2>> get_forward_backward_line_unicast_configuration(
+    Topology topology,
+    IDevice* src_device,
+    std::optional<IDevice*> forward_device,
+    std::optional<IDevice*> backward_device) {
+    std::array<uint32_t, 2> forward_args = {};
+    std::array<uint32_t, 2> backward_args = {};
+
+    auto fabric_config = tt::tt_fabric::GetFabricConfig();
+    if (fabric_config == tt::tt_fabric::FabricConfig::FABRIC_2D_DYNAMIC) {
+        TT_FATAL(topology != Topology::Ring, "Fabric 2D dynamic is not supported for ring topology");
+        if (forward_device) {
+            auto forward_device_fabric_node_id =
+                tt::tt_fabric::get_fabric_node_id_from_physical_chip_id((*forward_device)->id());
+            forward_args[0] = *forward_device_fabric_node_id.mesh_id;
+            forward_args[1] = forward_device_fabric_node_id.chip_id;
+        }
+        if (backward_device) {
+            auto backward_device_fabric_node_id =
+                tt::tt_fabric::get_fabric_node_id_from_physical_chip_id((*backward_device)->id());
+            backward_args[0] = *backward_device_fabric_node_id.mesh_id;
+            backward_args[1] = backward_device_fabric_node_id.chip_id;
+        }
+    } else if (tt::tt_fabric::is_1d_fabric_config(fabric_config)) {
+        if (forward_device) {
+            forward_args[0] = 0; // dst_mesh_id, unused
+            forward_args[1] = 1; // distance_in_hops
+        }
+        if (backward_device) {
+            backward_args[0] = 0; // dst_mesh_id, unused
+            backward_args[1] = 1; // distance_in_hops
+        }
+    } else {
+        TT_THROW("Unsupported fabric config");
+    }
+    return std::make_tuple(forward_args, backward_args);
+}
+
+std::tuple<uint32_t, uint32_t> get_forward_backward_line_mcast_distance(
+    size_t ring_size, size_t ring_index, Topology topology, bool static_alternate) {
+    size_t num_targets_forward = 0;
+    size_t num_targets_backward = 0;
+    if (topology == Topology::Linear) {
+        LineTopology line_topology(ring_size, ring_index);
+        num_targets_forward = line_topology.get_distance_to_end_of_line(ttnn::ccl::LineDirection::FORWARD);
+        num_targets_backward = line_topology.get_distance_to_end_of_line(ttnn::ccl::LineDirection::BACKWARD);
+    } else if (topology == ccl::Topology::Ring) {
+        // TODO: Commonize
+        num_targets_forward = tt::div_up(ring_size - 1, 2);
+        num_targets_backward = ring_size - 1 - num_targets_forward;
+        if (static_alternate) {
+            if (ring_index % 2 == 0) {
+                std::swap(num_targets_forward, num_targets_backward);
+            }
+        }
+    }
+    return std::make_tuple(num_targets_forward, num_targets_backward);
+}
+
+std::tuple<std::array<uint32_t, 6>, std::array<uint32_t, 6>> get_forward_backward_line_mcast_configuration(
+    Topology topology,
+    IDevice* src_device,
+    std::optional<IDevice*> forward_device,
+    std::optional<IDevice*> backward_device,
+    uint32_t num_targets_forward,
+    uint32_t num_targets_backward) {
+    std::array<uint32_t, 6> forward_args = {};
+    std::array<uint32_t, 6> backward_args = {};
+    // Used for experimentation for optimal perf
+    // May be uplifted to an op parameter if needed
+    auto fabric_config = tt::tt_fabric::GetFabricConfig();
+
+    if (fabric_config == tt::tt_fabric::FabricConfig::FABRIC_2D_DYNAMIC) {
+        TT_FATAL(topology != Topology::Ring, "Fabric 2D dynamic is not supported for ring topology");
+        auto src_fabric_node_id = tt::tt_fabric::get_fabric_node_id_from_physical_chip_id(src_device->id());
+        auto set_mcast_args = [&src_fabric_node_id](std::array<uint32_t, 6>& args, std::optional<IDevice*> device, uint32_t num_targets) {
+            if (device) {
+                auto device_fabric_node_id = tt::tt_fabric::get_fabric_node_id_from_physical_chip_id((*device)->id());
+                auto eth_chan_dir = tt::tt_fabric::get_eth_forwarding_direction(src_fabric_node_id, device_fabric_node_id);
+                args[0] = *device_fabric_node_id.mesh_id;
+                args[1] = device_fabric_node_id.chip_id;
+                args[2 + static_cast<std::uint8_t>(eth_chan_dir.value())] = num_targets - 1;
+            }
+        };
+        set_mcast_args(forward_args, forward_device, num_targets_forward);
+        set_mcast_args(backward_args, backward_device, num_targets_backward);
+    } else if (tt::tt_fabric::is_1d_fabric_config(fabric_config)) {
+        if (forward_device) {
+            forward_args[0] = 1;                    // start_distance_in_hops
+            forward_args[1] = num_targets_forward;  // range_hops
+        }
+        if (backward_device) {
+            backward_args[0] = 1;                     // start_distance_in_hops
+            backward_args[1] = num_targets_backward;  // range_hops
+        }
+    } else {
+        TT_THROW("Unsupported fabric config");
+    }
+    return std::make_tuple(forward_args, backward_args);
 }
 
 }  // namespace ccl

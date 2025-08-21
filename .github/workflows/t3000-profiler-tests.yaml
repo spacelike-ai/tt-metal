@@ -4,16 +4,18 @@ on:
   workflow_dispatch:
   workflow_call:
   schedule:
-    - cron: "0 */8 * * *" # This cron schedule runs the workflow every 8 hours
+    - cron: "0 2 * * *" # This cron schedule runs the workflow every day at 2am
 
 jobs:
   build-artifact-profiler:
     uses: ./.github/workflows/build-artifact.yaml
+    permissions:
+      packages: write
+    secrets: inherit
     with:
       tracy: true
       build-wheel: true
       version: 22.04
-    secrets: inherit
   t3000-profiler-tests:
     needs: build-artifact-profiler
     secrets: inherit

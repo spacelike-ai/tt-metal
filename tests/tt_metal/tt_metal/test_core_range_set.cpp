@@ -2,20 +2,44 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include <algorithm>
-#include <functional>
-#include <random>
-#include <optional>
-
-#include <tt-metalium/host_api.hpp>
-#include <tt-metalium/tt_metal.hpp>
-#include <tt-metalium/bfloat16.hpp>
-#include <tt-metalium/semaphore.hpp>
-#include <tt-metalium/kernel.hpp>
-#include <tt-metalium/circular_buffer.hpp>
+#include <chrono>
+#include <errno.h>
+#include <fmt/base.h>
+#include <stdlib.h>
+#include <sys/types.h>
 #include <tt-metalium/allocator.hpp>
+#include <tt-metalium/bfloat16.hpp>
+#include <tt-metalium/circular_buffer.hpp>
+#include <tt-metalium/host_api.hpp>
+#include <tt-metalium/kernel.hpp>
+#include <tt-metalium/semaphore.hpp>
+#include <tt-metalium/tt_metal.hpp>
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <exception>
+#include <map>
+#include <memory>
+#include <variant>
+#include <vector>
 
-#include "llrt/hal.hpp"
+#include <tt-metalium/assert.hpp>
+#include <tt-metalium/buffer.hpp>
+#include <tt-metalium/buffer_types.hpp>
+#include <tt-metalium/circular_buffer_config.hpp>
+#include <tt-metalium/core_coord.hpp>
+#include <tt-metalium/data_types.hpp>
+#include <tt-metalium/device.hpp>
+#include <tt-metalium/hal_types.hpp>
+#include "hostdevcommon/kernel_structs.h"
+#include <tt-metalium/kernel_types.hpp>
+#include "impl/context/metal_context.hpp"
+#include <tt-logger/tt-logger.hpp>
+#include <tt-metalium/program.hpp>
+#include <tt_stl/span.hpp>
+#include <tt-metalium/tt_backend_api_types.hpp>
+#include "umd/device/tt_core_coordinates.h"
+#include "umd/device/types/xy_pair.h"
 
 //////////////////////////////////////////////////////////////////////////////////////////
 // TODO: explain what test does
@@ -36,7 +60,7 @@ void check_program_is_mapped_to_correct_cores(
                     auto kernel = tt_metal::detail::GetKernel(program, kernel_id);
                     TT_FATAL(kernel->is_on_logical_core(logical_core), "Error");
                     // Check that compute kernel compile time args are mapped to the correct cores
-                    if (kernel->processor() == tt::RISCV::COMPUTE) {
+                    if (kernel->get_kernel_processor_class() == tt_metal::HalProcessorClassType::COMPUTE) {
                         auto kernel_compile_time_args = kernel->compile_time_args();
                         TT_FATAL(kernel_compile_time_args == compute_kernel_args, "Error");
                     }
@@ -70,7 +94,7 @@ void check_semaphores_are_initialized(
                     res);
                 std::vector<uint32_t> filtered_res;
                 static uint32_t num_u32_to_skip =
-                    tt_metal::hal_ref.get_alignment(tt_metal::HalMemType::L1) / sizeof(uint32_t);
+                    tt_metal::MetalContext::instance().hal().get_alignment(tt_metal::HalMemType::L1) / sizeof(uint32_t);
                 for (int i = 0; i < res.size(); i += num_u32_to_skip) {
                     filtered_res.push_back(res.at(i));
                 }
@@ -122,7 +146,7 @@ bool test_program_specified_with_core_range_set(
     tt_metal::CircularBufferConfig cb_src0_config =
         tt_metal::CircularBufferConfig(num_input_tiles * single_tile_size, {{src0_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(src0_cb_index, single_tile_size);
-    auto cb_src0 = tt_metal::CreateCircularBuffer(program, core_range_set, cb_src0_config);
+    tt_metal::CreateCircularBuffer(program, core_range_set, cb_src0_config);
 
     uint32_t ouput_cb_index = tt::CBIndex::c_16;
     uint32_t num_output_tiles = 1;
@@ -130,7 +154,7 @@ bool test_program_specified_with_core_range_set(
         tt_metal::CircularBufferConfig(
             num_output_tiles * single_tile_size, {{ouput_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(ouput_cb_index, single_tile_size);
-    auto cb_output = tt_metal::CreateCircularBuffer(program, core_range_set, cb_output_config);
+    tt_metal::CreateCircularBuffer(program, core_range_set, cb_output_config);
 
     auto unary_reader_kernel = tt_metal::CreateKernel(
         program,
@@ -151,7 +175,7 @@ bool test_program_specified_with_core_range_set(
         uint(num_tiles)  // per_core_tile_cnt
     };
 
-    auto eltwise_unary_kernel = tt_metal::CreateKernel(
+    tt_metal::CreateKernel(
         program,
         "tests/tt_metal/tt_metal/test_kernels/compute/eltwise_copy_3m.cpp",
         core_range_set,
@@ -178,7 +202,6 @@ bool test_program_specified_with_core_range_set(
     for (const auto& [core, dst_l1_buffer] : core_to_l1_buffer) {
         tt_metal::SetRuntimeArgs(program, unary_reader_kernel, core, reader_rt_args);
 
-        auto bank_id = 0;
         auto l1_dst_noc_xy = device->virtual_core_from_logical_core(
             dst_l1_buffer->allocator()->get_logical_core_from_bank_id(0), CoreType::WORKER);
 

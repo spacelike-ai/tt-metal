@@ -5,7 +5,6 @@
 from typing import Tuple, Union, Optional
 
 import ttnn
-import ttnn._ttnn
 
 
 def _create_golden_function(torch_function_name):

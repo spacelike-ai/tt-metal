@@ -3,13 +3,30 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <gtest/gtest.h>
-#include <gmock/gmock.h>
+#include <xtensor/containers/xarray.hpp>
+#include <xtensor/generators/xbuilder.hpp>
+#include <xtensor/containers/xcontainer.hpp>
+#include <xtensor/core/xiterator.hpp>
+#include <xtensor/core/xlayout.hpp>
+#include <xtensor/core/xmath.hpp>
+#include <xtensor/core/xshape.hpp>
+#include <xtensor/containers/xstorage.hpp>
+#include <xtensor/core/xtensor_forward.hpp>
+#include <xtensor/utils/xtensor_simd.hpp>
+#include <cstddef>
+#include <tuple>
+#include <vector>
 
+#include "gmock/gmock.h"
+#include <tt-metalium/shape.hpp>
+#include <tt_stl/span.hpp>
 #include "ttnn/operations/functions.hpp"
+#include "ttnn/tensor/enum_types.hpp"
+#include "ttnn/tensor/layout/tensor_layout.hpp"
+#include "ttnn/tensor/shape/shape.hpp"
 #include "ttnn/tensor/tensor.hpp"
 #include "ttnn/tensor/types.hpp"
 #include "ttnn/tensor/xtensor/conversion_utils.hpp"
-#include "ttnn/tensor/xtensor/xtensor_all_includes.hpp"
 
 namespace ttnn {
 namespace {
@@ -29,7 +46,11 @@ TensorSpec get_tensor_spec(const ttnn::Shape& shape) {
 
 TEST(XtensorConversionTest, SpanToXtensor) {
     std::vector<int> data = {1, 2, 3, 4, 5, 6};
-    tt::stl::Span<const int> data_span(data.data(), data.size());
+
+    // std::vector must have a non-const, non-volatile value_type
+    //  xarray uses std::vector<T> as a template parameter
+    //  if T is deduced as const int, then the span_to_xtensor_view which returns xt::xarray<T> will fail to compile
+    std::span<int> data_span(data.data(), data.size());
     ttnn::Shape shape({2, 3});
 
     auto result = span_to_xtensor_view(data_span, shape);

@@ -2,23 +2,54 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#include <algorithm>
-#include <functional>
-#include <map>
-#include <random>
-#include <string>
-#include <tt-metalium/host_api.hpp>
-#include <tt-metalium/tt_metal.hpp>
+#include <chrono>
+#include <errno.h>
+#include <fmt/base.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <tt-metalium/bfloat16.hpp>
-#include "tt_metal/test_utils/deprecated/tensor.hpp"
+#include <tt-metalium/host_api.hpp>
 #include <tt-metalium/tilize_utils.hpp>
+#include <tt-metalium/tt_metal.hpp>
+#include <algorithm>
+#include <cstring>
+#include <exception>
+#include <iterator>
+#include <map>
+#include <memory>
+#include <string>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <tt-metalium/assert.hpp>
+#include <tt-metalium/buffer.hpp>
+#include <tt-metalium/buffer_types.hpp>
+#include <tt-metalium/circular_buffer_config.hpp>
+#include <tt-metalium/core_coord.hpp>
+#include <tt-metalium/data_types.hpp>
+#include "hostdevcommon/kernel_structs.h"
+#include <tt-metalium/kernel_types.hpp>
+#include <tt-logger/tt-logger.hpp>
+#include <tt-metalium/program.hpp>
+#include <tt_stl/span.hpp>
+#include <tt-metalium/tt_backend_api_types.hpp>
+#include "tt_metal/test_utils/deprecated/tensor.hpp"
+
+namespace tt {
+namespace tt_metal {
+class IDevice;
+}  // namespace tt_metal
+}  // namespace tt
 
 using std::vector;
 using namespace tt;
 
 struct BinaryOpType {
     enum Enum { ADD = 0, SUB = 1, MUL = 2 };
-    static const vector<Enum> all() { return {ADD, SUB, MUL}; }
+    static vector<Enum> all() { return {ADD, SUB, MUL}; }
 };
 
 std::map<std::string, std::string> get_defines(BinaryOpType::Enum op_type) {
@@ -54,13 +85,13 @@ std::tuple<tt_metal::Program, tt_metal::KernelHandle, tt_metal::KernelHandle> se
     tt_metal::CircularBufferConfig cb_src0_config =
         tt_metal::CircularBufferConfig(num_input_tiles * single_tile_size, {{src0_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(src0_cb_index, single_tile_size);
-    auto cb_src0 = tt_metal::CreateCircularBuffer(program, core, cb_src0_config);
+    tt_metal::CreateCircularBuffer(program, core, cb_src0_config);
 
     uint32_t src1_cb_index = 1;
     tt_metal::CircularBufferConfig cb_src1_config =
         tt_metal::CircularBufferConfig(num_input_tiles * single_tile_size, {{src1_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(src1_cb_index, single_tile_size);
-    auto cb_src1 = tt_metal::CreateCircularBuffer(program, core, cb_src1_config);
+    tt_metal::CreateCircularBuffer(program, core, cb_src1_config);
 
     uint32_t ouput_cb_index = tt::CBIndex::c_16;
     uint32_t num_output_tiles = 2;
@@ -68,7 +99,7 @@ std::tuple<tt_metal::Program, tt_metal::KernelHandle, tt_metal::KernelHandle> se
         tt_metal::CircularBufferConfig(
             num_output_tiles * single_tile_size, {{ouput_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(ouput_cb_index, single_tile_size);
-    auto cb_output = tt_metal::CreateCircularBuffer(program, core, cb_output_config);
+    tt_metal::CreateCircularBuffer(program, core, cb_output_config);
 
     auto binary_reader_kernel = tt_metal::CreateKernel(
         program,
@@ -107,13 +138,13 @@ std::tuple<tt_metal::Program, tt_metal::KernelHandle, tt_metal::KernelHandle> se
     tt_metal::CircularBufferConfig cb_src0_config =
         tt_metal::CircularBufferConfig(num_input_tiles * single_tile_size, {{src0_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(src0_cb_index, single_tile_size);
-    auto cb_src0 = tt_metal::CreateCircularBuffer(program, core, cb_src0_config);
+    tt_metal::CreateCircularBuffer(program, core, cb_src0_config);
 
     uint32_t src1_cb_index = 1;
     tt_metal::CircularBufferConfig cb_src1_config =
         tt_metal::CircularBufferConfig(num_input_tiles * single_tile_size, {{src1_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(src1_cb_index, single_tile_size);
-    auto cb_src1 = tt_metal::CreateCircularBuffer(program, core, cb_src1_config);
+    tt_metal::CreateCircularBuffer(program, core, cb_src1_config);
 
     uint32_t ouput_cb_index = tt::CBIndex::c_16;
     uint32_t num_output_tiles = 2;
@@ -121,7 +152,7 @@ std::tuple<tt_metal::Program, tt_metal::KernelHandle, tt_metal::KernelHandle> se
         tt_metal::CircularBufferConfig(
             num_output_tiles * single_tile_size, {{ouput_cb_index, tt::DataFormat::Float16_b}})
             .set_page_size(ouput_cb_index, single_tile_size);
-    auto cb_output = tt_metal::CreateCircularBuffer(program, core, cb_output_config);
+    tt_metal::CreateCircularBuffer(program, core, cb_output_config);
 
     auto mm_reader_kernel = tt_metal::CreateKernel(
         program,
@@ -147,7 +178,7 @@ std::tuple<tt_metal::Program, tt_metal::KernelHandle, tt_metal::KernelHandle> se
         1   // out_block_tile_cnt
     };
 
-    auto mm_kernel = tt_metal::CreateKernel(
+    tt_metal::CreateKernel(
         program,
         "tests/tt_metal/tt_metal/test_kernels/compute/matmul.cpp",
         core,
@@ -232,7 +263,8 @@ int main(int argc, char** argv) {
             0,
             100,
             std::chrono::system_clock::now().time_since_epoch().count());
-        auto src0_activations_tile_layout = convert_to_tile_layout(tt::stl::MakeConstSpan(src0_tensor.get_values()));
+        auto src0_activations_tile_layout =
+            convert_layout_tile_swizzled_to_tile_nfaces(tt::stl::make_const_span(src0_tensor.get_values()));
         auto src0_activations = pack_bfloat16_vec_into_uint32_vec(src0_activations_tile_layout);
         tt_metal::detail::WriteToBuffer(src0_dram_buffer, src0_activations);
 
@@ -242,7 +274,8 @@ int main(int argc, char** argv) {
             0,
             100,
             std::chrono::system_clock::now().time_since_epoch().count());
-        auto src1_activations_tile_layout = convert_to_tile_layout(tt::stl::MakeConstSpan(src1_tensor.get_values()));
+        auto src1_activations_tile_layout =
+            convert_layout_tile_swizzled_to_tile_nfaces(tt::stl::make_const_span(src1_tensor.get_values()));
         auto src1_activations = pack_bfloat16_vec_into_uint32_vec(src1_activations_tile_layout);
         tt_metal::detail::WriteToBuffer(src1_dram_buffer, src1_activations);
 
@@ -269,7 +302,7 @@ int main(int argc, char** argv) {
         if (pass) {
             log_info(LogTest, "Eltwise binary ran successfully");
         } else {
-            log_error(LogTest, "Eltwise binary did not run sucessfully!");
+            log_error(LogTest, "Eltwise binary did not run successfully!");
         }
 
         ////////////////////////////////////////////////////////////////////////////
@@ -277,7 +310,7 @@ int main(int argc, char** argv) {
         ////////////////////////////////////////////////////////////////////////////
         // Write matmul weights to DRAM
         auto identity = create_identity_matrix(32, 32, 32);  // bflaot16 32x32 identity
-        auto weights_tile_layout = convert_to_tile_layout(tt::stl::MakeConstSpan(identity));
+        auto weights_tile_layout = convert_layout_tile_swizzled_to_tile_nfaces(tt::stl::make_const_span(identity));
         auto weights = pack_bfloat16_vec_into_uint32_vec(weights_tile_layout);
         tt_metal::detail::WriteToBuffer(src1_dram_buffer, weights);
 
