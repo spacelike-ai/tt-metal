@@ -73,4 +73,4 @@ def test_timestep_embedding(*, mesh_device: ttnn.MeshDevice) -> None:
         mesh_composer=ttnn.ConcatMesh2dToTensor(mesh_device, tuple(mesh_device.shape), (0, -1)),
     )[..., : torch_output.shape[-1]]
 
-    assert_quality(torch_output, tt_output_torch, pcc=0.997, mse=0.1)
+    assert_quality(torch_output, tt_output_torch, pcc=0.9998, mse=0.1)

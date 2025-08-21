@@ -117,5 +117,5 @@ def test_transformer_block(
     composer = ttnn.ConcatMesh2dToTensor(mesh_device, tuple(mesh_device.shape), (0, -1))
 
     if tt_prompt_output is not None:
-        assert_quality(prompt_output, tt_prompt_output, pcc=0.99929, mse=1500, mesh_composer=composer)
-    assert_quality(spatial_output, tt_spatial_output, pcc=0.9988, mse=83, mesh_composer=composer)
+        assert_quality(prompt_output, tt_prompt_output, pcc=0.99929, mesh_composer=composer)
+    assert_quality(spatial_output, tt_spatial_output, pcc=0.9988, mesh_composer=composer)

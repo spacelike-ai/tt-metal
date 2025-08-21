@@ -78,4 +78,4 @@ def test_linear(
     if mesh_sharding_dim is None:
         tt_output_torch = tt_output_torch[..., :output_dim]
 
-    assert_quality(torch_output, tt_output_torch, pcc=0.99967)
+    assert_quality(torch_output, tt_output_torch, pcc=0.99976)
