@@ -37,6 +37,9 @@ def test_single_transformer_block(
     sequence_length: int,
     parent_torch_model: FluxTransformerReference,
 ) -> None:
+    if mesh_device.shape[1] == 1:
+        pytest.skip("test case hangs: https://github.com/tenstorrent/tt-metal/issues/20789")
+
     batch_size, _ = mesh_device.shape
 
     torch.manual_seed(0)

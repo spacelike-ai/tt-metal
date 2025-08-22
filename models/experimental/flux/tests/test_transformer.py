@@ -44,6 +44,9 @@ def test_transformer(  # noqa: PLR0915
     pcc: float,
     mse: float,
 ) -> None:
+    if mesh_device.shape[1] == 1:
+        pytest.skip("test case hangs: https://github.com/tenstorrent/tt-metal/issues/20789")
+
     mesh_height, _ = mesh_device.shape
     batch_size = mesh_height
 
