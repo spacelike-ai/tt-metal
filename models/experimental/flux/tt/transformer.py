@@ -150,8 +150,8 @@ class FluxTransformer:
                 skip_time_embed_activation=True,
             )
 
-            if i % 6 == 0:
-                ttnn.DumpDeviceProfiler(spatial.device())
+            # if i % 6 == 0:
+            #     ttnn.DumpDeviceProfiler(spatial.device())
 
         prompt = ttnn.clone(prompt, dtype=spatial.dtype)
 
@@ -166,8 +166,8 @@ class FluxTransformer:
                 skip_time_embed_activation=True,
             )
 
-            if i % 6 == 0:
-                ttnn.DumpDeviceProfiler(combined.device())
+            # if i % 6 == 0:
+            #     ttnn.DumpDeviceProfiler(combined.device())
 
         spatial = combined[:, prompt_sequence_length:]
         del combined
