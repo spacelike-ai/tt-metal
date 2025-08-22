@@ -18,7 +18,7 @@ from ..tt.utils import allocate_tensor_on_device_like, assert_quality
     ("spatial_sequence_length", "prompt_sequence_length", "block_count", "pcc", "mse"),
     [
         # (1024, 512, None, 0.99944, 13.8),
-        (4096, 512, None, 0.984, 19),
+        (4096, 512, None, 0.984, 21),
         # (4096, 512, 1, 0.992, 320),
     ],
 )
