@@ -70,7 +70,7 @@ def run(
         )
 
         for i, image in enumerate(images, start=1):
-            image.save(f"flux_1024_{i}.png")
+            image.save(f"flux-{iteration}-{i}.png")
 
 
 def main() -> None:
