@@ -27,7 +27,6 @@ if TYPE_CHECKING:
 )
 @pytest.mark.parametrize("device_params", [{"trace_region_size": 517120}], indirect=True)
 @pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2), (2, 2)], indirect=True)
-@pytest.mark.usefixtures("use_program_cache")
 @pytest.mark.parametrize("use_tracing", [False])  # Tracing currently causes a mesh device to hang.
 def test_attention(
     *,

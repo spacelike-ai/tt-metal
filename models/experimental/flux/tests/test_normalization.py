@@ -21,7 +21,6 @@ from ..tt.utils import assert_quality
 )
 @pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2), (2, 2)], indirect=True)
 @pytest.mark.parametrize("affine", [True, False], ids=["affine", "noaffine"])
-@pytest.mark.usefixtures("use_program_cache")
 def test_layer_norm(
     *,
     mesh_device: ttnn.MeshDevice,
@@ -69,7 +68,6 @@ def test_layer_norm(
     ],
 )
 @pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
-@pytest.mark.usefixtures("use_program_cache")
 def test_rms_norm(
     *,
     mesh_device: ttnn.MeshDevice,

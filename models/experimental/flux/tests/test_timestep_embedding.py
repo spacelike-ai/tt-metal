@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2), (2, 2)], indirect=True)
-@pytest.mark.usefixtures("use_program_cache")
 def test_timestep_embedding(*, mesh_device: ttnn.MeshDevice, parent_torch_model: FluxTransformerReference) -> None:
     batch_size = 512
 

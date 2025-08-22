@@ -22,7 +22,6 @@ from ..tt.utils import assert_quality
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192}], indirect=True)
 @pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2), (2, 2)], indirect=True)
 @pytest.mark.parametrize("linear_on_host", [False, True])
-@pytest.mark.usefixtures("use_program_cache")
 def test_feed_forward(
     *,
     mesh_device: ttnn.MeshDevice,

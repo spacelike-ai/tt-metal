@@ -23,7 +23,6 @@ from ..tt.utils import allocate_tensor_on_device_like, assert_quality
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 8192, "trace_region_size": 18006016}], indirect=True)
-@pytest.mark.usefixtures("use_program_cache")
 @pytest.mark.parametrize(
     ("mesh_device", "use_tracing"),
     [

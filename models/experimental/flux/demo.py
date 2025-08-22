@@ -39,8 +39,6 @@ def run(
         trace_region_size=15210496,
         dispatch_core_config=dispatch_core_config,
     )
-    for device in mesh_device.get_devices():
-        ttnn.enable_program_cache(device)
 
     pipeline = FluxPipeline(
         checkpoint="black-forest-labs/FLUX.1-schnell",

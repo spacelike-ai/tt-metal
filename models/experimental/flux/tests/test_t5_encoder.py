@@ -28,7 +28,6 @@ from ..tt.utils import assert_quality, from_torch_fast
     ],
     indirect=True,
 )
-@pytest.mark.usefixtures("use_program_cache")
 def test_t5_encoder(*, mesh_device: ttnn.MeshDevice) -> None:
     mesh_height, _ = mesh_device.shape
     batch_size = mesh_height

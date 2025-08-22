@@ -21,7 +21,6 @@ from ..tt.utils import assert_quality
 @pytest.mark.parametrize("mesh_sharding_dim", [0, 1, None], ids=["in_sharding", "out_sharding", "no_sharding"])
 @pytest.mark.parametrize("on_host", [False, True], ids=["host", "device"])
 @pytest.mark.parametrize("mesh_device", [(1, 1), (1, 2)], indirect=True)
-@pytest.mark.usefixtures("use_program_cache")
 def test_linear(
     *,
     mesh_device: ttnn.MeshDevice,
