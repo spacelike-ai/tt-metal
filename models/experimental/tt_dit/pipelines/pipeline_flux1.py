@@ -1,0 +1,1247 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+import time
+from contextlib import nullcontext
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+import numpy as np
+import torch
+import tqdm
+import ttnn
+from diffusers.image_processor import VaeImageProcessor
+from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
+from diffusers.models.transformers.transformer_flux import FluxTransformer2DModel as DiffusersModel
+from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
+from loguru import logger
+from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
+
+from ...stable_diffusion_35_large.tt.clip_encoder import (
+    TtCLIPConfig,
+    TtCLIPTextTransformer,
+    TtCLIPTextTransformerParameters,
+)
+from ...stable_diffusion_35_large.tt.t5_encoder import TtT5Encoder, TtT5EncoderParameters
+from ..models.transformers.attention_flux1 import all_gather
+from ..models.transformers.transformer_flux1 import Flux1Transformer
+from ..models.vae.vae_sd35 import VAEDecoder
+from ..parallel.config import DiTParallelConfig, EncoderParallelManager, create_vae_parallel_manager
+from ..parallel.manager import CCLManager
+from ..utils.padding import PaddingConfig
+
+if TYPE_CHECKING:
+    from PIL import Image
+
+
+@dataclass
+class PipelineTrace:
+    tid: int
+    spatial_input: ttnn.Tensor
+    prompt_input: ttnn.Tensor
+    pooled_input: ttnn.Tensor
+    timestep_input: ttnn.Tensor
+    spatial_rope_cos: ttnn.Tensor
+    spatial_rope_sin: ttnn.Tensor
+    prompt_rope_cos: ttnn.Tensor
+    prompt_rope_sin: ttnn.Tensor
+    latents_output: ttnn.Tensor
+
+
+class Flux1Pipeline:
+    # SD3:
+    # T5_SEQUENCE_LENGTH = 256
+    T5_SEQUENCE_LENGTH = 512
+
+    def __init__(
+        self,
+        *,
+        checkpoint_name: str,
+        mesh_device: ttnn.MeshDevice,
+        enable_t5_text_encoder: bool = True,
+        use_torch_t5_text_encoder: bool = False,
+        parallel_config: DiTParallelConfig,
+    ) -> None:
+        self.timing_collector = None
+
+        self._mesh_device = mesh_device
+        self._parallel_config = parallel_config
+
+        # Create submeshes
+        submesh_shape = list(mesh_device.shape)
+        submesh_shape[parallel_config.cfg_parallel.mesh_axis] //= parallel_config.cfg_parallel.factor
+        logger.info(f"Parallel config: {parallel_config}")
+        logger.info(f"Original mesh shape: {mesh_device.shape}")
+        logger.info(f"Creating submeshes with shape {submesh_shape}")
+        self._submesh_devices = self._mesh_device.create_submeshes(ttnn.MeshShape(*submesh_shape))
+
+        self._ccl_managers = [
+            CCLManager(submesh_device, num_links=1, topology=ttnn.Topology.Linear)
+            for submesh_device in self._submesh_devices
+        ]
+
+        # Hacky submesh reshapes and assignment to parallelize encoders and VAE
+        encoder_device = self._submesh_devices[0]
+        self.original_submesh_shape = tuple(encoder_device.shape)
+
+        if encoder_device.shape[1] != 4:
+            # If reshaping, vae_device must be on submesh 0. That means T5 can't fit, so disable it.
+            vae_submesh_idx = 0
+            if enable_t5_text_encoder and not use_torch_t5_text_encoder:
+                logger.warning(
+                    "If VAE submesh must be reshaped, VAE must be on submesh 0, and T5 cannot fit. Disabling T5."
+                )
+                enable_t5_text_encoder = False
+
+            cfg_shape = tuple(encoder_device.shape)
+            assert cfg_shape[0] * cfg_shape[1] == 4, f"Cannot reshape {cfg_shape} to a 1x4 mesh"
+            logger.info(f"Reshaping submesh device 0 from {cfg_shape} to (1, 4) for CLIP")
+            encoder_device.reshape(ttnn.MeshShape(1, 4))
+        else:
+            # vae_device can only be on submesh 1 if submesh is not getting reshaped.
+            # vae_submesh_idx = 1
+            vae_submesh_idx = 0
+        vae_device = self._submesh_devices[vae_submesh_idx]
+
+        encoder_parallel_manager = EncoderParallelManager(
+            encoder_device,
+            ttnn.Topology.Linear,
+            mesh_axis=1,  # 1x4 submesh, parallel on axis 1
+            num_links=self._ccl_managers[0].num_links,
+        )
+        vae_parallel_manager = create_vae_parallel_manager(vae_device, self._ccl_managers[vae_submesh_idx])
+        # HACK: reshape submesh device 0 from 1D to 2D
+        self._submesh_devices[0].reshape(ttnn.MeshShape(*self.original_submesh_shape))
+
+        self.encoder_parallel_manager = encoder_parallel_manager
+        self.vae_parallel_manager = vae_parallel_manager
+
+        logger.info("loading models...")
+        self._tokenizer_1 = CLIPTokenizer.from_pretrained(checkpoint_name, subfolder="tokenizer")
+        self._t5_tokenizer = T5TokenizerFast.from_pretrained(checkpoint_name, subfolder="tokenizer_2")
+        # SD3
+        # self._tokenizer_2 = CLIPTokenizer.from_pretrained(checkpoint_name, subfolder="tokenizer_2")
+        # self._t5_tokenizer = T5TokenizerFast.from_pretrained(checkpoint_name, subfolder="tokenizer_3")
+        # self._text_encoder_1 = CLIPTextModelWithProjection.from_pretrained(
+        #     checkpoint_name, subfolder="text_encoder"
+        # )
+        # self._text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
+        #     checkpoint_name, subfolder="text_encoder_2"
+        # )
+        self._text_encoder_1 = CLIPTextModel.from_pretrained(checkpoint_name, subfolder="text_encoder")
+        if enable_t5_text_encoder:
+            # SD3:
+            # torch_t5_text_encoder = T5EncoderModel.from_pretrained(checkpoint_name, subfolder="text_encoder_3")
+            torch_t5_text_encoder = T5EncoderModel.from_pretrained(checkpoint_name, subfolder="text_encoder_2")
+        self._scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(checkpoint_name, subfolder="scheduler")
+        self._torch_vae = AutoencoderKL.from_pretrained(checkpoint_name, subfolder="vae")
+
+        torch_transformer = DiffusersModel.from_pretrained(
+            checkpoint_name,
+            subfolder="transformer",
+            torch_dtype=torch.bfloat16,  # bfloat16 is the native datatype of the model
+        )
+        torch_transformer.eval()
+        # del torch_transformer.transformer_blocks[:]
+        # del torch_transformer.single_transformer_blocks[:]
+        # torch_transformer.num_layers = 0
+        # torch_transformer.num_single_layers = 0
+
+        logger.info("creating TT-NN transformer...")
+
+        if torch_transformer.config.num_attention_heads % parallel_config.tensor_parallel.factor != 0:
+            padding_config = PaddingConfig.from_tensor_parallel_factor(
+                torch_transformer.config.num_attention_heads,
+                torch_transformer.config.attention_head_dim,
+                parallel_config.tensor_parallel.factor,
+            )
+        else:
+            padding_config = None
+
+        self.transformers = []
+        for i, submesh_device in enumerate(self._submesh_devices):
+            # SD3:
+            # tt_transformer = SD35Transformer2DModel(
+            #     sample_size=128,
+            #     patch_size=2,
+            #     in_channels=16,
+            #     num_layers=38,
+            #     attention_head_dim=64,
+            #     num_attention_heads=38,
+            #     joint_attention_dim=4096,
+            #     caption_projection_dim=2432,
+            #     pooled_projection_dim=2048,
+            #     out_channels=16,
+            #     pos_embed_max_size=192,
+            #     dual_attention_layers=(),
+            #     mesh_device=submesh_device,
+            #     ccl_manager=self._ccl_managers[i],
+            #     parallel_config=self._parallel_config,
+            #     init=False,
+            #     padding_config=padding_config,
+            # )
+            tt_transformer = Flux1Transformer(
+                patch_size=torch_transformer.config.patch_size,
+                in_channels=torch_transformer.config.in_channels,
+                num_layers=torch_transformer.num_layers,
+                num_single_layers=torch_transformer.num_single_layers,
+                attention_head_dim=torch_transformer.config.attention_head_dim,
+                num_attention_heads=torch_transformer.config.num_attention_heads,
+                joint_attention_dim=torch_transformer.config.joint_attention_dim,
+                pooled_projection_dim=torch_transformer.config.pooled_projection_dim,
+                out_channels=torch_transformer.out_channels,
+                axes_dims_rope=torch_transformer.config.axes_dims_rope,
+                mesh_device=submesh_device,
+                ccl_manager=self._ccl_managers[i],
+                parallel_config=parallel_config,
+                padding_config=padding_config,
+            )
+            tt_transformer.load_state_dict(torch_transformer.state_dict())
+
+            self.transformers.append(tt_transformer)
+            ttnn.synchronize_device(submesh_device)
+
+        self._pos_embed = torch_transformer.pos_embed
+
+        # SD3:
+        # self._num_channels_latents = torch_transformer.config.in_channels
+        self._num_channels_latents = torch_transformer.config.in_channels // 4
+        self._joint_attention_dim = torch_transformer.config.joint_attention_dim
+        self._patch_size = torch_transformer.config.patch_size
+
+        self._block_out_channels = self._torch_vae.config.block_out_channels
+        self._latents_scaling = self._torch_vae.config.scaling_factor
+        self._latents_shift = self._torch_vae.config.shift_factor
+
+        # SD3:
+        # self._vae_scale_factor = 2 ** (len(self._block_out_channels) - 1)
+        self._vae_scale_factor = 2 ** len(self._block_out_channels)
+        self._image_processor = VaeImageProcessor(vae_scale_factor=self._vae_scale_factor)
+
+        # HACK: reshape submesh device 0 to 1D
+        encoder_parallel_manager.mesh_device.reshape(
+            ttnn.MeshShape(*encoder_parallel_manager.tensor_parallel.mesh_shape)
+        )
+
+        logger.info("creating TT-NN CLIP text encoder...")
+        parameters_1 = TtCLIPTextTransformerParameters.from_torch(
+            self._text_encoder_1.state_dict(),
+            device=encoder_parallel_manager.mesh_device,
+            dtype=ttnn.bfloat16,
+            parallel_manager=encoder_parallel_manager,
+            # SD3:
+            # has_text_projection=True,
+            has_text_projection=False,
+        )
+        # SD3:
+        # parameters_2 = TtCLIPTextTransformerParameters.from_torch(
+        #     self._text_encoder_2.state_dict(),  # Different weights!
+        #     device=encoder_parallel_manager.mesh_device,
+        #     dtype=ttnn.bfloat16,
+        #     parallel_manager=encoder_parallel_manager,
+        # )
+        self._text_encoder_1 = TtCLIPTextTransformer(
+            parameters_1,
+            TtCLIPConfig(
+                vocab_size=self._text_encoder_1.config.vocab_size,
+                d_model=self._text_encoder_1.config.hidden_size,
+                d_ff=self._text_encoder_1.config.intermediate_size,
+                num_heads=self._text_encoder_1.config.num_attention_heads,
+                num_layers=self._text_encoder_1.config.num_hidden_layers,
+                max_position_embeddings=77,
+                layer_norm_eps=self._text_encoder_1.config.layer_norm_eps,
+                attention_dropout=self._text_encoder_1.config.attention_dropout,
+                hidden_act=self._text_encoder_1.config.hidden_act,
+            ),
+        )
+        # SD3:
+        # self._text_encoder_2 = TtCLIPTextTransformer(
+        #     parameters_2,
+        #     TtCLIPConfig(
+        #         vocab_size=self._text_encoder_2.config.vocab_size,
+        #         d_model=self._text_encoder_2.config.hidden_size,
+        #         d_ff=self._text_encoder_2.config.intermediate_size,
+        #         num_heads=self._text_encoder_2.config.num_attention_heads,
+        #         num_layers=self._text_encoder_2.config.num_hidden_layers,
+        #         max_position_embeddings=77,
+        #         layer_norm_eps=self._text_encoder_2.config.layer_norm_eps,
+        #         attention_dropout=self._text_encoder_2.config.attention_dropout,
+        #         hidden_act=self._text_encoder_2.config.hidden_act,
+        #     ),
+        # )
+
+        if enable_t5_text_encoder:
+            if use_torch_t5_text_encoder:
+                self._t5_text_encoder = torch_t5_text_encoder
+            else:
+                logger.info("creating TT-NN text encoder...")
+
+                parameters = TtT5EncoderParameters.from_torch(
+                    torch_t5_text_encoder.state_dict(),
+                    device=encoder_parallel_manager.mesh_device,
+                    dtype=ttnn.bfloat16,
+                    parallel_manager=encoder_parallel_manager,
+                )
+                self._t5_text_encoder = TtT5Encoder(
+                    parameters,
+                    num_heads=torch_t5_text_encoder.config.num_heads,
+                    relative_attention_num_buckets=torch_t5_text_encoder.config.relative_attention_num_buckets,
+                    relative_attention_max_distance=torch_t5_text_encoder.config.relative_attention_max_distance,
+                    layer_norm_epsilon=torch_t5_text_encoder.config.layer_norm_epsilon,
+                )
+        else:
+            self._t5_text_encoder = None
+
+        # HACK: reshape submesh device 0 from 1D to 2D
+        self.encoder_parallel_manager.mesh_device.reshape(ttnn.MeshShape(*self.original_submesh_shape))
+
+        self._traces = None
+
+        ttnn.synchronize_device(self.encoder_parallel_manager.mesh_device)
+
+        # HACK: reshape submesh device 0 to 1D
+        original_vae_device_shape = tuple(self.vae_parallel_manager.device.shape)
+        if original_vae_device_shape != tuple(self.encoder_parallel_manager.tensor_parallel.mesh_shape):
+            self.vae_parallel_manager.device.reshape(
+                ttnn.MeshShape(*self.encoder_parallel_manager.tensor_parallel.mesh_shape)
+            )
+
+        self._vae_decoder = VAEDecoder.from_torch(
+            torch_ref=self._torch_vae.decoder,
+            mesh_device=vae_parallel_manager.device,
+            mesh_axis=1,
+            parallel_manager=vae_parallel_manager,
+        )
+
+        # HACK: reshape submesh device 0 from 1D to 2D
+        if original_vae_device_shape != tuple(encoder_parallel_manager.tensor_parallel.mesh_shape):
+            vae_parallel_manager.device.reshape(ttnn.MeshShape(*self.original_submesh_shape))
+
+        self._latents_gather_semaphore = ttnn.create_global_semaphore(
+            vae_parallel_manager.device, self._ccl_managers[vae_submesh_idx].ccl_cores, 0
+        )
+
+    def prepare(
+        self,
+        *,
+        batch_size: int,
+        num_images_per_prompt: int = 1,
+        width: int = 1024,
+        height: int = 1024,
+        guidance_scale: float = 1,  # Flux.1 is not indented to be used with CFG
+    ) -> None:
+        self._prepared_batch_size = batch_size
+        self._prepared_num_images_per_prompt = num_images_per_prompt
+        self._prepared_width = width
+        self._prepared_height = height
+        self._prepared_guidance_scale = guidance_scale
+
+        """
+        guidance_enabled = guidance_scale > 1
+
+        prompt_embeds, pooled_prompt_embeds = self._encode_prompts(
+            prompt_1=[""],
+            prompt_2=[""],
+            prompt_3=[""],
+            negative_prompt_1=[""],
+            negative_prompt_2=[""],
+            negative_prompt_3=[""],
+            num_images_per_prompt=num_images_per_prompt,
+            guidance_enabled=guidance_enabled,
+        )
+
+        latents_shape = (
+            batch_size * num_images_per_prompt,
+            height // self._vae_scale_factor,
+            (width // self._vae_scale_factor) // patch_size,
+            self._num_channels_latents * patch_size,
+        )
+
+        tt_prompt_embeds = ttnn.from_torch(
+            prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b,
+            mesh_mapper=ttnn.ReplicateTensorToMesh(self._device),
+        )
+        tt_pooled_prompt_embeds = ttnn.from_torch(
+            pooled_prompt_embeds, device=self._device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16,
+            mesh_mapper=ttnn.ReplicateTensorToMesh(self._device),
+
+        )
+
+        tt_timestep = ttnn.allocate_tensor_on_device([batch_size * num_images_per_prompt * (1+guidance_enabled), 1], ttnn.float32, ttnn.ROW_MAJOR_LAYOUT, self._device)
+        tt_sigma_difference = ttnn.allocate_tensor_on_device([1, 1], ttnn.bfloat16, ttnn.TILE_LAYOUT, self._device)
+        tt_latents = ttnn.allocate_tensor_on_device(latents_shape, ttnn.bfloat16, ttnn.ROW_MAJOR_LAYOUT, self._device)
+
+        self._device.disable_and_clear_program_cache()
+
+        # cache
+        self._step(
+            timestep=tt_timestep,
+            latents=tt_latents,
+            guidance_enabled=guidance_enabled,
+            prompt_embeds=tt_prompt_embeds,
+            pooled_prompt_embeds=tt_pooled_prompt_embeds,
+            guidance_scale=guidance_scale,
+            sigma_difference=tt_sigma_difference,
+        )
+        self._step(
+            timestep=tt_timestep,
+            latents=tt_latents,
+            guidance_enabled=guidance_enabled,
+            prompt_embeds=tt_prompt_embeds,
+            pooled_prompt_embeds=tt_pooled_prompt_embeds,
+            guidance_scale=guidance_scale,
+            sigma_difference=tt_sigma_difference,
+        )
+
+        # trace
+        tid = ttnn.begin_trace_capture(self._device)
+        self._step(
+            timestep=tt_timestep,
+            latents=tt_latents,
+            guidance_enabled=guidance_enabled,
+            prompt_embeds=tt_prompt_embeds,
+            pooled_prompt_embeds=tt_pooled_prompt_embeds,
+            guidance_scale=guidance_scale,
+            sigma_difference=tt_sigma_difference,
+        )
+        ttnn.end_trace_capture(self._device, tid)
+
+        self._traces = PipelineTrace(
+            tid=tid,
+            spatial_input_output=tt_latents,
+            prompt_input=tt_prompt_embeds,
+            pooled_input=tt_pooled_prompt_embeds,
+        )
+        """
+
+    def __call__(
+        self,
+        *,
+        prompt_1: list[str],
+        prompt_2: list[str],
+        # prompt_3: list[str],
+        negative_prompt_1: list[str] | None = None,
+        negative_prompt_2: list[str] | None = None,
+        # negative_prompt_3: list[str],
+        num_inference_steps: int,
+        seed: int | None = None,
+        traced: bool = False,
+        clip_skip: int | None = None,
+    ) -> list[Image.Image]:
+        timer = self.timing_collector
+
+        with timer.time_section("total") if timer else nullcontext():
+            start_time = time.time()
+
+            batch_size = self._prepared_batch_size
+            num_images_per_prompt = self._prepared_num_images_per_prompt
+            width = self._prepared_width
+            height = self._prepared_height
+            guidance_scale = self._prepared_guidance_scale
+
+            assert height % (self._vae_scale_factor * self._patch_size) == 0
+            assert width % (self._vae_scale_factor * self._patch_size) == 0
+            assert batch_size == len(prompt_1)
+
+            guidance_enabled = guidance_scale > 1
+
+            logger.info("encoding prompts...")
+
+            with timer.time_section("total_encoding") if timer else nullcontext():
+                # HACK: reshape submesh device 0 from 2D to 1D
+                self.encoder_parallel_manager.mesh_device.reshape(
+                    ttnn.MeshShape(*self.encoder_parallel_manager.tensor_parallel.mesh_shape)
+                )
+                prompt_encoding_start_time = time.time()
+                prompt_embeds, pooled_prompt_embeds = self._encode_prompts(
+                    prompt_1=prompt_1,
+                    prompt_2=prompt_2,
+                    # prompt_3=prompt_3,
+                    negative_prompt_1=negative_prompt_1,
+                    negative_prompt_2=negative_prompt_2,
+                    # negative_prompt_3=negative_prompt_3,
+                    num_images_per_prompt=num_images_per_prompt,
+                    guidance_enabled=guidance_enabled,
+                    clip_skip=clip_skip,
+                )
+                _, prompt_sequence_length, _ = prompt_embeds.shape
+                # HACK: reshape submesh device 0 from 1D to 2D
+                self.encoder_parallel_manager.mesh_device.reshape(ttnn.MeshShape(*self.original_submesh_shape))
+                prompt_encoding_end_time = time.time()
+
+            logger.info("preparing timesteps...")
+
+            sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
+            # SD3:
+            # self._scheduler.set_timesteps(num_inference_steps)
+            self._scheduler.set_timesteps(sigmas=sigmas)  # type: ignore  # noqa: PGH003
+            timesteps = self._scheduler.timesteps
+
+            logger.info("preparing latents...")
+
+            latents_height = height // self._vae_scale_factor
+            latents_width = width // self._vae_scale_factor
+
+            if seed is not None:
+                torch.manual_seed(seed)
+
+            # We let randn generate a permuted latent tensor, so that the generated noise matches the
+            # reference implementation.
+            # SD3:
+            # shape = (
+            #     batch_size * num_images_per_prompt,
+            #     self._num_channels_latents,
+            #     latents_height,
+            #     latents_width,
+            # )
+            shape = [
+                batch_size * num_images_per_prompt,
+                self._num_channels_latents,
+                latents_height * 2,
+                latents_width * 2,
+            ]
+            # SD3:
+            # latents = torch.randn(shape, dtype=prompt_embeds.dtype).permute(0, 2, 3, 1)
+            latents = _pack_latents(
+                torch.randn(shape, dtype=prompt_embeds.dtype),
+                batch_size * num_images_per_prompt,
+                self._num_channels_latents,
+                latents_height,
+                latents_width,
+            )
+
+            text_ids = torch.zeros([prompt_sequence_length, 3], dtype=prompt_embeds.dtype)
+            image_ids = _latent_image_ids(height=latents_height, width=latents_width).to(dtype=prompt_embeds.dtype)
+            ids = torch.cat((text_ids, image_ids), dim=0)
+            rope_cos, rope_sin = self._pos_embed.forward(ids)
+
+            tt_prompt_embeds_list = []
+            tt_pooled_prompt_embeds_list = []
+            tt_latents_step_list = []
+            tt_spatial_rope_cos_list = []
+            tt_spatial_rope_sin_list = []
+            tt_prompt_rope_cos_list = []
+            tt_prompt_rope_sin_list = []
+            for i, submesh_device in enumerate(self._submesh_devices):
+                tt_prompt_embeds = ttnn.from_torch(
+                    prompt_embeds[i].unsqueeze(0).unsqueeze(0)
+                    if self._parallel_config.cfg_parallel.factor == 2
+                    else prompt_embeds,
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=ttnn.bfloat16,
+                    device=submesh_device if not traced else None,
+                    mesh_mapper=ttnn.ShardTensor2dMesh(
+                        submesh_device,
+                        tuple(submesh_device.shape),
+                        dims=(None, None),
+                    ),
+                )
+
+                tt_pooled_prompt_embeds = ttnn.from_torch(
+                    pooled_prompt_embeds[i].unsqueeze(0).unsqueeze(0).unsqueeze(0)
+                    if self._parallel_config.cfg_parallel.factor == 2
+                    else pooled_prompt_embeds,
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=ttnn.bfloat16,
+                    device=submesh_device if not traced else None,
+                    mesh_mapper=ttnn.ShardTensor2dMesh(
+                        submesh_device,
+                        tuple(submesh_device.shape),
+                        dims=(None, None),
+                    ),
+                )
+
+                shard_latents_dims = [None, None]
+                shard_latents_dims[self._parallel_config.sequence_parallel.mesh_axis] = 1  # height of latents
+                tt_initial_latents = ttnn.from_torch(
+                    latents,
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=ttnn.bfloat16,
+                    device=submesh_device if not traced else None,
+                    mesh_mapper=ttnn.ShardTensor2dMesh(
+                        submesh_device,
+                        tuple(submesh_device.shape),
+                        dims=tuple(shard_latents_dims),
+                    ),
+                )
+
+                shard_rope_dims = [None, None]
+                shard_rope_dims[self._parallel_config.sequence_parallel.mesh_axis] = 0
+                rope_mesh_mapper = ttnn.ShardTensor2dMesh(
+                    submesh_device,
+                    tuple(submesh_device.shape),
+                    dims=tuple(shard_rope_dims),
+                )
+
+                tt_spatial_rope_cos = ttnn.from_torch(
+                    rope_cos[prompt_sequence_length:],
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=ttnn.bfloat16,
+                    device=submesh_device if not traced else None,
+                    mesh_mapper=rope_mesh_mapper,
+                )
+                tt_spatial_rope_sin = ttnn.from_torch(
+                    rope_sin[prompt_sequence_length:],
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=ttnn.bfloat16,
+                    device=submesh_device if not traced else None,
+                    mesh_mapper=rope_mesh_mapper,
+                )
+                tt_prompt_rope_cos = ttnn.from_torch(
+                    rope_cos[:prompt_sequence_length],
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=ttnn.bfloat16,
+                    device=submesh_device if not traced else None,
+                    mesh_mapper=ttnn.ReplicateTensorToMesh(submesh_device),
+                )
+                tt_prompt_rope_sin = ttnn.from_torch(
+                    rope_sin[:prompt_sequence_length],
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=ttnn.bfloat16,
+                    device=submesh_device if not traced else None,
+                    mesh_mapper=ttnn.ReplicateTensorToMesh(submesh_device),
+                )
+
+                if traced:
+                    if self._traces is None:
+                        # Push inputs to device
+                        tt_initial_latents = tt_initial_latents.to(submesh_device)
+                        tt_prompt_embeds = tt_prompt_embeds.to(submesh_device)
+                        tt_pooled_prompt_embeds = tt_pooled_prompt_embeds.to(submesh_device)
+                        tt_spatial_rope_cos = tt_spatial_rope_cos.to(submesh_device)
+                        tt_spatial_rope_sin = tt_spatial_rope_sin.to(submesh_device)
+                        tt_prompt_rope_cos = tt_prompt_rope_cos.to(submesh_device)
+                        tt_prompt_rope_sin = tt_prompt_rope_sin.to(submesh_device)
+                    else:
+                        # Copy inputs to trace
+                        ttnn.copy_host_to_device_tensor(tt_initial_latents, self._traces[i].spatial_input)
+                        ttnn.copy_host_to_device_tensor(tt_prompt_embeds, self._traces[i].prompt_input)
+                        ttnn.copy_host_to_device_tensor(tt_pooled_prompt_embeds, self._traces[i].pooled_input)
+                        ttnn.copy_host_to_device_tensor(tt_spatial_rope_cos, self._traces[i].tt_spatial_rope_cos)
+                        ttnn.copy_host_to_device_tensor(tt_spatial_rope_sin, self._traces[i].tt_spatial_rope_sin)
+                        ttnn.copy_host_to_device_tensor(tt_prompt_rope_cos, self._traces[i].tt_prompt_rope_cos)
+                        ttnn.copy_host_to_device_tensor(tt_prompt_rope_sin, self._traces[i].tt_prompt_rope_sin)
+
+                        # Ensure trace inputs are passed to function
+                        tt_initial_latents = self._traces[i].spatial_input
+                        tt_prompt_embeds = self._traces[i].prompt_input
+                        tt_pooled_prompt_embeds = self._traces[i].pooled_input
+                        tt_spatial_rope_cos = self._traces[i].tt_spatial_rope_cos
+                        tt_spatial_rope_sin = self._traces[i].tt_spatial_rope_sin
+                        tt_prompt_rope_cos = self._traces[i].tt_prompt_rope_cos
+                        tt_prompt_rope_sin = self._traces[i].tt_prompt_rope_sin
+
+                tt_prompt_embeds_list.append(tt_prompt_embeds)
+                tt_pooled_prompt_embeds_list.append(tt_pooled_prompt_embeds)
+                tt_latents_step_list.append(tt_initial_latents)
+                tt_spatial_rope_cos_list.append(tt_spatial_rope_cos)
+                tt_spatial_rope_sin_list.append(tt_spatial_rope_sin)
+                tt_prompt_rope_cos_list.append(tt_prompt_rope_cos)
+                tt_prompt_rope_sin_list.append(tt_prompt_rope_sin)
+
+            logger.info("denoising...")
+            denoising_start_time = time.time()
+
+            for i, t in enumerate(tqdm.tqdm(timesteps)):
+                with timer.time_step("denoising_step") if timer else nullcontext():
+                    sigma_difference = self._scheduler.sigmas[i + 1] - self._scheduler.sigmas[i]
+
+                    tt_timestep_list = []
+                    tt_sigma_difference_list = []
+                    for submesh_device in self._submesh_devices:
+                        tt_timestep = ttnn.full(
+                            [1, 1, 1, 1],
+                            fill_value=t,
+                            layout=ttnn.TILE_LAYOUT,
+                            dtype=ttnn.float32,
+                            device=submesh_device if not traced else None,
+                        )
+                        tt_timestep_list.append(tt_timestep)
+
+                        tt_sigma_difference = ttnn.full(
+                            [1, 1],
+                            fill_value=sigma_difference,
+                            layout=ttnn.TILE_LAYOUT,
+                            dtype=ttnn.bfloat16,
+                            device=submesh_device,  # Not used in trace region, can be on device always.
+                        )
+                        tt_sigma_difference_list.append(tt_sigma_difference)
+
+                    tt_latents_step_list = self._step(
+                        timestep=tt_timestep_list,
+                        latents=tt_latents_step_list,
+                        guidance_enabled=guidance_enabled,
+                        prompt_embeds=tt_prompt_embeds_list,
+                        pooled_prompt_embeds=tt_pooled_prompt_embeds_list,
+                        guidance_scale=guidance_scale,
+                        sigma_difference=tt_sigma_difference_list,
+                        spatial_rope_cos=tt_spatial_rope_cos_list,
+                        spatial_rope_sin=tt_spatial_rope_sin_list,
+                        prompt_rope_cos=tt_prompt_rope_cos_list,
+                        prompt_rope_sin=tt_prompt_rope_sin_list,
+                        prompt_sequence_length=prompt_sequence_length,
+                        traced=traced,
+                    )
+
+            denoising_end_time = time.time()
+
+            logger.info("decoding image...")
+
+            with timer.time_section("vae_decoding") if timer else nullcontext():
+                image_decoding_start_time = time.time()
+
+                tt_latents = all_gather(
+                    tt_latents_step_list[0],
+                    dim=1,
+                    parallel_factor=self._parallel_config.sequence_parallel,
+                    ccl_manager=self._ccl_managers[0],
+                )
+
+                torch_latents = ttnn.to_torch(ttnn.get_device_tensors(tt_latents)[0])
+                torch_latents = (torch_latents / self._latents_scaling) + self._latents_shift
+
+                # not in SD3:
+                torch_latents = _unpack_latents(torch_latents, height, width, self._vae_scale_factor)
+                torch_latents = torch_latents.permute(0, 2, 3, 1)
+
+                # HACK: reshape submesh device 0 from 2D to 1D
+                original_vae_device_shape = tuple(self.vae_parallel_manager.device.shape)
+                if original_vae_device_shape != tuple(self.encoder_parallel_manager.tensor_parallel.mesh_shape):
+                    self.vae_parallel_manager.device.reshape(
+                        ttnn.MeshShape(*self.encoder_parallel_manager.tensor_parallel.mesh_shape)
+                    )
+
+                tt_latents = ttnn.from_torch(
+                    torch_latents,
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=ttnn.bfloat16,
+                    device=self.vae_parallel_manager.device,
+                    mesh_mapper=ttnn.ReplicateTensorToMesh(self.vae_parallel_manager.device),
+                )
+                decoded_output = self._vae_decoder(tt_latents)
+                # decoded_output = sd_vae_decode(tt_latents, self._vae_parameters)
+                decoded_output = ttnn.to_torch(ttnn.get_device_tensors(decoded_output)[0]).permute(0, 3, 1, 2)
+                # HACK: reshape submesh device 0 from 1D to 2D
+                if original_vae_device_shape != tuple(self.encoder_parallel_manager.tensor_parallel.mesh_shape):
+                    self.vae_parallel_manager.device.reshape(ttnn.MeshShape(*self.original_submesh_shape))
+                image = self._image_processor.postprocess(decoded_output, output_type="pt")
+                assert isinstance(image, torch.Tensor)
+                image_decoding_end_time = time.time()
+
+                output = self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
+
+                end_time = time.time()
+
+                logger.info(f"prompt encoding duration: {prompt_encoding_end_time - prompt_encoding_start_time}")
+                logger.info(f"denoising duration: {denoising_end_time - denoising_start_time}")
+                logger.info(f"image decoding duration: {image_decoding_end_time - image_decoding_start_time}")
+                logger.info(f"total runtime: {end_time - start_time}")
+
+        return output
+
+    def _spatial_sequence_length(self) -> int:
+        latents_height = self._prepared_height // self._vae_scale_factor
+        latents_width = self._prepared_width // self._vae_scale_factor
+        return latents_height * latents_width
+
+    def _step_inner(
+        self,
+        *,
+        guidance_enabled: bool,
+        latent: ttnn.Tensor,
+        prompt: ttnn.Tensor,
+        pooled: ttnn.Tensor,
+        timestep: ttnn.Tensor,
+        spatial_rope_cos: ttnn.Tensor,
+        spatial_rope_sin: ttnn.Tensor,
+        prompt_rope_cos: ttnn.Tensor,
+        prompt_rope_sin: ttnn.Tensor,
+        prompt_sequence_length: int,
+        submesh_index: int,
+    ) -> ttnn.Tensor:
+        if guidance_enabled and not self._parallel_config.cfg_parallel.factor > 1:
+            latent = ttnn.concat([latent, latent])
+
+        noise_pred = self.transformers[submesh_index].forward(
+            spatial=latent,
+            prompt=prompt,
+            pooled=pooled,
+            timestep=timestep,
+            spatial_rope=(spatial_rope_cos, spatial_rope_sin),
+            prompt_rope=(prompt_rope_cos, prompt_rope_sin),
+            spatial_sequence_length=self._spatial_sequence_length(),
+            prompt_sequence_length=prompt_sequence_length,
+        )
+
+        # SD3:
+        # noise_pred = _reshape_noise_pred(
+        #     noise_pred,
+        #     height=latent.shape[-3] * self._parallel_config.sequence_parallel.factor,
+        #     width=latent.shape[-2],
+        #     patch_size=self._patch_size,
+        # )
+
+        return noise_pred
+
+    def _step(
+        self,
+        *,
+        guidance_enabled: bool,
+        guidance_scale: float,
+        latents: list[ttnn.Tensor],  # device tensor
+        timestep: list[ttnn.Tensor],  # host tensor
+        pooled_prompt_embeds: list[ttnn.Tensor],  # device tensor
+        prompt_embeds: list[ttnn.Tensor],  # device tensor
+        sigma_difference: list[ttnn.Tensor],  # device tensor
+        spatial_rope_cos: ttnn.Tensor,
+        spatial_rope_sin: ttnn.Tensor,
+        prompt_rope_cos: ttnn.Tensor,
+        prompt_rope_sin: ttnn.Tensor,
+        prompt_sequence_length: int,
+        traced: bool,
+    ) -> list[ttnn.Tensor]:
+        if traced and self._traces is None:
+            self._traces = []
+            for submesh_id, submesh_device in enumerate(self._submesh_devices):
+                latent_device = latents[submesh_id]  # already on device
+                prompt_device = prompt_embeds[submesh_id]  # already on device
+                pooled_projection_device = pooled_prompt_embeds[submesh_id]  # already on device
+                timestep_device = timestep[submesh_id].to(submesh_device)
+
+                pred = self._step_inner(
+                    guidance_enabled=guidance_enabled,
+                    latent=latent_device,
+                    prompt=prompt_device,
+                    pooled=pooled_projection_device,
+                    timestep=timestep_device,
+                    spatial_rope_cos=spatial_rope_cos,
+                    spatial_rope_sin=spatial_rope_sin,
+                    prompt_rope_cos=prompt_rope_cos,
+                    prompt_rope_sin=prompt_rope_sin,
+                    prompt_sequence_length=prompt_sequence_length,
+                    submesh_index=submesh_id,
+                )
+
+                ttnn.synchronize_device(self._submesh_devices[0])
+                ttnn.synchronize_device(self._submesh_devices[1])
+
+                trace_id = ttnn.begin_trace_capture(submesh_device, cq_id=0)
+                pred = self._step_inner(
+                    guidance_enabled=guidance_enabled,
+                    latent=latent_device,
+                    prompt=prompt_device,
+                    pooled=pooled_projection_device,
+                    timestep=timestep_device,
+                    spatial_rope_cos=spatial_rope_cos,
+                    spatial_rope_sin=spatial_rope_sin,
+                    prompt_rope_cos=prompt_rope_cos,
+                    prompt_rope_sin=prompt_rope_sin,
+                    prompt_sequence_length=prompt_sequence_length,
+                    submesh_index=submesh_id,
+                )
+                ttnn.end_trace_capture(submesh_device, trace_id, cq_id=0)
+                ttnn.synchronize_device(self._submesh_devices[0])
+                ttnn.synchronize_device(self._submesh_devices[1])
+
+                self._traces.append(
+                    PipelineTrace(
+                        spatial_input=latent_device,
+                        prompt_input=prompt_device,
+                        pooled_input=pooled_projection_device,
+                        timestep_input=timestep_device,
+                        latents_output=pred,
+                        spatial_rope_cos=spatial_rope_cos,
+                        spatial_rope_sin=spatial_rope_sin,
+                        prompt_rope_cos=prompt_rope_cos,
+                        prompt_rope_sin=prompt_rope_sin,
+                        tid=trace_id,
+                    )
+                )
+
+        noise_pred_list = []
+        if traced:
+            for submesh_id, submesh_device in enumerate(self._submesh_devices):
+                ttnn.copy_host_to_device_tensor(timestep[submesh_id], self._traces[submesh_id].timestep_input)
+                ttnn.execute_trace(submesh_device, self._traces[submesh_id].tid, cq_id=0, blocking=False)
+                noise_pred_list.append(self._traces[submesh_id].latents_output)
+        else:
+            for submesh_id, submesh_device in enumerate(self._submesh_devices):
+                noise_pred = self._step_inner(
+                    guidance_enabled=guidance_enabled,
+                    latent=latents[submesh_id],
+                    prompt=prompt_embeds[submesh_id],
+                    pooled=pooled_prompt_embeds[submesh_id],
+                    timestep=timestep[submesh_id],
+                    spatial_rope_cos=spatial_rope_cos[submesh_id],
+                    spatial_rope_sin=spatial_rope_sin[submesh_id],
+                    prompt_rope_cos=prompt_rope_cos[submesh_id],
+                    prompt_rope_sin=prompt_rope_sin[submesh_id],
+                    prompt_sequence_length=prompt_sequence_length,
+                    submesh_index=submesh_id,
+                )
+                noise_pred_list.append(noise_pred)
+
+        if guidance_enabled:
+            if not self._parallel_config.cfg_parallel.factor > 1:
+                split_pos = noise_pred_list[0].shape[0] // 2
+                uncond = noise_pred_list[0][0:split_pos]
+                cond = noise_pred_list[0][split_pos:]
+                noise_pred_list[0] = uncond + guidance_scale * (cond - uncond)
+            else:
+                # uncond and cond are replicated, so it is fine to get a single tensor from each
+                uncond = ttnn.to_torch(ttnn.get_device_tensors(noise_pred_list[0])[0].cpu(blocking=True)).to(
+                    torch.float32
+                )
+                cond = ttnn.to_torch(ttnn.get_device_tensors(noise_pred_list[1])[0].cpu(blocking=True)).to(
+                    torch.float32
+                )
+
+                torch_noise_pred = uncond + guidance_scale * (cond - uncond)
+
+                shard_latents_dims = [None, None]
+                shard_latents_dims[self._parallel_config.sequence_parallel.mesh_axis] = 1  # height of latents
+                noise_pred_list[0] = ttnn.from_torch(
+                    torch_noise_pred,
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=ttnn.bfloat16,
+                    device=self._submesh_devices[0],
+                    mesh_mapper=ttnn.ShardTensor2dMesh(
+                        self._submesh_devices[0],
+                        tuple(self._submesh_devices[0].shape),
+                        dims=tuple(shard_latents_dims),
+                    ),
+                )
+
+                noise_pred_list[1] = ttnn.from_torch(
+                    torch_noise_pred,
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=ttnn.bfloat16,
+                    device=self._submesh_devices[1],
+                    mesh_mapper=ttnn.ShardTensor2dMesh(
+                        self._submesh_devices[1],
+                        tuple(self._submesh_devices[1].shape),
+                        dims=tuple(shard_latents_dims),
+                    ),
+                )
+
+        for submesh_id, submesh_device in enumerate(self._submesh_devices):
+            ttnn.add_(latents[submesh_id], sigma_difference[submesh_id] * noise_pred_list[submesh_id])
+
+        return latents
+
+    def _encode_prompts_partial(
+        self,
+        prompt_1: list[str],
+        prompt_2: list[str],
+        # prompt_3: list[str],
+        num_images_per_prompt: int,
+        clip_skip: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        timer = self.timing_collector
+
+        # TODO: why?
+        tokenizer_max_length = self._tokenizer_1.model_max_length
+
+        with timer.time_section("clip_encoding") if timer else nullcontext():
+            prompt_1_embeds, pooled_prompt_1_embeds = _get_clip_prompt_embeds(
+                prompt=prompt_1,
+                num_images_per_prompt=num_images_per_prompt,
+                tokenizer=self._tokenizer_1,
+                text_encoder=self._text_encoder_1,
+                tokenizer_max_length=tokenizer_max_length,
+                ttnn_device=self.encoder_parallel_manager.mesh_device,
+                encoder_parallel_manager=self.encoder_parallel_manager,
+                clip_skip=clip_skip,
+            )
+            # SD3:
+            # prompt_2_embeds, pooled_prompt_2_embeds = _get_clip_prompt_embeds(
+            #     prompt=prompt_2,
+            #     num_images_per_prompt=num_images_per_prompt,
+            #     tokenizer=self._tokenizer_2,
+            #     text_encoder=self._text_encoder_2,
+            #     tokenizer_max_length=tokenizer_max_length,
+            #     ttnn_device=self.encoder_parallel_manager.mesh_device,
+            #     encoder_parallel_manager=self.encoder_parallel_manager,
+            #     clip_skip=clip_skip,
+            # )
+            # clip_prompt_embeds = torch.cat([prompt_1_embeds, prompt_2_embeds], dim=-1)
+
+        with timer.time_section("t5_encoding") if timer else nullcontext():
+            t5_prompt_embeds = _get_t5_prompt_embeds(
+                device=self.encoder_parallel_manager.mesh_device,
+                encoder_parallel_manager=self.encoder_parallel_manager,
+                # SD3:
+                # prompt=prompt_3,
+                prompt=prompt_2,
+                num_images_per_prompt=num_images_per_prompt,
+                sequence_length=self.T5_SEQUENCE_LENGTH,
+                tokenizer=self._t5_tokenizer,
+                text_encoder=self._t5_text_encoder,
+                tokenizer_max_length=tokenizer_max_length,
+                joint_attention_dim=self._joint_attention_dim,
+            )
+
+        # SD3:
+        # clip_prompt_embeds = torch.nn.functional.pad(
+        #     clip_prompt_embeds,
+        #     (0, t5_prompt_embeds.shape[-1] - clip_prompt_embeds.shape[-1]),
+        # )
+
+        # SD3:
+        # prompt_embeds = torch.cat([clip_prompt_embeds, t5_prompt_embeds], dim=-2)
+        # pooled_prompt_embeds = torch.cat([pooled_prompt_1__embeds, pooled_prompt_2_embeds], dim=-1)
+        prompt_embeds = t5_prompt_embeds
+        pooled_prompt_embeds = pooled_prompt_1_embeds
+
+        return prompt_embeds, pooled_prompt_embeds
+
+    def _encode_prompts(
+        self,
+        *,
+        prompt_1: list[str],
+        prompt_2: list[str],
+        # prompt_3: list[str],
+        negative_prompt_1: list[str] | None,
+        negative_prompt_2: list[str] | None,
+        # negative_prompt_3: list[str],
+        num_images_per_prompt: int,
+        guidance_enabled: bool,
+        clip_skip: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        prompt_embeds, pooled_prompt_embeds = self._encode_prompts_partial(
+            prompt_1=prompt_1,
+            prompt_2=prompt_2,
+            # prompt_3=prompt_3,
+            num_images_per_prompt=num_images_per_prompt,
+            clip_skip=clip_skip,
+        )
+
+        if not guidance_enabled:
+            return prompt_embeds, pooled_prompt_embeds
+
+        negative_prompt_embeds, negative_pooled_prompt_embeds = self._encode_prompts_partial(
+            prompt_1=negative_prompt_1,
+            prompt_2=negative_prompt_2,
+            # prompt_3=negative_prompt_3,
+            num_images_per_prompt=num_images_per_prompt,
+            clip_skip=clip_skip,
+        )
+
+        prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+        pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
+
+        return prompt_embeds, pooled_prompt_embeds
+
+
+# adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/stable_diffusion_3/pipeline_stable_diffusion_3.py
+def _get_clip_prompt_embeds(
+    *,
+    clip_skip: int | None = None,
+    device: torch.device | None = None,
+    ttnn_device: ttnn.Device | None = None,
+    encoder_parallel_manager: EncoderParallelManager | None = None,
+    num_images_per_prompt: int,
+    prompt: list[str],
+    text_encoder: TtCLIPTextTransformer,
+    tokenizer_max_length: int,
+    tokenizer: CLIPTokenizer,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    batch_size = len(prompt)
+
+    text_inputs = tokenizer(
+        prompt,
+        padding="max_length",
+        max_length=tokenizer_max_length,
+        truncation=True,
+        return_tensors="pt",
+    )
+
+    text_input_ids = text_inputs.input_ids
+    untruncated_ids = tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
+    if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(text_input_ids, untruncated_ids):
+        removed_text = tokenizer.batch_decode(untruncated_ids[:, tokenizer_max_length - 1 : -1])
+        logger.warning(
+            "The following part of your input was truncated because CLIP can only handle sequences up to"
+            f" {tokenizer_max_length} tokens: {removed_text}"
+        )
+
+    tt_text_input_ids = ttnn.from_torch(
+        text_input_ids,
+        dtype=ttnn.uint32,
+        layout=ttnn.TILE_LAYOUT,
+        device=ttnn_device,
+        mesh_mapper=ttnn.ReplicateTensorToMesh(ttnn_device),
+    )
+
+    encoder_output, projected_output = text_encoder(
+        tt_text_input_ids,
+        ttnn_device,
+        parallel_manager=encoder_parallel_manager,
+        clip_skip=clip_skip,
+        output_hidden_states=True,
+    )
+
+    if clip_skip is None:
+        sequence_embeddings = encoder_output.hidden_states[-2]
+    else:
+        layer_index = -(clip_skip + 2)
+        if abs(layer_index) > len(encoder_output.hidden_states):
+            layer_index = -2
+        sequence_embeddings = encoder_output.hidden_states[layer_index]
+
+    prompt_embeds = ttnn.to_torch(ttnn.get_device_tensors(sequence_embeddings)[0])
+
+    pooled_prompt_embeds = ttnn.to_torch(ttnn.get_device_tensors(projected_output)[0])
+
+    prompt_embeds = prompt_embeds.to(device=device)
+    pooled_prompt_embeds = pooled_prompt_embeds.to(device=device)
+
+    _, seq_len, _ = prompt_embeds.shape
+    # duplicate text embeddings for each generation per prompt, using mps friendly method
+    prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+    prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+
+    pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt, 1)
+    pooled_prompt_embeds = pooled_prompt_embeds.view(batch_size * num_images_per_prompt, -1)
+
+    return prompt_embeds, pooled_prompt_embeds
+
+
+# adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/stable_diffusion_3/pipeline_stable_diffusion_3.py
+def _get_t5_prompt_embeds(
+    prompt: list[str],
+    *,
+    torch_device: torch.device | None = None,
+    device: ttnn.Device,
+    encoder_parallel_manager: EncoderParallelManager | None = None,
+    joint_attention_dim: int,
+    sequence_length: int,
+    num_images_per_prompt: int,
+    text_encoder: TtT5Encoder | None,
+    tokenizer_max_length: int,
+    tokenizer: T5TokenizerFast,
+) -> torch.Tensor:
+    prompt = [prompt] if isinstance(prompt, str) else prompt
+    batch_size = len(prompt)
+
+    if text_encoder is None:
+        return torch.zeros(
+            (
+                batch_size * num_images_per_prompt,
+                tokenizer_max_length,
+                joint_attention_dim,
+            ),
+            device=torch_device,
+            dtype=torch.bfloat16,
+        )
+
+    text_inputs = tokenizer(
+        prompt,
+        padding="max_length",
+        max_length=sequence_length,
+        truncation=True,
+        add_special_tokens=True,
+        return_tensors="pt",
+    )
+    text_input_ids = text_inputs.input_ids
+    untruncated_ids = tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
+
+    if untruncated_ids.shape[-1] >= text_input_ids.shape[-1]:
+        logger.warning("T5 input text was truncated")
+
+    if isinstance(text_encoder, TtT5Encoder):
+        tt_text_input_ids = ttnn.from_torch(
+            text_input_ids,  # .repeat(num_images_per_prompt, 1),
+            layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat16,
+            device=device,
+            mesh_mapper=ttnn.ReplicateTensorToMesh(device),
+        )
+        tt_prompt_embeds = text_encoder(tt_text_input_ids, device, parallel_manager=encoder_parallel_manager)
+        tt_prompt_embeds = ttnn.get_device_tensors(tt_prompt_embeds)[0]
+        prompt_embeds = ttnn.to_torch(tt_prompt_embeds)
+
+        prompt_embeds = prompt_embeds.to(device=torch_device)
+
+        # duplicate text embeddings and attention mask for each generation per prompt, using mps friendly method
+        prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+    else:
+        prompt_embeds = text_encoder.forward(text_input_ids)[0]
+        # prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+
+    _, seq_len = text_input_ids.shape
+    return prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+
+
+# SD3:
+# def _reshape_noise_pred(
+#     noise_pred: ttnn.Tensor,
+#     *,
+#     height: int,
+#     width: int,
+#     patch_size: int,
+# ) -> ttnn.Tensor:
+#     # B, H * W, P * Q * C -> B, H * P, W * Q, C
+
+#     patch_count_y = height // patch_size
+#     patch_count_x = width // patch_size
+
+#     shape1 = (
+#         noise_pred.shape[0] * patch_count_y,
+#         patch_count_x,
+#         patch_size,
+#         -1,
+#     )
+
+#     shape2 = (
+#         noise_pred.shape[0],
+#         patch_count_y * patch_size,
+#         patch_count_x * patch_size,
+#         -1,
+#     )
+
+#     noise_pred = noise_pred.reshape(shape1)
+#     noise_pred = ttnn.transpose(noise_pred, 1, 2)
+#     return noise_pred.reshape(shape2)
+
+
+# adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/flux/pipeline_flux.py
+def _pack_latents(
+    latents: torch.Tensor,
+    batch_size: int,
+    num_channels_latents: int,
+    height: int,
+    width: int,
+) -> torch.Tensor:
+    # B, C, H * P, W * Q -> B, H * W, C * P * Q
+    latents = latents.view(batch_size, num_channels_latents, height, 2, width, 2)
+    latents = latents.permute(0, 2, 4, 1, 3, 5)
+    return latents.reshape(batch_size, height * width, num_channels_latents * 4)
+
+
+# adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/flux/pipeline_flux.py
+def _unpack_latents(latents: torch.Tensor, height: int, width: int, vae_scale_factor: int) -> torch.Tensor:
+    # B, H * W, C * P * Q -> B, C, H * P, W * Q
+    batch_size, num_patches, channels = latents.shape
+
+    height = height // vae_scale_factor
+    width = width // vae_scale_factor
+
+    latents = latents.view(batch_size, height, width, channels // 4, 2, 2)
+    latents = latents.permute(0, 3, 1, 4, 2, 5)
+
+    return latents.reshape(batch_size, channels // (2 * 2), height * 2, width * 2)
+
+
+# adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/flux/pipeline_flux.py
+def _latent_image_ids(*, height: int, width: int) -> torch.Tensor:
+    latent_image_ids = torch.zeros(height, width, 3)
+    latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height)[:, None]
+    latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width)[None, :]
+
+    latent_image_id_height, latent_image_id_width, latent_image_id_channels = latent_image_ids.shape
+
+    return latent_image_ids.reshape(latent_image_id_height * latent_image_id_width, latent_image_id_channels)

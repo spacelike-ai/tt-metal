@@ -32,8 +32,11 @@ class Attention(torch.nn.Module):
 
         eps = 1e-6
 
+        self.pre_only = pre_only
         self.context_pre_only = context_pre_only
+        self.query_dim = query_dim
         self.head_dim = dim_head
+        self.out_dim = out_dim
         self.num_heads = heads
 
         self.norm_q = RmsNorm(dim=dim_head, eps=eps)

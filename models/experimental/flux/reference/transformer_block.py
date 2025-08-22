@@ -17,6 +17,7 @@ class FluxSingleTransformerBlock(torch.nn.Module):
     def __init__(self, dim: int, num_heads: int, head_dim: int) -> None:
         super().__init__()
 
+        self.dim = dim
         self.num_heads = num_heads
         self.head_dim = head_dim
 
@@ -74,6 +75,7 @@ class TransformerBlock(torch.nn.Module):
         super().__init__()
 
         self.context_pre_only = context_pre_only
+        self.dim = dim
         self.num_heads = num_heads
         self.head_dim = head_dim
 

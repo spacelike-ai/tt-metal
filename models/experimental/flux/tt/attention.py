@@ -20,7 +20,7 @@ from .substate import has_substate, substate
 @dataclass
 class AttentionPartParameters:
     mesh_width: int
-    qkv_proj: LinearParameters
+    qkv_proj: LinearParameters | None
     norm_q: RmsNormParameters
     norm_k: RmsNormParameters
     out_proj: LinearParameters | None

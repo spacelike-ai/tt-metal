@@ -90,8 +90,10 @@ class FluxTransformer(ModelMixin, ConfigMixin, FromOriginalModelMixin):
     def keep_blocks_only(self, blocks: int | None, single_blocks: int | None) -> None:
         if blocks is not None:
             del self.transformer_blocks[blocks:]
+            self.num_layers = blocks
         if single_blocks is not None:
             del self.single_transformer_blocks[single_blocks:]
+            self.num_single_layers = single_blocks
 
     def forward(
         self,
@@ -138,3 +140,7 @@ class FluxTransformer(ModelMixin, ConfigMixin, FromOriginalModelMixin):
     @property
     def patch_size(self) -> int:
         return self._patch_size
+
+    @property
+    def out_channels(self) -> int:
+        return self._out_channels
