@@ -71,10 +71,6 @@ class LinearParameters:
             weight = weight.reshape([chunks, n, -1, in_dim]).permute([1, 0, 2, 3]).reshape([-1, in_dim])
             bias = bias.reshape([chunks, n, -1]).permute([1, 0, 2]).reshape([-1]) if bias is not None else None
 
-        if unsqueeze_bias:
-            # TODO: Remove this workaround for issue https://github.com/tenstorrent/tt-metal/issues/16599
-            bias = bias.unsqueeze(0)
-
         on_host = on_host or device is None
 
         if mesh_sharding_dim is None:
@@ -84,12 +80,21 @@ class LinearParameters:
             weight_mm = bias_mm = ttnn.ShardTensor2dMesh(device, tuple(device.shape), (None, -1))
             output_sharding = False
         elif mesh_sharding_dim == 0:
+            if bias is not None:
+                _, mesh_width = device.shape
+                bias_zeros = torch.zeros(bias.shape[0] * (mesh_width - 1))
+                bias = torch.cat([bias, bias_zeros], dim=-1)
+
             weight_mm = ttnn.ShardTensor2dMesh(device, tuple(device.shape), (None, -2))
-            bias_mm = _ShardBias(device)
+            bias_mm = ttnn.ShardTensor2dMesh(device, tuple(device.shape), (None, -1))
             output_sharding = True
         else:
             msg = "mesh_sharding_dim must be in the range from -2 to 1, or None"
             raise ValueError(msg)
+
+        if unsqueeze_bias:
+            # TODO: Remove this workaround for issue https://github.com/tenstorrent/tt-metal/issues/16599
+            bias = bias.unsqueeze(0)
 
         return cls(
             weight=from_torch_fast(
@@ -198,34 +203,3 @@ class Linear:
             topology=ttnn.Topology.Linear,
             memory_config=memory_config,
         )
-
-
-class _ShardBias(ttnn.TensorToMesh):
-    """A mesh mapper for sharding the bias of a linear operation.
-
-    This mesh mapper is intended for sharding the bias of a linear operation on the first dimension.
-    A single device receive the bias as is, while the other ones receive zero tensors of the same
-    shape so that the bias is not added multiple times after gathering.
-
-    The otherwise problematic behavior of adding the bias mutiple times is currently not observed
-    with a bias of type bfloat8_b or bfloat4_b, since ttnn.from_torch pads to such tensors to the
-    tile size before sharding, which has the same effect if the number devices is not too big.
-    """
-
-    def __init__(self, mesh_device: ttnn.MeshDevice) -> None:
-        super().__init__(mesh_device)
-
-    def map(self, tensor: torch.Tensor) -> dict[int, ttnn.Tensor]:
-        mesh_height, mesh_width = self.mesh_device.shape
-
-        zeros = torch.zeros_like(tensor)
-        return ([tensor] + [zeros] * (mesh_width - 1)) * mesh_height
-
-    def config(self) -> dict[str, str]:
-        mesh_height, mesh_width = self.mesh_device.shape
-
-        return {
-            "strategy": "shard_2d",
-            "mesh_shape_y": str(mesh_height),
-            "mesh_shape_x": str(mesh_width),
-        }
