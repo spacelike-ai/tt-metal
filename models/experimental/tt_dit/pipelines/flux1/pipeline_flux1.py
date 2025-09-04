@@ -20,18 +20,15 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchE
 from loguru import logger
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
 
-from ...stable_diffusion_35_large.tt.clip_encoder import (
-    TtCLIPConfig,
-    TtCLIPTextTransformer,
-    TtCLIPTextTransformerParameters,
-)
-from ...stable_diffusion_35_large.tt.t5_encoder import TtT5Encoder, TtT5EncoderParameters
-from ..models.transformers.attention_flux1 import all_gather
-from ..models.transformers.transformer_flux1 import Flux1Transformer
-from ..models.vae.vae_sd35 import VAEDecoder
-from ..parallel.config import DiTParallelConfig, EncoderParallelManager, create_vae_parallel_manager
-from ..parallel.manager import CCLManager
-from ..utils.padding import PaddingConfig
+from ....stable_diffusion_35_large.tt.t5_encoder import TtT5Encoder, TtT5EncoderParameters
+from ...encoders.clip.model_clip import CLIPConfig, CLIPEncoder
+from ...encoders.t5.model_t5 import T5Config, T5Encoder
+from ...models.transformers.attention_flux1 import all_gather
+from ...models.transformers.transformer_flux1 import Flux1Transformer
+from ...models.vae.vae_sd35 import VAEDecoder
+from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, ParallelFactor, VAEParallelConfig
+from ...parallel.manager import CCLManager
+from ...utils.padding import PaddingConfig
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -86,6 +83,7 @@ class Flux1Pipeline:
         # Hacky submesh reshapes and assignment to parallelize encoders and VAE
         encoder_device = self._submesh_devices[0]
         self.original_submesh_shape = tuple(encoder_device.shape)
+        self.desired_encoder_submesh_shape = tuple(encoder_device.shape)
 
         if encoder_device.shape[1] != 4:
             # If reshaping, vae_device must be on submesh 0. That means T5 can't fit, so disable it.
@@ -99,25 +97,23 @@ class Flux1Pipeline:
             cfg_shape = tuple(encoder_device.shape)
             assert cfg_shape[0] * cfg_shape[1] == 4, f"Cannot reshape {cfg_shape} to a 1x4 mesh"
             logger.info(f"Reshaping submesh device 0 from {cfg_shape} to (1, 4) for CLIP")
-            encoder_device.reshape(ttnn.MeshShape(1, 4))
+            self.desired_encoder_submesh_shape = (1, 4)
         else:
             # vae_device can only be on submesh 1 if submesh is not getting reshaped.
             # vae_submesh_idx = 1
             vae_submesh_idx = 0
         vae_device = self._submesh_devices[vae_submesh_idx]
 
-        encoder_parallel_manager = EncoderParallelManager(
-            encoder_device,
-            ttnn.Topology.Linear,
-            mesh_axis=1,  # 1x4 submesh, parallel on axis 1
-            num_links=self._ccl_managers[0].num_links,
+        encoder_parallel_config = EncoderParallelConfig(
+            tensor_parallel=ParallelFactor(factor=4, mesh_axis=1)  # 1x4 submesh, parallel on axis 1
         )
-        vae_parallel_manager = create_vae_parallel_manager(vae_device, self._ccl_managers[vae_submesh_idx])
-        # HACK: reshape submesh device 0 from 1D to 2D
-        self._submesh_devices[0].reshape(ttnn.MeshShape(*self.original_submesh_shape))
+        self.encoder_parallel_config = encoder_parallel_config
+        self.encoder_device = encoder_device
 
-        self.encoder_parallel_manager = encoder_parallel_manager
-        self.vae_parallel_manager = vae_parallel_manager
+        vae_parallel_config = VAEParallelConfig(tensor_parallel=ParallelFactor(factor=4, mesh_axis=1))
+        self.vae_parallel_config = vae_parallel_config
+        self.vae_device = vae_device
+        self.vae_submesh_idx = vae_submesh_idx
 
         logger.info("loading models...")
         self._tokenizer_1 = CLIPTokenizer.from_pretrained(checkpoint_name, subfolder="tokenizer")
@@ -221,57 +217,63 @@ class Flux1Pipeline:
         self._vae_scale_factor = 2 ** len(self._block_out_channels)
         self._image_processor = VaeImageProcessor(vae_scale_factor=self._vae_scale_factor)
 
-        # HACK: reshape submesh device 0 to 1D
-        encoder_parallel_manager.mesh_device.reshape(
-            ttnn.MeshShape(*encoder_parallel_manager.tensor_parallel.mesh_shape)
-        )
+        if self.desired_encoder_submesh_shape != self.original_submesh_shape:
+            # HACK: reshape submesh device 0 to 1D
+            self.encoder_device.reshape(ttnn.MeshShape(*self.desired_encoder_submesh_shape))
 
         logger.info("creating TT-NN CLIP text encoder...")
-        parameters_1 = TtCLIPTextTransformerParameters.from_torch(
-            self._text_encoder_1.state_dict(),
-            device=encoder_parallel_manager.mesh_device,
-            dtype=ttnn.bfloat16,
-            parallel_manager=encoder_parallel_manager,
+
+        clip_config_1 = CLIPConfig(
+            vocab_size=self._text_encoder_1.config.vocab_size,
+            embed_dim=self._text_encoder_1.config.hidden_size,
+            ff_dim=self._text_encoder_1.config.intermediate_size,
+            num_heads=self._text_encoder_1.config.num_attention_heads,
+            num_hidden_layers=self._text_encoder_1.config.num_hidden_layers,
+            max_prompt_length=77,
+            layer_norm_eps=self._text_encoder_1.config.layer_norm_eps,
+            attention_dropout=self._text_encoder_1.config.attention_dropout,
+            hidden_act=self._text_encoder_1.config.hidden_act,
             # SD3:
             # has_text_projection=True,
             has_text_projection=False,
         )
         # SD3:
-        # parameters_2 = TtCLIPTextTransformerParameters.from_torch(
-        #     self._text_encoder_2.state_dict(),  # Different weights!
-        #     device=encoder_parallel_manager.mesh_device,
-        #     dtype=ttnn.bfloat16,
-        #     parallel_manager=encoder_parallel_manager,
+        # clip_config_2 = CLIPConfig(
+        #     vocab_size=self._text_encoder_2.config.vocab_size,
+        #     embed_dim=self._text_encoder_2.config.hidden_size,
+        #     ff_dim=self._text_encoder_2.config.intermediate_size,
+        #     num_heads=self._text_encoder_2.config.num_attention_heads,
+        #     num_hidden_layers=self._text_encoder_2.config.num_hidden_layers,
+        #     max_prompt_length=77,
+        #     layer_norm_eps=self._text_encoder_2.config.layer_norm_eps,
+        #     attention_dropout=self._text_encoder_2.config.attention_dropout,
+        #     hidden_act=self._text_encoder_2.config.hidden_act,
         # )
-        self._text_encoder_1 = TtCLIPTextTransformer(
-            parameters_1,
-            TtCLIPConfig(
-                vocab_size=self._text_encoder_1.config.vocab_size,
-                d_model=self._text_encoder_1.config.hidden_size,
-                d_ff=self._text_encoder_1.config.intermediate_size,
-                num_heads=self._text_encoder_1.config.num_attention_heads,
-                num_layers=self._text_encoder_1.config.num_hidden_layers,
-                max_position_embeddings=77,
-                layer_norm_eps=self._text_encoder_1.config.layer_norm_eps,
-                attention_dropout=self._text_encoder_1.config.attention_dropout,
-                hidden_act=self._text_encoder_1.config.hidden_act,
-            ),
+
+        # Store original state dicts before creating new encoders
+        text_encoder_1_state_dict = self._text_encoder_1.state_dict()
+        # SD3:
+        # text_encoder_2_state_dict = self._text_encoder_2.state_dict()
+
+        self._text_encoder_1 = CLIPEncoder(
+            config=clip_config_1,
+            mesh_device=encoder_device,
+            ccl_manager=self.ccl_managers[0],  # use CCL manager for submesh 0
+            parallel_config=encoder_parallel_config,
+            eos_token_id=2,  # default EOS token ID for CLIP
         )
         # SD3:
-        # self._text_encoder_2 = TtCLIPTextTransformer(
-        #     parameters_2,
-        #     TtCLIPConfig(
-        #         vocab_size=self._text_encoder_2.config.vocab_size,
-        #         d_model=self._text_encoder_2.config.hidden_size,
-        #         d_ff=self._text_encoder_2.config.intermediate_size,
-        #         num_heads=self._text_encoder_2.config.num_attention_heads,
-        #         num_layers=self._text_encoder_2.config.num_hidden_layers,
-        #         max_position_embeddings=77,
-        #         layer_norm_eps=self._text_encoder_2.config.layer_norm_eps,
-        #         attention_dropout=self._text_encoder_2.config.attention_dropout,
-        #         hidden_act=self._text_encoder_2.config.hidden_act,
-        #     ),
+        # self._text_encoder_2 = CLIPEncoder(
+        #     config=clip_config_2,
+        #     mesh_device=encoder_device,
+        #     ccl_manager=self.ccl_managers[0],  # Use CCL manager for submesh 0
+        #     parallel_config=encoder_parallel_config,
+        #     eos_token_id=2,  # default EOS token ID for CLIP
         # )
+
+        self._text_encoder_1.load_state_dict(text_encoder_1_state_dict)
+        # SD3:
+        # self._text_encoder_2.load_state_dict(text_encoder_2_state_dict)
 
         if enable_t5_text_encoder:
             if use_torch_t5_text_encoder:
@@ -279,50 +281,47 @@ class Flux1Pipeline:
             else:
                 logger.info("creating TT-NN text encoder...")
 
-                parameters = TtT5EncoderParameters.from_torch(
-                    torch_t5_text_encoder.state_dict(),
-                    device=encoder_parallel_manager.mesh_device,
-                    dtype=ttnn.bfloat16,
-                    parallel_manager=encoder_parallel_manager,
+                t5_config = T5Config(
+                    vocab_size=torch_text_encoder_3.config.vocab_size,
+                    embed_dim=torch_text_encoder_3.config.d_model,
+                    ff_dim=torch_text_encoder_3.config.d_ff,
+                    kv_dim=torch_text_encoder_3.config.d_kv,
+                    num_heads=torch_text_encoder_3.config.num_heads,
+                    num_hidden_layers=torch_text_encoder_3.config.num_layers,
+                    max_prompt_length=256,  # default T5 max prompt length
+                    layer_norm_eps=torch_text_encoder_3.config.layer_norm_epsilon,
+                    relative_attention_num_buckets=torch_text_encoder_3.config.relative_attention_num_buckets,
+                    relative_attention_max_distance=torch_text_encoder_3.config.relative_attention_max_distance,
                 )
-                self._t5_text_encoder = TtT5Encoder(
-                    parameters,
-                    num_heads=torch_t5_text_encoder.config.num_heads,
-                    relative_attention_num_buckets=torch_t5_text_encoder.config.relative_attention_num_buckets,
-                    relative_attention_max_distance=torch_t5_text_encoder.config.relative_attention_max_distance,
-                    layer_norm_epsilon=torch_t5_text_encoder.config.layer_norm_epsilon,
+
+                torch_text_encoder_3_state_dict = torch_text_encoder_3.state_dict()
+
+                self._t5_text_encoder = T5Encoder(
+                    config=t5_config,
+                    mesh_device=encoder_device,
+                    ccl_manager=self.ccl_managers[0],  # use CCL manager for submesh 0
+                    parallel_config=encoder_parallel_config,
                 )
+
+                self._t5_text_encoder.load_state_dict(torch_text_encoder_3_state_dict)
         else:
             self._t5_text_encoder = None
 
-        # HACK: reshape submesh device 0 from 1D to 2D
-        self.encoder_parallel_manager.mesh_device.reshape(ttnn.MeshShape(*self.original_submesh_shape))
-
         self._traces = None
 
-        ttnn.synchronize_device(self.encoder_parallel_manager.mesh_device)
-
-        # HACK: reshape submesh device 0 to 1D
-        original_vae_device_shape = tuple(self.vae_parallel_manager.device.shape)
-        if original_vae_device_shape != tuple(self.encoder_parallel_manager.tensor_parallel.mesh_shape):
-            self.vae_parallel_manager.device.reshape(
-                ttnn.MeshShape(*self.encoder_parallel_manager.tensor_parallel.mesh_shape)
-            )
+        ttnn.synchronize_device(self.encoder_device)
 
         self._vae_decoder = VAEDecoder.from_torch(
             torch_ref=self._torch_vae.decoder,
-            mesh_device=vae_parallel_manager.device,
-            mesh_axis=1,
-            parallel_manager=vae_parallel_manager,
+            mesh_device=self.vae_device,
+            parallel_config=self.vae_parallel_config,
+            ccl_manager=self.ccl_managers[vae_submesh_idx],
         )
 
-        # HACK: reshape submesh device 0 from 1D to 2D
-        if original_vae_device_shape != tuple(encoder_parallel_manager.tensor_parallel.mesh_shape):
-            vae_parallel_manager.device.reshape(ttnn.MeshShape(*self.original_submesh_shape))
-
-        self._latents_gather_semaphore = ttnn.create_global_semaphore(
-            vae_parallel_manager.device, self._ccl_managers[vae_submesh_idx].ccl_cores, 0
-        )
+        if self.desired_encoder_submesh_shape != self.original_submesh_shape:
+            # HACK: reshape submesh device 0 to 1D
+            # If reshaping, vae device is same as encoder device
+            self.encoder_device.reshape(ttnn.MeshShape(*self.original_submesh_shape))
 
     def prepare(
         self,
@@ -451,10 +450,9 @@ class Flux1Pipeline:
             logger.info("encoding prompts...")
 
             with timer.time_section("total_encoding") if timer else nullcontext():
-                # HACK: reshape submesh device 0 from 2D to 1D
-                self.encoder_parallel_manager.mesh_device.reshape(
-                    ttnn.MeshShape(*self.encoder_parallel_manager.tensor_parallel.mesh_shape)
-                )
+                if self.desired_encoder_submesh_shape != self.original_submesh_shape:
+                    # HACK: reshape submesh device 0 from 2D to 1D
+                    self.encoder_device.reshape(ttnn.MeshShape(*self.desired_encoder_submesh_shape))
                 prompt_encoding_start_time = time.time()
                 prompt_embeds, pooled_prompt_embeds = self._encode_prompts(
                     prompt_1=prompt_1,
@@ -468,8 +466,9 @@ class Flux1Pipeline:
                     clip_skip=clip_skip,
                 )
                 _, prompt_sequence_length, _ = prompt_embeds.shape
-                # HACK: reshape submesh device 0 from 1D to 2D
-                self.encoder_parallel_manager.mesh_device.reshape(ttnn.MeshShape(*self.original_submesh_shape))
+                if self.desired_encoder_submesh_shape != self.original_submesh_shape:
+                    # HACK: reshape submesh device 0 from 1D to 2D
+                    self.encoder_device.reshape(ttnn.MeshShape(*self.original_submesh_shape))
                 prompt_encoding_end_time = time.time()
 
             logger.info("preparing timesteps...")
@@ -693,11 +692,14 @@ class Flux1Pipeline:
             with timer.time_section("vae_decoding") if timer else nullcontext():
                 image_decoding_start_time = time.time()
 
+                # Sync because we don't pass a persistent buffer or a barrier semaphore.
+                ttnn.synchronize_device(self.vae_device)
+
                 tt_latents = all_gather(
-                    tt_latents_step_list[0],
+                    tt_latents_step_list[self.vae_submesh_idx],
                     dim=1,
-                    parallel_factor=self._parallel_config.sequence_parallel,
-                    ccl_manager=self._ccl_managers[0],
+                    parallel_factor=self.vae_device,
+                    ccl_manager=self._ccl_managers[self.vae_submesh_idx],
                 )
 
                 torch_latents = ttnn.to_torch(ttnn.get_device_tensors(tt_latents)[0])
@@ -707,26 +709,25 @@ class Flux1Pipeline:
                 torch_latents = _unpack_latents(torch_latents, height, width, self._vae_scale_factor)
                 torch_latents = torch_latents.permute(0, 2, 3, 1)
 
-                # HACK: reshape submesh device 0 from 2D to 1D
-                original_vae_device_shape = tuple(self.vae_parallel_manager.device.shape)
-                if original_vae_device_shape != tuple(self.encoder_parallel_manager.tensor_parallel.mesh_shape):
-                    self.vae_parallel_manager.device.reshape(
-                        ttnn.MeshShape(*self.encoder_parallel_manager.tensor_parallel.mesh_shape)
-                    )
+                if self.desired_encoder_submesh_shape != self.original_submesh_shape:
+                    # HACK: reshape submesh device 0 from 2D to 1D
+                    # If reshaping, vae device is same as encoder device
+                    self.encoder_device.reshape(ttnn.MeshShape(*self.desired_encoder_submesh_shape))
 
                 tt_latents = ttnn.from_torch(
                     torch_latents,
                     layout=ttnn.TILE_LAYOUT,
                     dtype=ttnn.bfloat16,
-                    device=self.vae_parallel_manager.device,
-                    mesh_mapper=ttnn.ReplicateTensorToMesh(self.vae_parallel_manager.device),
+                    device=self.vae_device,
+                    mesh_mapper=ttnn.ReplicateTensorToMesh(self.vae_device),
                 )
                 decoded_output = self._vae_decoder(tt_latents)
                 # decoded_output = sd_vae_decode(tt_latents, self._vae_parameters)
                 decoded_output = ttnn.to_torch(ttnn.get_device_tensors(decoded_output)[0]).permute(0, 3, 1, 2)
                 # HACK: reshape submesh device 0 from 1D to 2D
-                if original_vae_device_shape != tuple(self.encoder_parallel_manager.tensor_parallel.mesh_shape):
-                    self.vae_parallel_manager.device.reshape(ttnn.MeshShape(*self.original_submesh_shape))
+                if self.desired_encoder_submesh_shape != self.original_submesh_shape:
+                    # If reshaping, vae device is same as encoder device
+                    self.encoder_device.reshape(ttnn.MeshShape(*self.original_submesh_shape))
                 image = self._image_processor.postprocess(decoded_output, output_type="pt")
                 assert isinstance(image, torch.Tensor)
                 image_decoding_end_time = time.time()
@@ -952,8 +953,8 @@ class Flux1Pipeline:
                 tokenizer=self._tokenizer_1,
                 text_encoder=self._text_encoder_1,
                 tokenizer_max_length=tokenizer_max_length,
-                ttnn_device=self.encoder_parallel_manager.mesh_device,
-                encoder_parallel_manager=self.encoder_parallel_manager,
+                ttnn_device=self.encoder_device,
+                encoder_parallel_config=self.encoder_parallel_config,
                 clip_skip=clip_skip,
             )
             # SD3:
@@ -963,16 +964,16 @@ class Flux1Pipeline:
             #     tokenizer=self._tokenizer_2,
             #     text_encoder=self._text_encoder_2,
             #     tokenizer_max_length=tokenizer_max_length,
-            #     ttnn_device=self.encoder_parallel_manager.mesh_device,
-            #     encoder_parallel_manager=self.encoder_parallel_manager,
+            #     ttnn_device=self.encoder_device,
+            #     encoder_parallel_config=self.encoder_parallel_config,
             #     clip_skip=clip_skip,
             # )
             # clip_prompt_embeds = torch.cat([prompt_1_embeds, prompt_2_embeds], dim=-1)
 
         with timer.time_section("t5_encoding") if timer else nullcontext():
             t5_prompt_embeds = _get_t5_prompt_embeds(
-                device=self.encoder_parallel_manager.mesh_device,
-                encoder_parallel_manager=self.encoder_parallel_manager,
+                device=self.encoder_device,
+                encoder_parallel_config=self.encoder_parallel_config,
                 # SD3:
                 # prompt=prompt_3,
                 prompt=prompt_2,
@@ -1042,10 +1043,10 @@ def _get_clip_prompt_embeds(
     clip_skip: int | None = None,
     device: torch.device | None = None,
     ttnn_device: ttnn.Device | None = None,
-    encoder_parallel_manager: EncoderParallelManager | None = None,
+    encoder_parallel_config: EncoderParallelConfig | None = None,
     num_images_per_prompt: int,
     prompt: list[str],
-    text_encoder: TtCLIPTextTransformer,
+    text_encoder: CLIPEncoder,
     tokenizer_max_length: int,
     tokenizer: CLIPTokenizer,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1077,20 +1078,20 @@ def _get_clip_prompt_embeds(
     )
 
     encoder_output, projected_output = text_encoder(
-        tt_text_input_ids,
-        ttnn_device,
-        parallel_manager=encoder_parallel_manager,
-        clip_skip=clip_skip,
-        output_hidden_states=True,
+        prompt_tokenized=tt_text_input_ids,
+        mesh_device=ttnn_device,
+        with_projection=True,
     )
 
+    # Handle clip_skip by selecting the appropriate hidden state layer
     if clip_skip is None:
-        sequence_embeddings = encoder_output.hidden_states[-2]
+        # Use the second-to-last layer (like the original implementation)
+        sequence_embeddings = encoder_output[-2]
     else:
         layer_index = -(clip_skip + 2)
-        if abs(layer_index) > len(encoder_output.hidden_states):
+        if abs(layer_index) > len(encoder_output):
             layer_index = -2
-        sequence_embeddings = encoder_output.hidden_states[layer_index]
+        sequence_embeddings = encoder_output[layer_index]
 
     prompt_embeds = ttnn.to_torch(ttnn.get_device_tensors(sequence_embeddings)[0])
 
@@ -1116,11 +1117,11 @@ def _get_t5_prompt_embeds(
     *,
     torch_device: torch.device | None = None,
     device: ttnn.Device,
-    encoder_parallel_manager: EncoderParallelManager | None = None,
+    encoder_parallel_config: EncoderParallelConfig | None = None,
     joint_attention_dim: int,
     sequence_length: int,
     num_images_per_prompt: int,
-    text_encoder: TtT5Encoder | None,
+    text_encoder: T5Encoder | None,
     tokenizer_max_length: int,
     tokenizer: T5TokenizerFast,
 ) -> torch.Tensor:
@@ -1160,7 +1161,9 @@ def _get_t5_prompt_embeds(
             device=device,
             mesh_mapper=ttnn.ReplicateTensorToMesh(device),
         )
-        tt_prompt_embeds = text_encoder(tt_text_input_ids, device, parallel_manager=encoder_parallel_manager)
+        hidden_states = text_encoder(prompt=tt_text_input_ids, device=device)
+        tt_prompt_embeds = hidden_states[-1]
+
         tt_prompt_embeds = ttnn.get_device_tensors(tt_prompt_embeds)[0]
         prompt_embeds = ttnn.to_torch(tt_prompt_embeds)
 

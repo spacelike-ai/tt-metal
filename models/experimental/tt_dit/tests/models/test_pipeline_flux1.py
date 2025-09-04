@@ -10,7 +10,7 @@ import ttnn
 from loguru import logger
 
 from ...parallel.config import DiTParallelConfig, ParallelFactor
-from ...pipelines.pipeline_flux1 import Flux1Pipeline
+from ...pipelines.flux1.pipeline_flux1 import Flux1Pipeline
 from ...pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large import (
     TimingCollector,
 )
