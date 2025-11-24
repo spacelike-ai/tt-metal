@@ -702,6 +702,20 @@ class QwenImagePipeline:
 
         prompts = [PROMPT_TEMPLATE.format(e) for e in prompts]
 
+        # In order to support tracing, we encode to a fixed sequence length by zero padding. Since
+        # `ttnn.transformer.joint_scaled_dot_product_attention` and
+        # `ttnn.transformer.ring_joint_scaled_dot_product_attention` do not currently support
+        # attention masking, these tokens slightly affect the generated images. For comparison: The
+        # Hugging Face implementation, which we use as a reference, as well as the DiffSynth-Studio
+        # implementation do not add any padding when generating a single image. The Hugging Face
+        # implementation does add zero padding when generating multiple images with different
+        # prompts at once. It also creates an attention mask to mask out the padded tokens, but as
+        # of diffusers version 0.35.2, this attention mask passed to the transformer but never used.
+        # The DiffSynth-Studio implementation does not support generating multiple images with
+        # different prompts at once, so it never adds any padding. We created a comparison of images
+        # generated with and without padding. While small differences were visible, no clear
+        # difference in quality could be observed.
+
         with timer.time_section("text_encoding") if timer else nullcontext():
             embeds, mask = self._text_encoder.encode(
                 prompts,
