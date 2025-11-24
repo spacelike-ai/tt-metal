@@ -26,7 +26,19 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
 )
 @pytest.mark.parametrize(("width", "height", "num_inference_steps"), [(1024, 1024, 50)])
 @pytest.mark.parametrize(
-    ("mesh_device", "cfg", "sp", "tp", "encoder_tp", "vae_tp", "topology", "num_links", "mesh_test_id"),
+    (
+        "mesh_device",
+        "cfg",
+        "sp",
+        "tp",
+        "encoder_tp",
+        "vae_tp",
+        "topology",
+        "num_links",
+        "mesh_test_id",
+        "use_torch_text_encoder",
+        "use_torch_vae_decoder",
+    ),
     [
         pytest.param(
             (1, 8),  # mesh_device
@@ -38,17 +50,26 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
             ttnn.Topology.Linear,
             1,  # num_links
             "1x8tp1",
+            False,  # use_torch_text_encoder
+            False,  # use_torch_vae_decoder
             id="1x8tp1",
+        ),
+        pytest.param(
+            (2, 4),  # mesh_device
+            (2, 0),  # cfg
+            (1, 0),  # sp
+            (4, 1),  # tp
+            (4, 1),  # encoder_tp
+            (4, 1),  # vae_tp
+            ttnn.Topology.Linear,
+            1,  # num_links
+            "2x4cfg0tp1",
+            True,  # use_torch_text_encoder
+            True,  # use_torch_vae_decoder
+            id="2x4cfg0tp1",
         ),
     ],
     indirect=["mesh_device"],
-)
-@pytest.mark.parametrize(
-    "use_torch_text_encoder",
-    [
-        # pytest.param(True, id="encoder_cpu"),
-        pytest.param(False, id="encoder_device"),
-    ],
 )
 @pytest.mark.parametrize(
     "traced",
@@ -72,6 +93,7 @@ def test_qwenimage_pipeline(
     num_links: int,
     no_prompt: bool,
     use_torch_text_encoder: bool,
+    use_torch_vae_decoder: bool,
     traced: bool,
     mesh_test_id: str,
 ) -> None:
@@ -83,7 +105,7 @@ def test_qwenimage_pipeline(
         encoder_tp=encoder_tp,
         vae_tp=vae_tp,
         use_torch_text_encoder=use_torch_text_encoder,
-        use_torch_vae_decoder=False,
+        use_torch_vae_decoder=use_torch_vae_decoder,
         num_links=num_links,
         topology=topology,
         width=width,
