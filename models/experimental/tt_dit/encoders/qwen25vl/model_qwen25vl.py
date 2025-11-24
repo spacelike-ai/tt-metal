@@ -106,11 +106,15 @@ class Qwen25VlTextEncoder(Module):
 
             assert attention_mask.shape == (batch_size, seq_len)
             attention_mask = ttnn.pad(attention_mask, [(0, padded_seq_len - seq_len)], value=0)
-            attention_mask = prepare_attention_mask(attention_mask)
+            attention_bias = prepare_attention_bias(attention_mask)
         else:
             # padding is only required by `ttnn.transformer.scaled_dot_product_attention` when using
             # an attention mask
             padded_seq_len = seq_len
+
+            attention_bias = None
+
+        del attention_mask
 
         input_embeds = self.embed_tokens.forward(input_ids)
 
@@ -129,7 +133,7 @@ class Qwen25VlTextEncoder(Module):
 
             hidden_states = decoder_layer.forward(
                 hidden_states,
-                causal_attn_mask=attention_mask,
+                attention_bias=attention_bias,
                 pos_embeds=pos_embeds,
             )
 
@@ -185,12 +189,12 @@ class Qwen25VlDecoderLayer(Module):
         self,
         x: ttnn.Tensor,
         *,
-        causal_attn_mask: ttnn.Tensor | None = None,
+        attention_bias: ttnn.Tensor | None = None,
         pos_embeds: tuple[ttnn.Tensor, ttnn.Tensor],
     ) -> ttnn.Tensor:
         residual = x
         x = self.input_layernorm.forward(x)
-        x = self.self_attn.forward(x, causal_mask=causal_attn_mask, pos_embeds=pos_embeds)
+        x = self.self_attn.forward(x, attention_bias=attention_bias, pos_embeds=pos_embeds)
         x = x + residual
 
         residual = x
@@ -317,7 +321,7 @@ class Qwen25VlAttention(Module):
         self,
         x: ttnn.Tensor,
         *,
-        causal_mask: ttnn.Tensor | None,
+        attention_bias: ttnn.Tensor | None,
         pos_embeds: tuple[ttnn.Tensor, ttnn.Tensor],
     ) -> ttnn.Tensor:
         x = self.qkv_proj.forward(x)
@@ -338,8 +342,8 @@ class Qwen25VlAttention(Module):
             q,
             k,
             v,
-            attn_mask=causal_mask,
-            is_causal=causal_mask is None,
+            attn_mask=attention_bias,
+            is_causal=attention_bias is None,
             program_config=self._sdpa_program_config(q.shape[2]),
             compute_kernel_config=self._sdpa_compute_kernel_config,
         )
@@ -481,7 +485,7 @@ def _pad(t: torch.Tensor, amount: int, *, dim: int) -> torch.Tensor:
     return torch.nn.functional.pad(t, padding)
 
 
-def prepare_attention_mask(attention_mask: ttnn.Tensor) -> ttnn.Tensor:
+def prepare_attention_bias(attention_mask: ttnn.Tensor) -> ttnn.Tensor:
     batch_size, seq_len = attention_mask.shape
 
     # convert to causal attention mask

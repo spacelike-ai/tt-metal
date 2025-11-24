@@ -16,7 +16,7 @@ from ....encoders.qwen25vl.model_qwen25vl import (
     Qwen25VlContext,
     Qwen25VlTextEncoder,
     create_rope_tensors,
-    prepare_attention_mask,
+    prepare_attention_bias,
 )
 from ....parallel.config import EncoderParallelConfig, ParallelFactor
 from ....parallel.manager import CCLManager
@@ -84,12 +84,12 @@ def test_qwen25vl_attention(*, mesh_device: ttnn.MeshDevice, masked: bool) -> No
     tt_pos_embeds_cos = tensor.from_torch(cos, device=mesh_device)
     tt_pos_embeds_sin = tensor.from_torch(sin, device=mesh_device)
 
-    tt_causal_mask = prepare_attention_mask(tt_attention_mask) if tt_attention_mask is not None else None
+    tt_attention_bias = prepare_attention_bias(tt_attention_mask) if tt_attention_mask is not None else None
 
     logger.info("running ttnn model...")
     tt_out = model.forward(
         tt_sequence,
-        causal_mask=tt_causal_mask,
+        attention_bias=tt_attention_bias,
         pos_embeds=(tt_pos_embeds_cos, tt_pos_embeds_sin),
     )
     tt_out_torch = tensor.to_torch(tt_out)
