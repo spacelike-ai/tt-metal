@@ -127,7 +127,7 @@ def test_qwenimage_pipeline(
     def run(*, prompt: str, number: int, seed: int) -> None:
         images = pipeline(
             prompts=[prompt],
-            negative_prompts=[None],
+            negative_prompts=[""],
             num_inference_steps=num_inference_steps,
             cfg_scale=4.0,
             seed=seed,

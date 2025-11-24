@@ -134,9 +134,9 @@ class QwenImagePipeline:
 
         head_dim = torch_transformer.config.attention_head_dim
         num_heads = torch_transformer.config.num_attention_heads
-        self._num_channels_latents = 16  # TODO: correct?
+        self._num_channels_latents = 16
         self._patch_size = torch_transformer.config.patch_size
-        self._vae_scale_factor = 8  # TODO: correct?
+        self._vae_scale_factor = 8
 
         if num_heads % parallel_config.tensor_parallel.factor != 0:
             padding_config = PaddingConfig.from_tensor_parallel_factor(
@@ -314,7 +314,7 @@ class QwenImagePipeline:
         num_images_per_prompt: int = 1,
         cfg_scale: float,
         prompts: list[str],
-        negative_prompts: list[str | None],
+        negative_prompts: list[str],
         num_inference_steps: int,
         seed: int | None = None,
         traced: bool = False,
@@ -689,16 +689,13 @@ class QwenImagePipeline:
         self,
         *,
         prompts: list[str],
-        negative_prompts: list[str | None],
+        negative_prompts: list[str],
         num_images_per_prompt: int,
         cfg_enabled: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         timer = self.timing_collector
 
         assert len(prompts) == len(negative_prompts), "prompts and negative_prompts must have the same length"
-
-        # TODO: necessary?
-        negative_prompts = [x if x is not None else "" for x in negative_prompts]
 
         if cfg_enabled:
             prompts = negative_prompts + prompts
