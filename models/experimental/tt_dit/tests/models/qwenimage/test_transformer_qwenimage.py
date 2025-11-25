@@ -81,7 +81,7 @@ def test_transformer(
     )
 
     parallel_config = DiTParallelConfig(
-        cfg_parallel=ParallelFactor(factor=0, mesh_axis=0),
+        cfg_parallel=ParallelFactor(factor=1, mesh_axis=0),
         tensor_parallel=ParallelFactor(factor=tp_factor, mesh_axis=tp_axis),
         sequence_parallel=ParallelFactor(factor=sp_factor, mesh_axis=sp_axis),
     )
