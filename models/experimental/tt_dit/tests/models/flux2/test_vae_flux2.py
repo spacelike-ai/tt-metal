@@ -5,9 +5,7 @@
 from time import time
 
 import diffusers.models.autoencoders.autoencoder_kl_flux2 as reference
-import huggingface_hub
 import pytest
-import safetensors.torch
 import torch
 import ttnn
 from loguru import logger
@@ -49,9 +47,7 @@ def test_vae_flux2_decoder(
 
     tp_axis = 1
 
-    checkpoint = "black-forest-labs/FLUX.2-dev"
-
-    torch_model = reference.AutoencoderKLFlux2.from_pretrained(checkpoint, subfolder="vae")
+    torch_model = reference.AutoencoderKLFlux2.from_pretrained("black-forest-labs/FLUX.2-dev", subfolder="vae")
     assert isinstance(torch_model, reference.AutoencoderKLFlux2)
     torch_model.eval()
 
@@ -63,14 +59,12 @@ def test_vae_flux2_decoder(
     )
 
     z_channels = torch_model.config.latent_channels
-    channel_counts = torch_model.config.block_out_channels
     patch_size = 2
     vae_scale_factor = 8
 
     tt_model = Flux2Vae(
-        ch=channel_counts[0],
-        out_ch=torch_model.config.out_channels,
-        ch_mult=[c // channel_counts[0] for c in channel_counts],
+        out_channels=torch_model.config.out_channels,
+        block_out_channels=torch_model.config.block_out_channels,
         num_res_blocks=torch_model.config.layers_per_block,
         z_channels=z_channels,
         device=mesh_device,
@@ -78,10 +72,7 @@ def test_vae_flux2_decoder(
         ccl_manager=ccl_manager,
     )
 
-    checkpoint_path = huggingface_hub.hf_hub_download(repo_id=checkpoint, filename="ae.safetensors")
-    state_dict = safetensors.torch.load_file(checkpoint_path)
-
-    tt_model.load_torch_state_dict(state_dict)
+    tt_model.load_torch_state_dict(torch_model.state_dict())
 
     f = vae_scale_factor * patch_size
     inp = torch.randn(batch_size, z_channels * patch_size**2, height // f, width // f)
