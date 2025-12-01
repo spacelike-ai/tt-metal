@@ -65,7 +65,7 @@ def test_vae_flux2_decoder(
     tt_model = Flux2VaeDecoder(
         out_channels=torch_model.config.out_channels,
         block_out_channels=torch_model.config.block_out_channels,
-        num_res_blocks=torch_model.config.layers_per_block,
+        layers_per_block=torch_model.config.layers_per_block,
         z_channels=z_channels,
         device=mesh_device,
         parallel_config=vae_parallel_config,

@@ -9,13 +9,13 @@ from typing import TYPE_CHECKING
 
 import ttnn
 
+from ...blocks.vae import VaeContext, VaeConv2d, VaeMidBlock, VaeNormDescGroup, VaeUpBlock
 from ...layers.linear import Linear
 from ...layers.module import Module, ModuleList, Parameter
 from ...layers.normalization import GroupNorm
 from ...parallel.config import VAEParallelConfig
 from ...parallel.manager import CCLManager
 from ...utils.substate import pop_substate, rename_substate
-from .vae import VaeContext, VaeConv2d, VaeMidBlock, VaeUpBlock
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -32,7 +32,7 @@ class Flux2VaeDecoder(Module):
         *,
         out_channels: int = 3,
         block_out_channels: Sequence[int] = (128, 256, 512, 512),
-        num_res_blocks: int = 2,
+        layers_per_block: int = 2,
         z_channels: int = 32,
         parallel_config: VAEParallelConfig | None,
         device: ttnn.MeshDevice,
@@ -51,18 +51,24 @@ class Flux2VaeDecoder(Module):
             raise ValueError(msg)
 
         channel_counts = [block_out_channels[-1], *block_out_channels[::-1]]
+        eps = 1e-6
 
         self.post_quant_conv = Linear(z_channels, z_channels, mesh_device=ctx.device)
         self.conv_in = VaeConv2d(z_channels, channel_counts[0], kernel_size=3, padding=1, ctx=ctx)
 
-        self.mid_block = VaeMidBlock(num_channels=channel_counts[0], ctx=ctx)
+        self.mid_block = VaeMidBlock(
+            num_channels=channel_counts[0],
+            norm=VaeNormDescGroup(num_groups=32, eps=eps),
+            ctx=ctx,
+        )
 
         self.up_blocks = ModuleList(
             VaeUpBlock(
                 in_channels=ch_in,
                 out_channels=ch_out,
                 upsample=i != len(channel_counts) - 2,
-                num_layers=num_res_blocks + 1,
+                num_layers=layers_per_block + 1,
+                norm=VaeNormDescGroup(num_groups=32, eps=eps),
                 ctx=ctx,
             )
             for i, (ch_in, ch_out) in enumerate(itertools.pairwise(channel_counts))
@@ -128,8 +134,7 @@ class Flux2VaeDecoder(Module):
         z = self.conv_norm_out.forward(z)
         z = ttnn.silu(z)
 
-        if self._tp_axis is not None:
-            assert self._ccl_manager is not None
+        if self._ccl_manager is not None:
             z = self._ccl_manager.all_gather(z, dim=-1, mesh_axis=self._tp_axis, use_hyperparams=True)
 
         return self.conv_out.forward(z)

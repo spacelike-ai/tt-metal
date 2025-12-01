@@ -5,37 +5,45 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 import ttnn
 
-from ...layers.conv2d import Conv2d
-from ...layers.linear import ColParallelLinear, RowParallelLinear
-from ...layers.module import Module, ModuleList, Parameter
-from ...layers.normalization import DistributedRMSNorm, GroupNorm, RMSNorm
-from ...parallel.manager import CCLManager
-from ...utils import tensor
-from ...utils.substate import rename_substate
+from ..layers.conv2d import Conv2d
+from ..layers.linear import ColParallelLinear, RowParallelLinear
+from ..layers.module import Module, ModuleList, Parameter
+from ..layers.normalization import DistributedRMSNorm, GroupNorm, RMSNorm
+from ..parallel.manager import CCLManager
+from ..utils import tensor
+from ..utils.substate import rename_substate
 
 if TYPE_CHECKING:
     import torch
 
 
-@dataclass
+@dataclass(frozen=True)
 class VaeContext:
     device: ttnn.MeshDevice
     tp_axis: int | None
     ccl_manager: CCLManager | None
 
 
-class VaeNormType(Enum):
-    GROUP = auto()
-    RMS = auto()
+@dataclass(frozen=True)
+class VaeNormDescRms:
+    eps: float
+
+
+@dataclass(frozen=True)
+class VaeNormDescGroup:
+    eps: float
+    num_groups: int
+
+
+VaeNormDesc = VaeNormDescRms | VaeNormDescGroup
 
 
 class VaeRmsNorm(Module):
-    def __init__(self, num_channels: int, *, eps: float = 1e-12, ctx: VaeContext) -> None:
+    def __init__(self, num_channels: int, *, eps: float, ctx: VaeContext) -> None:
         super().__init__()
 
         tp_axis_size = ctx.device.shape[ctx.tp_axis] if ctx.tp_axis is not None else 1
@@ -146,12 +154,12 @@ class VaeUpsampler(Module):
 
 
 class VaeResnetBlock(Module):
-    def __init__(self, *, in_channels: int, out_channels: int, norm_type: VaeNormType, ctx: VaeContext) -> None:
+    def __init__(self, *, in_channels: int, out_channels: int, norm: VaeNormDesc, ctx: VaeContext) -> None:
         super().__init__()
 
-        self.norm1 = _norm(norm_type, num_channels=in_channels, eps=1e-6, ctx=ctx)
+        self.norm1 = _norm(norm, num_channels=in_channels, ctx=ctx)
         self.conv1 = VaeConv2d(in_channels, out_channels, kernel_size=3, padding=1, ctx=ctx)
-        self.norm2 = _norm(norm_type, num_channels=out_channels, eps=1e-6, ctx=ctx)
+        self.norm2 = _norm(norm, num_channels=out_channels, ctx=ctx)
         self.conv2 = VaeConv2d(out_channels, out_channels, kernel_size=3, padding=1, ctx=ctx)
 
         self.conv_shortcut = (
@@ -188,7 +196,7 @@ class VaeResnetBlock(Module):
 
 
 class VaeAttention(Module):
-    def __init__(self, *, num_channels: int, norm_type: VaeNormType, ctx: VaeContext) -> None:
+    def __init__(self, *, num_channels: int, norm: VaeNormDesc, ctx: VaeContext) -> None:
         super().__init__()
 
         if ctx.tp_axis is not None:
@@ -196,7 +204,7 @@ class VaeAttention(Module):
 
         linear_args = dict(mesh_axis=ctx.tp_axis, mesh_device=ctx.device, ccl_manager=ctx.ccl_manager)
 
-        self.norm = _norm(norm_type, num_channels=num_channels, eps=1e-6, ctx=ctx)
+        self.norm = _norm(norm, num_channels=num_channels, ctx=ctx)
         self.to_q = RowParallelLinear(num_channels, num_channels, **linear_args)
         self.to_k = RowParallelLinear(num_channels, num_channels, **linear_args)
         self.to_v = RowParallelLinear(num_channels, num_channels, **linear_args)
@@ -227,18 +235,18 @@ class VaeAttention(Module):
 
         x = self.norm.forward(x)
 
-        # RowParallelLinear writes to persistent buffer so we need to perform all-gather before the
-        # next invocation.
+        # The call to reduces-scatter in RowParallelLinear writes to persistent buffer so we need to
+        # perform all-gather before the next invocation.
         q = self.to_q.forward(x)
-        if self._tp_axis is not None:
+        if self._ccl_manager is not None:
             q = self._ccl_manager.all_gather(q, dim=-1, mesh_axis=self._tp_axis, use_hyperparams=True)
 
         k = self.to_k.forward(x)
-        if self._tp_axis is not None:
+        if self._ccl_manager is not None:
             k = self._ccl_manager.all_gather(k, dim=-1, mesh_axis=self._tp_axis, use_hyperparams=True)
 
         v = self.to_v.forward(x)
-        if self._tp_axis is not None:
+        if self._ccl_manager is not None:
             v = self._ccl_manager.all_gather(v, dim=-1, mesh_axis=self._tp_axis, use_hyperparams=True)
 
         del x
@@ -273,17 +281,17 @@ class VaeMidBlock(Module):
         *,
         num_channels: int,
         num_layers: int = 1,
-        norm_type: VaeNormType = VaeNormType.GROUP,
+        norm: VaeNormDesc,
         ctx: VaeContext,
     ) -> None:
         super().__init__()
 
         self.resnets = ModuleList(
-            VaeResnetBlock(in_channels=num_channels, out_channels=num_channels, norm_type=norm_type, ctx=ctx)
+            VaeResnetBlock(in_channels=num_channels, out_channels=num_channels, norm=norm, ctx=ctx)
             for _ in range(num_layers + 1)
         )
         self.attentions = ModuleList(
-            VaeAttention(num_channels=num_channels, norm_type=norm_type, ctx=ctx) for _ in range(num_layers)
+            VaeAttention(num_channels=num_channels, norm=norm, ctx=ctx) for _ in range(num_layers)
         )
 
         self._num_layers = num_layers
@@ -306,7 +314,7 @@ class VaeUpBlock(Module):
         upsampler_out_channels: int | None = None,
         num_layers: int,
         upsample: bool,
-        norm_type: VaeNormType = VaeNormType.GROUP,
+        norm: VaeNormDesc,
         ctx: VaeContext,
     ) -> None:
         super().__init__()
@@ -315,7 +323,7 @@ class VaeUpBlock(Module):
             VaeResnetBlock(
                 in_channels=in_channels if i == 0 else out_channels,
                 out_channels=out_channels,
-                norm_type=norm_type,
+                norm=norm,
                 ctx=ctx,
             )
             for i in range(num_layers)
@@ -340,15 +348,17 @@ class VaeUpBlock(Module):
         return x
 
 
-def _norm(norm_type: VaeNormType, num_channels: int, *, eps: float = 1e-12, ctx: VaeContext) -> GroupNorm | VaeRmsNorm:
-    match norm_type:
-        case VaeNormType.GROUP:
-            return GroupNorm(
-                num_groups=32,
-                num_channels=num_channels,
-                eps=eps,
-                mesh_axis=ctx.tp_axis,
-                mesh_device=ctx.device,
-            )
-        case VaeNormType.RMS:
-            return VaeRmsNorm(num_channels=num_channels, eps=eps, ctx=ctx)
+def _norm(norm: VaeNormDesc, num_channels: int, *, ctx: VaeContext) -> GroupNorm | VaeRmsNorm:
+    if isinstance(norm, VaeNormDescGroup):
+        return GroupNorm(
+            num_groups=norm.num_groups,
+            num_channels=num_channels,
+            eps=norm.eps,
+            mesh_axis=ctx.tp_axis,
+            mesh_device=ctx.device,
+        )
+    if isinstance(norm, VaeNormDescRms):
+        return VaeRmsNorm(num_channels=num_channels, eps=norm.eps, ctx=ctx)
+
+    msg = f"invalid VaeNormDesc: {norm}"
+    raise ValueError(msg)
