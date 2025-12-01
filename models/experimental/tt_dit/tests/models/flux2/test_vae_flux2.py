@@ -10,7 +10,7 @@ import torch
 import ttnn
 from loguru import logger
 
-from ....models.vae.vae_flux2 import Flux2Vae
+from ....models.vae.vae_flux2 import Flux2VaeDecoder
 from ....parallel.config import ParallelFactor, VAEParallelConfig
 from ....parallel.manager import CCLManager
 from ....utils import tensor
@@ -62,7 +62,7 @@ def test_vae_flux2_decoder(
     patch_size = 2
     vae_scale_factor = 8
 
-    tt_model = Flux2Vae(
+    tt_model = Flux2VaeDecoder(
         out_channels=torch_model.config.out_channels,
         block_out_channels=torch_model.config.block_out_channels,
         num_res_blocks=torch_model.config.layers_per_block,
@@ -90,12 +90,12 @@ def test_vae_flux2_decoder(
         latents = latents.reshape(b, c // (2 * 2), h * 2, w * 2)
         torch_output = torch_model.decode(latents).sample
 
-    tt_out = tt_model.decode(tt_inp)
+    tt_out = tt_model.forward(tt_inp)
 
     tt_out_torch = tensor.to_torch(tt_out).permute(0, 3, 1, 2)
     assert_quality(torch_output, tt_out_torch, pcc=0.9978, relative_rmse=0.029)
 
     start = time()
-    tt_model.decode(tt_inp)
+    tt_model.forward(tt_inp)
     ttnn.synchronize_device(mesh_device)
     logger.info(f"VAE time taken: {time() - start}")

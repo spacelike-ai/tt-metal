@@ -23,21 +23,32 @@ if TYPE_CHECKING:
     import torch
 
 
-# https://github.com/black-forest-labs/flux2/blob/6bb103559da75b67d75bf77cebba0027ba412ebc/src/flux2/autoencoder.py#L184
+# https://github.com/black-forest-labs/flux2/blob/6bb103559da75b67d75bf77cebba0027ba412ebc/src/flux2/autoencoder.py#L271
 class Flux2VaeDecoder(Module):
+    _PATCH_SIZE = 2
+
     def __init__(
         self,
         *,
-        out_channels: int,
-        block_out_channels: Sequence[int],
-        num_res_blocks: int,
-        z_channels: int,
-        ctx: VaeContext,
+        out_channels: int = 3,
+        block_out_channels: Sequence[int] = (128, 256, 512, 512),
+        num_res_blocks: int = 2,
+        z_channels: int = 32,
+        parallel_config: VAEParallelConfig | None,
+        device: ttnn.MeshDevice,
+        ccl_manager: CCLManager | None,
     ) -> None:
         super().__init__()
 
-        if ctx.tp_axis is not None:
-            assert ctx.ccl_manager is not None
+        ctx = VaeContext(
+            tp_axis=parallel_config.tensor_parallel.mesh_axis if parallel_config is not None else None,
+            device=device,
+            ccl_manager=ccl_manager,
+        )
+
+        if ctx.tp_axis is not None and ctx.ccl_manager is None:
+            msg = "ccl_manager must be provided if tensor parallelism is used"
+            raise ValueError(msg)
 
         channel_counts = [block_out_channels[-1], *block_out_channels[::-1]]
 
@@ -64,14 +75,48 @@ class Flux2VaeDecoder(Module):
             channel_counts[-1], out_channels, kernel_size=3, padding=1, tensor_parallel=False, ctx=ctx
         )
 
+        bn_size = self._PATCH_SIZE**2 * z_channels
+        self.bn_running_mean = Parameter(total_shape=[bn_size], device=ctx.device)
+        self.bn_running_var = Parameter(total_shape=[bn_size], device=ctx.device)
+        self.bn_eps = 1e-4
+
         self._tp_axis = ctx.tp_axis
         self._ccl_manager = ctx.ccl_manager
 
     def _prepare_torch_state(self, state: dict[str, torch.Tensor]) -> None:
+        # remove encoder state
+        pop_substate(state, "encoder")
+        pop_substate(state, "quant_conv")
+
         if "post_quant_conv.weight" in state:
             state["post_quant_conv.weight"] = state["post_quant_conv.weight"].squeeze(2, 3)
 
-    def forward(self, z: ttnn.Tensor) -> ttnn.Tensor:
+        if "bn.running_mean" in state:
+            state["bn_running_mean"] = state.pop("bn.running_mean")
+        if "bn.running_var" in state:
+            state["bn_running_var"] = state.pop("bn.running_var")
+        state.pop("bn.num_batches_tracked", None)
+
+        rename_substate(state, "decoder", "")
+
+    def _inv_normalize(self, z: ttnn.Tensor) -> ttnn.Tensor:
+        s = ttnn.sqrt(self.bn_running_var.data + self.bn_eps)
+        m = self.bn_running_mean.data
+        return z * s + m
+
+    def forward(self, z: ttnn.Tensor, /) -> ttnn.Tensor:
+        n, h, w, _ = z.shape
+        p = self._PATCH_SIZE
+
+        z = self._inv_normalize(z)
+
+        # N H W (C P P) -> N (H P) (W P) C
+        z = ttnn.to_layout(z, ttnn.ROW_MAJOR_LAYOUT)
+        z = z.reshape([n, h, w, -1, p, p])
+        z = ttnn.permute(z, [0, 1, 4, 2, 5, 3])
+        z = z.reshape([n, h * p, w * p, -1])
+        z = ttnn.to_layout(z, ttnn.TILE_LAYOUT)
+
         z = self.post_quant_conv.forward(z)
         z = self.conv_in.forward(z)
 
@@ -87,84 +132,4 @@ class Flux2VaeDecoder(Module):
             assert self._ccl_manager is not None
             z = self._ccl_manager.all_gather(z, dim=-1, mesh_axis=self._tp_axis, use_hyperparams=True)
 
-        z = self.conv_out.forward(z)
-
-        return z
-
-
-# https://github.com/black-forest-labs/flux2/blob/6bb103559da75b67d75bf77cebba0027ba412ebc/src/flux2/autoencoder.py#L271
-class Flux2Vae(Module):
-    def __init__(
-        self,
-        *,
-        out_channels: int = 3,
-        block_out_channels: Sequence[int] = (128, 256, 512, 512),
-        num_res_blocks: int = 2,
-        z_channels: int = 32,
-        parallel_config: VAEParallelConfig | None,
-        device: ttnn.MeshDevice,
-        ccl_manager: CCLManager | None,
-    ) -> None:
-        super().__init__()
-
-        ctx = VaeContext(
-            tp_axis=parallel_config.tensor_parallel.mesh_axis if parallel_config is not None else None,
-            device=device,
-            ccl_manager=ccl_manager,
-        )
-
-        if ctx.tp_axis is not None and ctx.ccl_manager is None:
-            msg = "ccl_manager must be provided if tensor parallelism is used"
-            raise ValueError(msg)
-
-        self.decoder = Flux2VaeDecoder(
-            out_channels=out_channels,
-            block_out_channels=block_out_channels,
-            num_res_blocks=num_res_blocks,
-            z_channels=z_channels,
-            ctx=ctx,
-        )
-
-        self.patch_size = 2
-
-        bn_size = self.patch_size**2 * z_channels
-        self.bn_running_mean = Parameter(total_shape=[bn_size], device=ctx.device)
-        self.bn_running_var = Parameter(total_shape=[bn_size], device=ctx.device)
-        self.bn_eps = 1e-4
-
-    def _prepare_torch_state(self, state: dict[str, torch.Tensor]) -> None:
-        # remove encoder state
-        pop_substate(state, "encoder")
-        pop_substate(state, "quant_conv")
-
-        rename_substate(state, "post_quant_conv", "decoder.post_quant_conv")
-
-        if "bn.running_mean" in state:
-            state["bn_running_mean"] = state.pop("bn.running_mean")
-        if "bn.running_var" in state:
-            state["bn_running_var"] = state.pop("bn.running_var")
-        state.pop("bn.num_batches_tracked", None)
-
-    def _inv_normalize(self, z: ttnn.Tensor) -> ttnn.Tensor:
-        s = ttnn.sqrt(self.bn_running_var.data + self.bn_eps)
-        m = self.bn_running_mean.data
-        return z * s + m
-
-    def decode(self, z: ttnn.Tensor, /) -> ttnn.Tensor:
-        n, h, w, _ = z.shape
-        p = self.patch_size
-
-        z = self._inv_normalize(z)
-
-        # N H W (C P P) -> N (H P) (W P) C
-        z = ttnn.to_layout(z, ttnn.ROW_MAJOR_LAYOUT)
-        z = z.reshape([n, h, w, -1, p, p])
-        z = ttnn.permute(z, [0, 1, 4, 2, 5, 3])
-        z = z.reshape([n, h * p, w * p, -1])
-        z = ttnn.to_layout(z, ttnn.TILE_LAYOUT)
-
-        return self.decoder.forward(z)
-
-    def forward(self) -> None:
-        msg = "call decode() instead of forward()"
-        raise RuntimeError(msg)
+        return self.conv_out.forward(z)
