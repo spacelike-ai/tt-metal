@@ -451,7 +451,7 @@ class MistralRmsNorm(Module):
             tensor_rank = len(x.shape)
             # repeat the tensor since we do not have an all-reduce op yet
             norm = ttnn.repeat(norm, [1] * (tensor_rank - 1) + [n])
-            norm = self._ccl_manager.reduce_scatter(norm, dim=3, mesh_axis=self._tp_axis)
+            norm = self._ccl_manager.reduce_scatter(norm, dim=-1, mesh_axis=self._tp_axis)
             norm = norm * (1 / n)
 
         norm = ttnn.rsqrt(norm + self._eps)
