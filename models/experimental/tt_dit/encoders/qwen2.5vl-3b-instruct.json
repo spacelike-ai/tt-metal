@@ -1,0 +1,58 @@
+{
+  "text_encoder": {
+    "repo_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+    "folder": "",
+    "revision": "66285546d2b821cf421d4f5eb2576359d3770cd3",
+    "reference_implementation": "transformers.Qwen2_5_VLForConditionalGeneration"
+  },
+  "tokenizer": {
+    "repo_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+    "folder": "",
+    "revision": "66285546d2b821cf421d4f5eb2576359d3770cd3",
+    "reference_implementation": "transformers.Qwen2Tokenizer"
+  },
+  "embed_size": 2048,
+  "ff_size": 11008,
+  "head_size": 128,
+  "norm_eps": 1e-6,
+  "num_heads": 16,
+  "num_kv_heads": 2,
+  "num_layers": 36,
+  "attn_qkv_bias": true,
+  "attn_out_bias": false,
+  "vocab_size": 151936,
+  "rope": {
+    "theta": 1000000.0,
+    "mrope_section": [16, 24, 24]
+  },
+  "rename": [
+    ["^model\\.language_model\\.embed_tokens", "token_embedding"],
+    [
+      "^model\\.language_model\\.layers\\.([0-9]+)\\.self_attn\\.([qkvo])_proj",
+      "layers.\\1.attn.\\2_proj"
+    ],
+    [
+      "^model\\.language_model\\.layers\\.([0-9]+)\\.mlp\\.gate_proj",
+      "layers.\\1.ff.gate"
+    ],
+    [
+      "^model\\.language_model\\.layers\\.([0-9]+)\\.mlp\\.up_proj",
+      "layers.\\1.ff.linear_in"
+    ],
+    [
+      "^model\\.language_model\\.layers\\.([0-9]+)\\.mlp\\.down_proj",
+      "layers.\\1.ff.linear_out"
+    ],
+    [
+      "^model\\.language_model\\.layers\\.([0-9]+)\\.post_attention_layernorm",
+      "layers.\\1.ff_norm"
+    ],
+    [
+      "^model\\.language_model\\.layers\\.([0-9]+)\\.input_layernorm",
+      "layers.\\1.attn_norm"
+    ],
+    ["^model\\.language_model\\.norm\\.weight", "final_norm.weight"],
+    ["^lm_head\\.weight", "final_linear.weight"]
+  ],
+  "remove": ["^model\\.visual"]
+}
