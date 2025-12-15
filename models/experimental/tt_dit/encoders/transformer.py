@@ -90,7 +90,7 @@ class Transformer(Module):
             for i in range(num_layers)
         )
 
-        self.final_norm = TransformerRmsNorm(embed_size, eps=norm_eps, ctx=ctx)
+        self.final_norm = TransformerRmsNorm(embed_size, eps=norm_eps, tensor_parallel=False, ctx=ctx)
 
         # vocab_size is much greater than embed_size
         self.final_linear = ColParallelLinear(
@@ -285,8 +285,8 @@ class DecoderLayer(Module):
             ctx=ctx,
         )
         self.ff = FeedForward(embed_size=embed_size, hidden_size=ff_size, ctx=ctx)
-        self.attn_norm = TransformerRmsNorm(embed_size, eps=norm_eps, ctx=ctx)
-        self.ff_norm = TransformerRmsNorm(embed_size, eps=norm_eps, ctx=ctx)
+        self.attn_norm = TransformerRmsNorm(embed_size, eps=norm_eps, tensor_parallel=False, ctx=ctx)
+        self.ff_norm = TransformerRmsNorm(embed_size, eps=norm_eps, tensor_parallel=False, ctx=ctx)
 
     def forward(
         self,
@@ -524,23 +524,24 @@ class FeedForward(Module):
 
 
 class TransformerRmsNorm(Module):
-    def __init__(self, num_channels: int, *, eps: float, ctx: TransformerContext) -> None:
+    def __init__(self, num_channels: int, *, eps: float, tensor_parallel: bool, ctx: TransformerContext) -> None:
         super().__init__()
 
-        tp_axis_size = ctx.device.shape[ctx.tp_axis] if ctx.tp_axis is not None else 1
+        tp_axis = None if not tensor_parallel else ctx.tp_axis
+        tp_axis_size = ctx.device.shape[tp_axis] if tp_axis is not None else 1
 
         # https://github.com/tenstorrent/tt-metal/issues/31216
         self._use_rms_workaround = num_channels % (tp_axis_size * 32) != 0
 
         if self._use_rms_workaround:
-            self.weight = Parameter(total_shape=[num_channels], mesh_axes=[ctx.tp_axis], device=ctx.device)
+            self.weight = Parameter(total_shape=[num_channels], mesh_axes=[tp_axis], device=ctx.device)
         else:
             self.inner = (
                 DistributedRMSNorm(
                     num_channels,
                     norm_eps=eps,
                     bias=False,
-                    mesh_axis=ctx.tp_axis,
+                    mesh_axis=tp_axis,
                     mesh_device=ctx.device,
                     ccl_manager=ctx.ccl_manager,
                 )
@@ -554,7 +555,7 @@ class TransformerRmsNorm(Module):
             )
 
         self._eps = eps
-        self._tp_axis = ctx.tp_axis
+        self._tp_axis = tp_axis
         self._ccl_manager = ctx.ccl_manager
         self._device = ctx.device
         self._tp_axis_size = tp_axis_size
