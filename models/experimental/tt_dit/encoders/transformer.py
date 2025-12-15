@@ -174,6 +174,9 @@ class Transformer(Module):
                 cache=cache,
             )
 
+        if padded_seq_len != seq_len:
+            x = x[:, :seq_len, :]
+
         x = self.final_norm.forward(x)
 
         if not skip_final_linear:
