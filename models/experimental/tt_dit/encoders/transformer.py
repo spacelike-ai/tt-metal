@@ -149,7 +149,7 @@ class Transformer(Module):
             pos_embeds = tuple(ttnn.pad(x, [(0, padded_seq_len - seq_len), (0, 0)], value=0) for x in pos_embeds)
 
             mask = ttnn.pad(mask, [(0, padded_seq_len - seq_len)], value=0)
-            attn_bias = _prepare_attn_bias(mask, query_length=seq_len)
+            attn_bias = _prepare_attn_bias(mask, query_length=padded_seq_len)
         else:
             # padding is only required by `ttnn.transformer.scaled_dot_product_attention` when using
             # an attention mask
