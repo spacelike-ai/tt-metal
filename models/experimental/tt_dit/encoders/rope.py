@@ -35,6 +35,7 @@ class RotaryEmbedding(Module):
 
     def forward(self, positions: ttnn.Tensor, *, dtype: ttnn.DataType) -> tuple[ttnn.Tensor, ttnn.Tensor]:
         assert len(positions.shape) == 2
+        assert positions.dtype == ttnn.float32
 
         device = positions.device()
         size = self.head_size
@@ -42,7 +43,7 @@ class RotaryEmbedding(Module):
 
         # https://github.com/huggingface/transformers/blob/6d00f6b0a5679c36510f203e4226e36f517c3032/src/transformers/models/llama/modeling_llama.py#L73
         inv_freq = ttnn.pow(
-            theta, ttnn.arange(0, size, 2, dtype=ttnn.uint32, layout=ttnn.TILE_LAYOUT, device=device) / -size
+            theta, ttnn.arange(0, size, 2, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=device) / -size
         )
 
         if self.config.mrope_section is not None:
@@ -52,12 +53,9 @@ class RotaryEmbedding(Module):
             # https://github.com/huggingface/transformers/blob/47b0e478f324b54f177ea7998a0791870fdd0324/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py#L513
             # https://github.com/huggingface/transformers/blob/47b0e478f324b54f177ea7998a0791870fdd0324/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py#L577-L583
 
-        positions = ttnn.clone(positions, dtype=dtype)
-        inv_freq = ttnn.clone(inv_freq, dtype=dtype)
-
         freqs = ttnn.unsqueeze(positions, 2) @ ttnn.unsqueeze(inv_freq, 0)  # outer product
         emb = ttnn.concat([freqs, freqs], dim=-1)
         cos = ttnn.cos(emb)
         sin = ttnn.sin(emb)
 
-        return cos, sin
+        return ttnn.clone(cos, dtype=dtype), ttnn.clone(sin, dtype=dtype)

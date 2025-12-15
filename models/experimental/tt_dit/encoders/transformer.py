@@ -643,7 +643,7 @@ def _prepare_attn_bias(mask: ttnn.Tensor, *, query_length: int) -> ttnn.Tensor:
 def _make_positions(*, start: int, sequence_length: int, device: ttnn.MeshDevice) -> ttnn.Tensor:
     # Since attention is invariant under position shifts, we do not need to take an attention mask
     # into account, as long as it does not contain masked tokens in the middle.
-    pos = ttnn.arange(start, start + sequence_length, dtype=ttnn.uint32, layout=ttnn.TILE_LAYOUT, device=device)
+    pos = ttnn.arange(start, start + sequence_length, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=device)
     return ttnn.unsqueeze(pos, 0)
 
 
