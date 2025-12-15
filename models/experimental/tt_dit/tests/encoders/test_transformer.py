@@ -13,7 +13,7 @@ from ...encoders.rope import RopeConfig
 from ...encoders.transformer import MISTRAL3_CONVERSION, Transformer
 from ...parallel.config import EncoderParallelConfig, ParallelFactor
 from ...parallel.manager import CCLManager
-from ...utils import tensor
+from ...utils import cache, tensor
 from ...utils.check import assert_quality
 
 
@@ -77,8 +77,22 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, batch_size: int, skip_laye
         parallel_config=parallel_config,
         ccl_manager=ccl_manager,
     )
-    state_dict = MISTRAL3_CONVERSION.convert(torch_model.state_dict())
-    model.load_torch_state_dict(state_dict)
+
+    state_dict = torch_model.state_dict()
+    state_dict = MISTRAL3_CONVERSION.convert(state_dict)
+    if not cache.initialize_from_cache(
+        tt_model=model,
+        torch_state_dict=state_dict,
+        model_name="flux2",
+        subfolder="text_encoder",
+        parallel_config=parallel_config,
+        mesh_shape=tuple(mesh_device.shape),
+        dtype="bf16",
+    ):
+        logger.info(
+            "Loading transformer weights from PyTorch state dict. To use cache, set TT_DIT_CACHE_DIR environment variable."
+        )
+        model.load_torch_state_dict(state_dict)
 
     tokens = torch.randint(0, config.vocab_size, [batch_size, sequence_length])
     m = torch.randint(0, sequence_length + 1, [batch_size])
