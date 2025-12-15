@@ -615,7 +615,7 @@ def _apply_rope(x: ttnn.Tensor, cos: ttnn.Tensor, sin: ttnn.Tensor) -> ttnn.Tens
 
     # interleaved format leads to lower PCC
     # return x * cos + ttnn.alt_complex_rotate90(x) * sin
-    return x * cos + _rotate_half(x) * sin
+    return x * ttnn.unsqueeze(cos, 1) + _rotate_half(x) * ttnn.unsqueeze(sin, 1)
 
 
 def _rotate_half(x: ttnn.Tensor) -> ttnn.Tensor:
