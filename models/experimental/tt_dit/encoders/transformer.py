@@ -132,7 +132,7 @@ class Transformer(Module):
             mask = ttnn.ones([batch_size, seq_len], dtype=ttnn.bfloat4_b, layout=ttnn.TILE_LAYOUT, device=device)
 
         if pos_embeds is None:
-            pos = _make_positions(start=start_pos, sequence_length=seq_len, device=device)
+            pos = _make_positions(start=start_pos, sequence_length=seq_len, mask=mask, device=device)
             pos_embeds = self.pos_embedding.forward(pos, dtype=dtype)
 
         if mask is not None:
@@ -221,7 +221,7 @@ class Transformer(Module):
 
         eos_token_tensor = ttnn.tensor(eos_tokens, device=device, dtype=tokens.dtype) if eos_tokens else None
 
-        positions = _make_positions(start=0, sequence_length=max_length, device=device)
+        positions = _make_positions(start=0, sequence_length=max_length, mask=mask, device=device)
         cos, sin = self.pos_embedding.forward(positions, dtype=dtype)
 
         finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
@@ -641,11 +641,21 @@ def _prepare_attn_bias(mask: ttnn.Tensor, *, query_length: int) -> ttnn.Tensor:
     return ttnn.clone(mask, dtype=ttnn.bfloat4_b)
 
 
-def _make_positions(*, start: int, sequence_length: int, device: ttnn.MeshDevice) -> ttnn.Tensor:
-    # Since attention is invariant under position shifts, we do not need to take an attention mask
-    # into account, as long as it does not contain masked tokens in the middle.
-    pos = ttnn.arange(start, start + sequence_length, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=device)
-    return ttnn.unsqueeze(pos, 0)
+def _make_positions(
+    *, start: int, sequence_length: int, mask: torch.Tensor | None, device: ttnn.MeshDevice
+) -> ttnn.Tensor:
+    if mask is None:
+        pos = ttnn.arange(start, start + sequence_length, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=device)
+        return ttnn.unsqueeze(pos, 0)
+
+    _, seq = mask.shape
+    assert seq == start + sequence_length
+
+    # Since attention is invariant under position shifts, this is only needed if the mask is not
+    # contiguous, i.e., has masked tokens in the middle. For continuous masks we could just return a
+    # fixed sequence as above.
+    mask = ttnn.clone(mask, dtype=ttnn.float32)
+    return ttnn.cumsum(mask, 1)[:, start:] - 1
 
 
 def _sample(prob: ttnn.Tensor, *, top_k: int | None = None, top_p: float = 1, num_samples: int = 1) -> ttnn.Tensor:
