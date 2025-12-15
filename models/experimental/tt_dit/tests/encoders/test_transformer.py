@@ -21,7 +21,8 @@ from ...utils.check import assert_quality
     ("mesh_device", "batch_size", "skip_layers"),
     [
         pytest.param((1, 1), 2, 32, id="1x1"),
-        # pytest.param((1, 2), 10, 0, id="1x2"),
+        pytest.param((1, 2), 10, 20, id="1x2"),
+        pytest.param((1, 4), 10, 0, id="1x4"),
         # pytest.param((1, 8), 10, 0, id="1x8"),
     ],
     indirect=["mesh_device"],
@@ -97,18 +98,14 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, batch_size: int, skip_laye
     tokens = torch.randint(0, config.vocab_size, [batch_size, sequence_length])
     m = torch.randint(0, sequence_length + 1, [batch_size])
     attention_mask = torch.arange(sequence_length) < m.unsqueeze(1) if masked else None
-    # cos, sin = model.create_rope_tensors(batch_size, sequence_length, attention_mask)
 
     tt_tokens = tensor.from_torch(tokens, device=mesh_device, dtype=ttnn.uint32)
     tt_attention_mask = tensor.from_torch(attention_mask, device=mesh_device) if attention_mask is not None else None
-    # tt_pos_embeds_cos = tensor.from_torch(cos, device=mesh_device)
-    # tt_pos_embeds_sin = tensor.from_torch(sin, device=mesh_device)
 
     logger.info("running ttnn model...")
     tt_prompt_embeds = model.forward(
         tt_tokens,
         mask=tt_attention_mask,
-        # pos_embeds=(tt_pos_embeds_cos, tt_pos_embeds_sin),
         skip_final_linear=True,
     )
     tt_prompt_embeds_torch = tensor.to_torch(tt_prompt_embeds)
