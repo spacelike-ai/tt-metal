@@ -560,6 +560,12 @@ class TransformerRmsNorm(Module):
         self._device = ctx.device
         self._tp_axis_size = tp_axis_size
 
+        self._compute_kernel_config = ttnn.WormholeComputeKernelConfig(
+            math_fidelity=ttnn.MathFidelity.HiFi4,
+            math_approx_mode=False,
+            fp32_dest_acc_en=True,
+        )
+
     def _prepare_torch_state(self, state: dict[str, torch.Tensor]) -> None:
         if "weight" in state and not self._use_rms_workaround:
             state["inner.weight"] = state.pop("weight")
@@ -568,7 +574,7 @@ class TransformerRmsNorm(Module):
         if not self._use_rms_workaround:
             *ns, c = x.shape
             x = ttnn.reshape(x, [1, 1, math.prod(ns), c])
-            x = self.inner.forward(x)
+            x = self.inner.forward(x, compute_kernel_config=self._compute_kernel_config)
             return ttnn.reshape(x, [*ns, c])
 
         norm = ttnn.mean(ttnn.pow(x, 2), dim=-1, keepdim=True)
