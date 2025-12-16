@@ -126,7 +126,6 @@ def test_generate(*, mesh_device: ttnn.MeshDevice, skip_layers: int, masked: boo
         top_p=generation_config.top_p,
         temperature=generation_config.temperature,
         return_logits=True,
-        use_cache=False,
     )
 
     generation_config.max_length = max_length

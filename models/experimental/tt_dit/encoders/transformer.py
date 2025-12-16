@@ -149,7 +149,8 @@ class Transformer(Module):
             tokens = ttnn.pad(tokens, [(0, padded_seq_len - seq_len)], value=0)
             pos_embeds = tuple(ttnn.pad(x, [(0, padded_seq_len - seq_len), (0, 0)], value=0) for x in pos_embeds)
 
-            mask = ttnn.pad(mask, [(0, padded_seq_len - seq_len)], value=0)
+            mask_padding = -mask.shape[1] % 32
+            mask = ttnn.pad(mask, [(0, mask_padding)], value=0)
             attn_bias = _prepare_attn_bias(mask, query_length=padded_seq_len)
         else:
             # padding is only required by `ttnn.transformer.scaled_dot_product_attention` when using
@@ -173,6 +174,7 @@ class Transformer(Module):
                 attn_bias=attn_bias,
                 pos_embeds=pos_embeds,
                 cache=cache,
+                unpadded_length=seq_len,
             )
 
         if padded_seq_len != seq_len:
@@ -296,10 +298,13 @@ class DecoderLayer(Module):
         attn_bias: ttnn.Tensor | None = None,
         pos_embeds: tuple[ttnn.Tensor, ttnn.Tensor],
         cache: Cache | None = None,
+        unpadded_length: int,
     ) -> ttnn.Tensor:
         residual = x
         x = self.attn_norm.forward(x)
-        x = self.attn.forward(x, attn_bias=attn_bias, pos_embeds=pos_embeds, cache=cache)
+        x = self.attn.forward(
+            x, attn_bias=attn_bias, pos_embeds=pos_embeds, cache=cache, unpadded_length=unpadded_length
+        )
         x = x + residual
 
         residual = x
@@ -431,6 +436,7 @@ class Attention(Module):
         attn_bias: ttnn.Tensor | None,
         pos_embeds: tuple[ttnn.Tensor, ttnn.Tensor],
         cache: Cache | None = None,
+        unpadded_length: int | None = None,
     ) -> ttnn.Tensor:
         assert len(x.shape) == 3
 
@@ -449,7 +455,12 @@ class Attention(Module):
         k = _apply_rope(k, cos, sin)
 
         if cache is not None:
-            k, v = cache.update(self._cache_id, k, v)
+            assert unpadded_length is not None
+            k, v = cache.update(self._cache_id, k, v, unpadded_length)
+
+        kv_padding = -k.shape[2] % 32
+        k = ttnn.pad(k, [(0, kv_padding), (0, 0)], value=0)
+        v = ttnn.pad(v, [(0, kv_padding), (0, 0)], value=0)
 
         x = ttnn.transformer.scaled_dot_product_attention(
             q,
@@ -574,10 +585,15 @@ class Cache:
 
         self._sequence_position = 0
 
-    def update(self, cache_id: Hashable, k: ttnn.Tensor, v: ttnn.Tensor) -> tuple[ttnn.Tensor, ttnn.Tensor]:
+    def update(
+        self, cache_id: Hashable, k: ttnn.Tensor, v: ttnn.Tensor, unpadded_length: int
+    ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
+        k = k[:, :, :unpadded_length, :]
+        v = v[:, :, :unpadded_length, :]
+
         if cache_id in self.k_cache:
-            k = self.k_cache[cache_id] = torch.cat([self.k_cache[cache_id], k], dim=2)
-            v = self.v_cache[cache_id] = torch.cat([self.v_cache[cache_id], v], dim=2)
+            k = self.k_cache[cache_id] = ttnn.concat([self.k_cache[cache_id], k], dim=2)
+            v = self.v_cache[cache_id] = ttnn.concat([self.v_cache[cache_id], v], dim=2)
         else:
             self.k_cache[cache_id] = k
             self.v_cache[cache_id] = v
