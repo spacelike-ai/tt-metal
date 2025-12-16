@@ -30,13 +30,6 @@ class RotaryEmbedding(Module):
     def __init__(self, *, head_size: int, config: RopeConfig) -> None:
         super().__init__()
 
-        self._compute_kernel_config = ttnn.WormholeComputeKernelConfig(
-            math_fidelity=ttnn.MathFidelity.HiFi4,
-            math_approx_mode=False,
-            fp32_dest_acc_en=True,
-            # packer_l1_acc=True,
-        )
-
         self.head_size = head_size
         self.config = config
 
@@ -58,9 +51,7 @@ class RotaryEmbedding(Module):
             # https://github.com/huggingface/transformers/blob/47b0e478f324b54f177ea7998a0791870fdd0324/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py#L513
             # https://github.com/huggingface/transformers/blob/47b0e478f324b54f177ea7998a0791870fdd0324/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py#L577-L583
 
-        freqs = ttnn.matmul(
-            ttnn.unsqueeze(positions, 2), ttnn.unsqueeze(k, 0), compute_kernel_config=self._compute_kernel_config
-        )  # outer product
+        freqs = ttnn.unsqueeze(positions, 2) @ ttnn.unsqueeze(k, 0)  # outer product
         emb = ttnn.concat([freqs, freqs], dim=-1)
         cos = ttnn.cos(emb)
         sin = ttnn.sin(emb)
