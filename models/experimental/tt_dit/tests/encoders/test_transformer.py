@@ -97,26 +97,22 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, batch_size: int, skip_laye
 
     tokens = torch.randint(0, config.vocab_size, [batch_size, sequence_length])
     m = torch.randint(0, sequence_length + 1, [batch_size])
-    attention_mask = torch.arange(sequence_length) < m.unsqueeze(1) if masked else None
+    mask = torch.arange(sequence_length) < m.unsqueeze(1) if masked else None
 
     tt_tokens = tensor.from_torch(tokens, device=mesh_device, dtype=ttnn.uint32)
-    tt_attention_mask = tensor.from_torch(attention_mask, device=mesh_device) if attention_mask is not None else None
+    tt_mask = tensor.from_torch(mask, device=mesh_device) if mask is not None else None
 
     logger.info("running ttnn model...")
     tt_prompt_embeds = model.forward(
         tt_tokens,
-        mask=tt_attention_mask,
+        mask=tt_mask,
         skip_final_linear=True,
     )
     tt_prompt_embeds_torch = tensor.to_torch(tt_prompt_embeds)
 
     logger.info("running torch model...")
     with torch.no_grad():
-        out = torch_model.forward(
-            tokens,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-        )
+        out = torch_model.forward(tokens, mask=mask, output_hidden_states=True)
         prompt_embeds = out.hidden_states[-1]
 
     if masked:
