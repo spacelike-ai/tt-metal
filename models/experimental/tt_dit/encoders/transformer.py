@@ -661,7 +661,10 @@ def _make_positions(
     # contiguous, i.e., has masked tokens in the middle. For continuous masks we could just return a
     # fixed sequence as above.
     mask = ttnn.clone(mask, dtype=ttnn.float32)
-    return ttnn.cumsum(mask, 1)[:, start:] - 1
+    # equivalent to: pos = mask.cumsum(1) - 1; pos.masked_fill_(mask == 0, 1)
+    pos = (ttnn.cumsum(mask, 1) - 2) * mask + 1
+
+    return pos[:, start:]
 
 
 def _sample(prob: ttnn.Tensor, *, top_k: int | None = None, top_p: float = 1, num_samples: int = 1) -> ttnn.Tensor:
