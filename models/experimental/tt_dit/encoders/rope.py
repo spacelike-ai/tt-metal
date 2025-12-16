@@ -49,9 +49,7 @@ class RotaryEmbedding(Module):
         theta = self.config.theta
 
         # https://github.com/huggingface/transformers/blob/6d00f6b0a5679c36510f203e4226e36f517c3032/src/transformers/models/llama/modeling_llama.py#L73
-        inv_freq = ttnn.pow(
-            theta, ttnn.arange(0, size, 2, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=device) / -size
-        )
+        k = ttnn.pow(theta, ttnn.arange(0, size, 2, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=device) / -size)
 
         if self.config.mrope_section is not None:
             warnings.warn("mrope_section is not implemented yet", stacklevel=2)
@@ -61,7 +59,7 @@ class RotaryEmbedding(Module):
             # https://github.com/huggingface/transformers/blob/47b0e478f324b54f177ea7998a0791870fdd0324/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py#L577-L583
 
         freqs = ttnn.matmul(
-            ttnn.unsqueeze(positions, 2), ttnn.unsqueeze(inv_freq, 0), compute_kernel_config=self._compute_kernel_config
+            ttnn.unsqueeze(positions, 2), ttnn.unsqueeze(k, 0), compute_kernel_config=self._compute_kernel_config
         )  # outer product
         emb = ttnn.concat([freqs, freqs], dim=-1)
         cos = ttnn.cos(emb)
