@@ -19,6 +19,7 @@ from ..layers.module import Module, ModuleList, Parameter
 from ..layers.normalization import RMSNorm
 from ..parallel.config import EncoderParallelConfig
 from ..parallel.manager import CCLManager
+from ..utils import tensor
 from .rope import RopeConfig, RotaryEmbedding
 
 if TYPE_CHECKING:
@@ -209,9 +210,7 @@ class Transformer(Module):
 
         if mask is not None:
             assert mask.shape == tokens.shape
-
-            mask = mask.bool()
-            mask = torch.nn.functional.pad(mask, [0, max_length - input_length], value=1)
+            mask = ttnn.pad(mask, [(0, max_length - input_length)], value=1)
 
         if eos_tokens is not None:
             if isinstance(eos_tokens, int):
@@ -219,12 +218,12 @@ class Transformer(Module):
             elif len(eos_tokens) == 0:
                 eos_tokens = None
 
-        eos_token_tensor = ttnn.tensor(eos_tokens, device=device, dtype=tokens.dtype) if eos_tokens else None
+        eos_token_tensor = torch.tensor(eos_tokens, dtype=torch.uint32) if eos_tokens else None
 
         positions = _make_positions(start=0, sequence_length=max_length, mask=mask, device=device)
         cos, sin = self.pos_embedding.forward(positions, dtype=dtype)
 
-        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        finished = torch.zeros([batch_size], dtype=torch.bool)
         cache = Cache() if use_cache else None
         prev_pos = 0
 
@@ -238,16 +237,18 @@ class Transformer(Module):
                 cache=cache,
             )[:, -1:, :]
 
-            prob = torch.softmax(current_logits / temperature, 2)
-            new_tokens = _sample(prob, top_k=top_k, top_p=top_p).squeeze(1)
+            torch_current_logits = tensor.to_torch(current_logits)
+            torch_prob = torch.softmax(torch_current_logits / temperature, 2)
+            torch_new_tokens = _sample(torch_prob, top_k=top_k, top_p=top_p).squeeze(1)
+            new_tokens = tensor.from_torch(torch_new_tokens, dtype=tokens.dtype, device=device)
 
-            tokens = torch.concat([tokens, new_tokens], dim=1)
+            tokens = ttnn.concat([tokens, new_tokens], dim=1)
 
             if logits is not None:
-                logits.append(current_logits.squeeze(1))
+                logits.append(ttnn.squeeze(current_logits, 1))
 
             if eos_token_tensor is not None:
-                finished |= (new_tokens == eos_token_tensor).any(dim=1)
+                finished |= (torch_new_tokens == eos_token_tensor).any(dim=1)
                 if finished.all():
                     break
 
@@ -360,6 +361,7 @@ class Attention(Module):
         self._group_size_padding = opt_group_size * split_factor - group_size
         self._group_count_padding = opt_group_count - group_count * split_factor
         self._split_factor = split_factor
+        self._cache_id = cache_id
         self._tp_axis = ctx.tp_axis
         self._tp_factor = tp_factor
         self._device = ctx.device
@@ -580,7 +582,7 @@ class Cache:
             self.k_cache[cache_id] = k
             self.v_cache[cache_id] = v
 
-        self._sequence_position = k.size(2)
+        self._sequence_position = k.shape[2]
 
         return k, v
 
@@ -639,14 +641,14 @@ def _make_positions(
     return pos[:, start:]
 
 
-def _sample(prob: ttnn.Tensor, *, top_k: int | None = None, top_p: float = 1, num_samples: int = 1) -> ttnn.Tensor:
+def _sample(prob: torch.Tensor, *, top_k: int | None = None, top_p: float = 1, num_samples: int = 1) -> torch.Tensor:
     assert 0 < top_p <= 1
 
     if top_k is None:
-        top_k = prob.size(-1)
+        top_k = prob.shape[-1]
     else:
         assert top_k > 0
-        top_k = min(top_k, prob.size(-1))
+        top_k = min(top_k, prob.shape[-1])
 
     output_shape = [*prob.shape[:-1], num_samples]
     prob = prob.reshape(-1, prob.shape[-1]).float()
@@ -658,7 +660,7 @@ def _sample(prob: ttnn.Tensor, *, top_k: int | None = None, top_p: float = 1, nu
     values[ignore] = 0
 
     picked = torch.multinomial(values, num_samples=num_samples, replacement=True)
-    return torch.gather(indices, 1, picked).view(output_shape)
+    return torch.gather(indices, 1, picked).view(output_shape).to(torch.uint32)
 
 
 def _optimal_groups(group_count: int, group_size: int, device_count: int) -> tuple[int, int, int]:

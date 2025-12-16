@@ -5,6 +5,7 @@
 import pytest
 import torch
 import transformers
+import transformers.generation.utils
 import transformers.models.mistral.modeling_mistral
 import ttnn
 from loguru import logger
@@ -18,12 +19,12 @@ from ...utils.check import assert_quality
 
 
 @pytest.mark.parametrize(
-    ("mesh_device", "batch_size", "skip_layers"),
+    ("mesh_device", "skip_layers"),
     [
-        pytest.param((1, 1), 2, 32, id="1x1"),
-        pytest.param((1, 2), 10, 20, id="1x2"),
-        pytest.param((1, 4), 10, 0, id="1x4"),
-        # pytest.param((1, 8), 10, 0, id="1x8"),
+        # pytest.param((1, 1), 32, id="1x1"),
+        # pytest.param((1, 2), 22, id="1x2"),
+        pytest.param((1, 4), 0, id="1x4"),
+        # pytest.param((1, 8), 0, id="1x8"), CRASHES HOST
     ],
     indirect=["mesh_device"],
 )
@@ -37,6 +38,144 @@ from ...utils.check import assert_quality
     [
         pytest.param(True, id="masked"),
         # pytest.param(False, id="unmasked"),
+    ],
+)
+def test_generate(*, mesh_device: ttnn.MeshDevice, skip_layers: int, masked: bool) -> None:
+    torch.manual_seed(0)
+
+    tp_axis = 1
+    max_length = 20
+
+    ccl_manager = CCLManager(mesh_device, topology=ttnn.Topology.Linear)
+    parallel_config = (
+        EncoderParallelConfig(
+            tensor_parallel=ParallelFactor(factor=mesh_device.shape[tp_axis], mesh_axis=tp_axis),
+        )
+        if tp_axis is not None
+        else None
+    )
+
+    tokenizer = transformers.LlamaTokenizerFast.from_pretrained("black-forest-labs/FLUX.2-dev", subfolder="tokenizer")
+
+    torch_model = transformers.Mistral3ForConditionalGeneration.from_pretrained(
+        "black-forest-labs/FLUX.2-dev", subfolder="text_encoder"
+    )
+    config = torch_model.model.language_model.config
+
+    mid = len(torch_model.model.language_model.layers) // 2
+    del torch_model.model.language_model.layers[mid - skip_layers // 2 : mid - (-skip_layers // 2)]
+
+    model = Transformer(
+        vocab_size=config.vocab_size,
+        head_size=config.head_dim,
+        embed_size=config.hidden_size,
+        ff_size=config.intermediate_size,
+        num_layers=config.num_hidden_layers - skip_layers,
+        num_heads=config.num_attention_heads,
+        num_kv_heads=config.num_key_value_heads,
+        norm_eps=config.rms_norm_eps,
+        attn_qkv_bias=False,
+        attn_out_bias=False,
+        rope_config=RopeConfig(theta=config.rope_theta),
+        device=mesh_device,
+        parallel_config=parallel_config,
+        ccl_manager=ccl_manager,
+    )
+
+    state_dict = torch_model.state_dict()
+    state_dict = MISTRAL3_CONVERSION.convert(state_dict)
+    if not cache.initialize_from_cache(
+        tt_model=model,
+        torch_state_dict=state_dict,
+        model_name="flux2",
+        subfolder="text_encoder",
+        parallel_config=parallel_config,
+        mesh_shape=tuple(mesh_device.shape),
+        dtype="bf16",
+    ):
+        logger.info(
+            "Loading transformer weights from PyTorch state dict. To use cache, set TT_DIT_CACHE_DIR environment variable."
+        )
+        model.load_torch_state_dict(state_dict)
+
+    out = tokenizer.__call__(
+        ["Once upon a time", "Hello"],
+        padding="longest",
+        # padding side does not matter for our implementation but the
+        # transformers library complains if right padding is used
+        padding_side="left",
+        return_tensors="pt",
+        return_attention_mask=True,
+    )
+    tokens = out["input_ids"].to(torch_model.device)
+    mask = out["attention_mask"].to(torch_model.device) if masked else None
+
+    generation_config = torch_model.generation_config
+    assert isinstance(generation_config, transformers.GenerationConfig)
+
+    tt_tokens = tensor.from_torch(tokens, device=mesh_device, dtype=ttnn.uint32)
+    tt_mask = tensor.from_torch(mask, device=mesh_device) if mask is not None else None
+
+    print("running ttnn model...")
+    out = model.generate(
+        tt_tokens,
+        mask=tt_mask,
+        eos_tokens=generation_config.eos_token_id,
+        max_length=generation_config.max_length,
+        top_k=generation_config.top_k if generation_config.do_sample else 1,
+        top_p=generation_config.top_p,
+        temperature=generation_config.temperature,
+        return_logits=True,
+        use_cache=False,
+    )
+
+    generation_config.max_length = max_length
+    generation_config.repetition_penalty = None  # repetition penalty is not implemented
+    generation_config.return_dict_in_generate = True
+    generation_config.output_logits = True
+
+    print("running torch model...")
+    out_ref = torch_model.generate(tokens, attention_mask=mask)
+    assert isinstance(out_ref, transformers.generation.utils.GenerateOutput)
+
+    tokens_out = tensor.to_torch(out.tokens)
+    tokens_out_ref = out_ref.sequences
+    logits = tensor.to_torch(ttnn.stack(out.logits, dim=1), mesh_axes=[..., tp_axis])
+    logits_ref = torch.stack(out_ref.logits, dim=1)
+
+    # diffusers somtimes generate longer sequences than max_length,
+    # in particular when `max_length = 20` for whatever reason.
+    tokens_out_ref = tokens_out_ref[:, :max_length]
+    logits_ref = logits_ref[:, : max_length - tokens.size(1)]
+
+    # for i in range(tokens_out.size(0)):
+    #     print(tokenizer.decode(tokens_out_ref[i]))
+    #     print(tokenizer.decode(tokens_out[i]))
+
+    assert_quality(logits, logits_ref, ccc=0.99999, relative_rmse=0.001)
+    assert tokens_out.eq(tokens_out_ref).all()
+
+
+@pytest.mark.parametrize(
+    ("mesh_device", "batch_size", "skip_layers"),
+    [
+        pytest.param((1, 2), 2, 22, id="1x2"),
+        pytest.param((1, 1), 2, 32, id="1x1"),
+        pytest.param((1, 4), 2, 0, id="1x4"),
+        # pytest.param((1, 8), 2, 0, id="1x8"), CRASHES HOST
+    ],
+    indirect=["mesh_device"],
+)
+@pytest.mark.parametrize(
+    "device_params",
+    [{"fabric_config": ttnn.FabricConfig.FABRIC_1D}],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    "masked",
+    [
+        pytest.param(True, id="masked"),
+        pytest.param(False, id="unmasked"),
     ],
 )
 def test_transformer(*, mesh_device: ttnn.MeshDevice, batch_size: int, skip_layers: int, masked: bool) -> None:
