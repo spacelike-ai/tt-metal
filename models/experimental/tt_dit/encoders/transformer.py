@@ -473,7 +473,7 @@ class Attention(Module):
             v,
             attn_mask=attn_bias,
             is_causal=attn_bias is None,
-            program_config=self._sdpa_program_config(q.shape[2]),
+            program_config=self._sdpa_program_config(q.shape[2], k.shape[2]),
             compute_kernel_config=self._sdpa_compute_kernel_config,
         )
 
@@ -489,16 +489,19 @@ class Attention(Module):
 
         return x
 
-    def _sdpa_program_config(self, seq_len: int) -> ttnn.SDPAProgramConfig:
+    def _sdpa_program_config(self, q_len: int, kv_len: int) -> ttnn.SDPAProgramConfig:
         grid_size = self._device.compute_with_storage_grid_size()
 
-        seq_len = -(-seq_len // 32) * 32
-        chunk_size = min(seq_len, MAX_CHUNK_SIZE)
+        q_len = -(-q_len // 32) * 32
+        q_chunk_size = min(q_len, MAX_CHUNK_SIZE)
+
+        kv_len = -(-kv_len // 32) * 32
+        kv_chunk_size = min(kv_len, MAX_CHUNK_SIZE)
 
         return ttnn.SDPAProgramConfig(
             compute_with_storage_grid_size=grid_size,
-            q_chunk_size=chunk_size,
-            k_chunk_size=chunk_size,
+            q_chunk_size=q_chunk_size,
+            k_chunk_size=kv_chunk_size,
             exp_approx_mode=False,
         )
 
