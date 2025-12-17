@@ -130,7 +130,12 @@ class Transformer(Module):
         start_pos = cache.sequence_position if cache is not None else 0
 
         if mask is None and start_pos != 0:
-            mask = ttnn.ones([batch_size, seq_len], dtype=ttnn.bfloat4_b, layout=ttnn.TILE_LAYOUT, device=device)
+            mask = ttnn.ones(
+                [batch_size, start_pos + seq_len],
+                dtype=ttnn.bfloat4_b,
+                layout=ttnn.TILE_LAYOUT,
+                device=device,
+            )
 
         if pos_embeds is None:
             pos = _make_positions(start=start_pos, sequence_length=seq_len, mask=mask, device=device)
