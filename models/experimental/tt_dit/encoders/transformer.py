@@ -653,7 +653,7 @@ def _prepare_attn_bias(mask: ttnn.Tensor, *, query_length: int) -> ttnn.Tensor:
     # convert to causal attention mask
     mask = mask.reshape([batch_size, 1, 1, kv_length])
     mask = ttnn.expand(mask, [batch_size, 1, query_length, kv_length])
-    mask = ttnn.tril(mask)
+    mask = ttnn.tril(mask, diagonal=kv_length - query_length)
 
     mask = (mask - 1.0) * math.inf
 
