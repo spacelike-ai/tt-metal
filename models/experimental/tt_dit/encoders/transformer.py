@@ -141,27 +141,25 @@ class Transformer(Module):
             pos = _make_positions(start=start_pos, sequence_length=seq_len, mask=mask, device=device)
             pos_embeds = self.pos_embedding.forward(pos, dtype=dtype)
 
+        # padding is should only be required by `ttnn.transformer.scaled_dot_product_attention` when
+        # using an attention mask
+        if seq_len < MAX_CHUNK_SIZE:
+            # make sequence length a multiple of tile size
+            padded_seq_len = -(-seq_len // 32) * 32
+        else:
+            # make sequence length a multiple of MAX_CHUNK_SIZE
+            padded_seq_len = -(-seq_len // MAX_CHUNK_SIZE) * MAX_CHUNK_SIZE
+
+        tokens = ttnn.pad(tokens, [(0, padded_seq_len - seq_len)], value=0)
+        pos_embeds = tuple(ttnn.pad(x, [(0, padded_seq_len - seq_len), (0, 0)], value=0) for x in pos_embeds)
+
         if mask is not None:
             assert mask.shape == (batch_size, start_pos + seq_len)
-
-            if seq_len < MAX_CHUNK_SIZE:
-                # make sequence length a multiple of tile size
-                padded_seq_len = -(-seq_len // 32) * 32
-            else:
-                # make sequence length a multiple of MAX_CHUNK_SIZE
-                padded_seq_len = -(-seq_len // MAX_CHUNK_SIZE) * MAX_CHUNK_SIZE
-
-            tokens = ttnn.pad(tokens, [(0, padded_seq_len - seq_len)], value=0)
-            pos_embeds = tuple(ttnn.pad(x, [(0, padded_seq_len - seq_len), (0, 0)], value=0) for x in pos_embeds)
 
             mask_padding = -mask.shape[1] % 32
             mask = ttnn.pad(mask, [(0, mask_padding)], value=0)
             attn_bias = _prepare_attn_bias(mask, query_length=padded_seq_len)
         else:
-            # padding is only required by `ttnn.transformer.scaled_dot_product_attention` when using
-            # an attention mask
-            padded_seq_len = seq_len
-
             attn_bias = None
 
         del mask
@@ -447,7 +445,6 @@ class Attention(Module):
         unpadded_length: int | None = None,
     ) -> ttnn.Tensor:
         _, q_seq_len, _ = x.shape
-        kv_seq_len = q_seq_len + (cache.sequence_position if cache is not None else 0)
 
         if cache is not None and cache.sequence_position != 0 and attn_bias is None:
             msg = "attn_bias must be provided with a populated cache"
@@ -471,13 +468,10 @@ class Attention(Module):
             assert unpadded_length is not None
             k, v = cache.update(self._cache_id, k, v, unpadded_length)
 
-            assert k.shape[2] == kv_seq_len
-            assert v.shape[2] == kv_seq_len
-
-        if attn_bias is not None:
-            kv_padding = -kv_seq_len % 32
-            k = ttnn.pad(k, [(0, kv_padding), (0, 0)], value=0)
-            v = ttnn.pad(v, [(0, kv_padding), (0, 0)], value=0)
+        kv_seq_len = k.shape[2]
+        kv_padding = -kv_seq_len % 32
+        k = ttnn.pad(k, [(0, kv_padding), (0, 0)], value=0)
+        v = ttnn.pad(v, [(0, kv_padding), (0, 0)], value=0)
 
         x = ttnn.transformer.scaled_dot_product_attention(
             q,
