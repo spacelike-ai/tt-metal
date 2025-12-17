@@ -132,7 +132,7 @@ class Transformer(Module):
         if mask is None and start_pos != 0:
             mask = ttnn.ones(
                 [batch_size, start_pos + seq_len],
-                dtype=ttnn.bfloat4_b,
+                dtype=ttnn.bfloat8_b,  # `bfloat4_b` is not supported by `ttnn.pad`
                 layout=ttnn.TILE_LAYOUT,
                 device=device,
             )
