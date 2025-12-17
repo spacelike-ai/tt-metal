@@ -182,6 +182,9 @@ class Transformer(Module):
                 unpadded_length=seq_len,
             )
 
+        if cache is not None:
+            cache.advance(seq_len)
+
         if padded_seq_len != seq_len:
             x = x[:, :seq_len, :]
 
@@ -443,7 +446,12 @@ class Attention(Module):
         cache: Cache | None = None,
         unpadded_length: int | None = None,
     ) -> ttnn.Tensor:
-        assert len(x.shape) == 3
+        _, q_seq_len, _ = x.shape
+        kv_seq_len = q_seq_len + (cache.sequence_position if cache is not None else 0)
+
+        if cache is not None and cache.sequence_position != 0 and attn_bias is None:
+            msg = "attn_bias must be provided with a populated cache"
+            raise ValueError(msg)
 
         x = self.qkv_proj.forward(x)
 
@@ -463,7 +471,10 @@ class Attention(Module):
             assert unpadded_length is not None
             k, v = cache.update(self._cache_id, k, v, unpadded_length)
 
-        kv_padding = -k.shape[2] % 32
+            assert k.shape[2] == kv_seq_len
+            assert v.shape[2] == kv_seq_len
+
+        kv_padding = -kv_seq_len % 32
         k = ttnn.pad(k, [(0, kv_padding), (0, 0)], value=0)
         v = ttnn.pad(v, [(0, kv_padding), (0, 0)], value=0)
 
@@ -473,7 +484,7 @@ class Attention(Module):
             v,
             attn_mask=attn_bias,
             is_causal=attn_bias is None,
-            program_config=self._sdpa_program_config(q.shape[2], k.shape[2]),
+            program_config=self._sdpa_program_config(q_seq_len, kv_seq_len),
             compute_kernel_config=self._sdpa_compute_kernel_config,
         )
 
@@ -600,15 +611,26 @@ class Cache:
         v = v[:, :, :unpadded_length, :]
 
         if cache_id in self.k_cache:
-            k = self.k_cache[cache_id] = ttnn.concat([self.k_cache[cache_id], k], dim=2)
-            v = self.v_cache[cache_id] = ttnn.concat([self.v_cache[cache_id], v], dim=2)
+            k_cache = self.k_cache[cache_id]
+            v_cache = self.v_cache[cache_id]
+
+            assert self._sequence_position == k_cache.shape[2]
+            assert self._sequence_position == v_cache.shape[2]
+
+            k = self.k_cache[cache_id] = ttnn.concat([k_cache, k], dim=2)
+            v = self.v_cache[cache_id] = ttnn.concat([v_cache, v], dim=2)
         else:
+            assert self._sequence_position == 0
+
             self.k_cache[cache_id] = k
             self.v_cache[cache_id] = v
 
         self._sequence_position = k.shape[2]
 
         return k, v
+
+    def advance(self, distance: int) -> None:
+        self._sequence_position += distance
 
     @property
     def sequence_position(self) -> int:
