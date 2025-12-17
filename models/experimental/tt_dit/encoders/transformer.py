@@ -626,8 +626,6 @@ class Cache:
             self.k_cache[cache_id] = k
             self.v_cache[cache_id] = v
 
-        self._sequence_position = k.shape[2]
-
         return k, v
 
     def advance(self, distance: int) -> None:
