@@ -474,9 +474,10 @@ class Attention(Module):
             assert k.shape[2] == kv_seq_len
             assert v.shape[2] == kv_seq_len
 
-        kv_padding = -kv_seq_len % 32
-        k = ttnn.pad(k, [(0, kv_padding), (0, 0)], value=0)
-        v = ttnn.pad(v, [(0, kv_padding), (0, 0)], value=0)
+        if attn_bias is not None:
+            kv_padding = -kv_seq_len % 32
+            k = ttnn.pad(k, [(0, kv_padding), (0, 0)], value=0)
+            v = ttnn.pad(v, [(0, kv_padding), (0, 0)], value=0)
 
         x = ttnn.transformer.scaled_dot_product_attention(
             q,
