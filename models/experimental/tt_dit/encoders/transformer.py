@@ -155,10 +155,11 @@ class Transformer(Module):
 
         if mask is not None:
             assert mask.shape == (batch_size, start_pos + seq_len)
+            attn_bias = _prepare_attn_bias(mask, query_length=seq_len)
 
-            mask_padding = -mask.shape[1] % 32
-            mask = ttnn.pad(mask, [(0, mask_padding)], value=0)
-            attn_bias = _prepare_attn_bias(mask, query_length=padded_seq_len)
+            bias_padding = -mask.shape[1] % 32
+            attn_bias = ttnn.pad(attn_bias, [(0, padded_seq_len - seq_len), (0, bias_padding)], value=0)
+            attn_bias = ttnn.clone(attn_bias, dtype=ttnn.bfloat4_b)
         else:
             attn_bias = None
 
@@ -655,9 +656,7 @@ def _prepare_attn_bias(mask: ttnn.Tensor, *, query_length: int) -> ttnn.Tensor:
     mask = ttnn.expand(mask, [batch_size, 1, query_length, kv_length])
     mask = ttnn.tril(mask, diagonal=kv_length - query_length)
 
-    mask = (mask - 1.0) * math.inf
-
-    return ttnn.clone(mask, dtype=ttnn.bfloat4_b)
+    return (mask - 1.0) * math.inf
 
 
 def _make_positions(
