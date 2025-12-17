@@ -220,7 +220,7 @@ class Transformer(Module):
 
         if mask is not None:
             assert mask.shape == tokens.shape
-            mask = ttnn.pad(mask, [(0, max_length - input_length)], value=1)
+            mask = ttnn.pad(mask, [(0, max_length - input_length - 1)], value=1)
 
         if eos_tokens is not None:
             if isinstance(eos_tokens, int):
@@ -230,7 +230,7 @@ class Transformer(Module):
 
         eos_token_tensor = torch.tensor(eos_tokens, dtype=torch.uint32) if eos_tokens else None
 
-        positions = _make_positions(start=0, sequence_length=max_length, mask=mask, device=device)
+        positions = _make_positions(start=0, sequence_length=max_length - 1, mask=mask, device=device)
         cos, sin = self.pos_embedding.forward(positions, dtype=dtype)
 
         finished = torch.zeros([batch_size], dtype=torch.bool)
