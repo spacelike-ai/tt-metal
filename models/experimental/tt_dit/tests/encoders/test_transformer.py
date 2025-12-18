@@ -62,8 +62,8 @@ def test_generate(*, mesh_device: ttnn.MeshDevice, skip_layers: int, masked: boo
     )
     config = torch_model.model.language_model.config
 
-    mid = len(torch_model.model.language_model.layers) // 2
-    del torch_model.model.language_model.layers[mid - skip_layers // 2 : mid - (-skip_layers // 2)]
+    num_layers = len(torch_model.model.language_model.layers)
+    del torch_model.model.language_model.layers[num_layers - skip_layers :]
 
     model = Transformer(
         vocab_size=config.vocab_size,
@@ -197,8 +197,8 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, batch_size: int, skip_laye
     )
     config = torch_model.model.language_model.config
 
-    mid = len(torch_model.model.language_model.layers) // 2
-    del torch_model.model.language_model.layers[mid - skip_layers // 2 : mid - (-skip_layers // 2)]
+    num_layers = len(torch_model.model.language_model.layers)
+    del torch_model.model.language_model.layers[num_layers - skip_layers :]
 
     model = Transformer(
         vocab_size=config.vocab_size,
