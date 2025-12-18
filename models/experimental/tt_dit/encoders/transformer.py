@@ -483,6 +483,7 @@ class Attention(Module):
             program_config=self._sdpa_program_config(q_seq_len, kv_seq_len),
             compute_kernel_config=self._sdpa_compute_kernel_config,
         )
+        del q, k, v
 
         x = ttnn.transformer.concatenate_heads(x)
 
