@@ -347,6 +347,7 @@ class Attention(Module):
         opt_group_count, opt_group_size, split_factor = _optimal_groups(group_count, group_size, tp_factor)
         padded_heads = opt_group_count * opt_group_size
 
+        # heads are distributed across tensor parallel axis
         self.qkv_proj = ColParallelLinear(
             embed_size,
             (padded_heads + 2 * opt_group_count) * head_size,
