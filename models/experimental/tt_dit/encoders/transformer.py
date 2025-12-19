@@ -446,7 +446,7 @@ class Attention(Module):
         cache: Cache | None = None,
         unpadded_length: int | None = None,
     ) -> ttnn.Tensor:
-        _, q_seq_len, _ = x.shape
+        _, padded_q_seq_len, _ = x.shape
 
         if cache is not None and cache.sequence_position != 0 and attn_bias is None:
             msg = "attn_bias must be provided with a populated cache"
@@ -471,9 +471,9 @@ class Attention(Module):
             k, v = cache.update(self._cache_id, k, v, unpadded_length)
 
         kv_seq_len = k.shape[2]
-        kv_padding = -kv_seq_len % 32
-        k = ttnn.pad(k, [(0, kv_padding), (0, 0)], value=0)
-        v = ttnn.pad(v, [(0, kv_padding), (0, 0)], value=0)
+        padded_kv_seq_len = -(-kv_seq_len // 32) * 32
+        k = ttnn.pad(k, [(0, padded_kv_seq_len - kv_seq_len), (0, 0)], value=0)
+        v = ttnn.pad(v, [(0, padded_kv_seq_len - kv_seq_len), (0, 0)], value=0)
 
         x = ttnn.transformer.scaled_dot_product_attention(
             q,
@@ -481,7 +481,7 @@ class Attention(Module):
             v,
             attn_mask=attn_bias,
             is_causal=attn_bias is None,
-            program_config=self._sdpa_program_config(q_seq_len, kv_seq_len),
+            program_config=self._sdpa_program_config(padded_q_seq_len, padded_kv_seq_len),
             compute_kernel_config=self._sdpa_compute_kernel_config,
         )
         del q, k, v
