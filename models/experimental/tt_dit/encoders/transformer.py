@@ -129,7 +129,7 @@ class Transformer(Module):
 
         start_pos = cache.sequence_position if cache is not None else 0
 
-        if mask is None and start_pos != 0:
+        if mask is None and start_pos != 0 and seq_len > 1:
             mask = ttnn.ones(
                 [batch_size, start_pos + seq_len],
                 dtype=ttnn.bfloat8_b,  # `bfloat4_b` is not supported by `ttnn.pad`
@@ -447,6 +447,9 @@ class Attention(Module):
         unpadded_length: int | None = None,
     ) -> ttnn.Tensor:
         _, padded_q_seq_len, _ = x.shape
+        # If the query length is one, all past tokens can be attended to, so there is no need for a
+        # causal mask.
+        is_causal = attn_bias is None and padded_q_seq_len > 1
 
         if cache is not None and cache.sequence_position != 0 and attn_bias is None:
             msg = "attn_bias must be provided with a populated cache"
@@ -480,7 +483,7 @@ class Attention(Module):
             k,
             v,
             attn_mask=attn_bias,
-            is_causal=attn_bias is None,
+            is_causal=is_causal,
             program_config=self._sdpa_program_config(padded_q_seq_len, padded_kv_seq_len),
             compute_kernel_config=self._sdpa_compute_kernel_config,
         )
