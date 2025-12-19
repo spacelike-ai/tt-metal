@@ -694,6 +694,8 @@ def _make_positions(
     # Since attention is invariant under position shifts, this is only needed if the mask is not
     # contiguous, i.e., has masked tokens in the middle. For continuous masks we could just return a
     # fixed sequence as above.
+    # TODO: why is this currently not true?
+    # TODO: why do values of masked tokens matter?
     mask = ttnn.clone(mask, dtype=ttnn.float32)
     # equivalent to: pos = mask.cumsum(1) - 1; pos.masked_fill_(mask == 0, 1)
     pos = (ttnn.cumsum(mask, 1) - 2) * mask + 1
