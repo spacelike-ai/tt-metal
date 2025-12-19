@@ -563,6 +563,7 @@ class TransformerRmsNorm(Module):
         # Somewhere between 3584 and 5120 channels is a threshold where `ttnn.rms_norm` starts to
         # trigger L1 OOM.
         self._use_rms_workaround |= num_channels >= 5120
+        self._use_rms_workaround = True # TODO: remove?
 
         if self._use_rms_workaround:
             self.weight = Parameter(total_shape=[num_channels], device=ctx.device)
