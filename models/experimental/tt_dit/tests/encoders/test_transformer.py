@@ -151,7 +151,7 @@ def test_generate(*, mesh_device: ttnn.MeshDevice, skip_layers: int, masked: boo
     #     print(tokenizer.decode(tokens_out_ref[i]))
     #     print(tokenizer.decode(tokens_out[i]))
 
-    assert_quality(logits, logits_ref, ccc=0.99999, relative_rmse=0.001)
+    assert_quality(logits_ref, logits, ccc=0.99999, relative_rmse=0.001)
     assert tokens_out.eq(tokens_out_ref).all()
 
 
