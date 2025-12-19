@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Hashable, Mapping, Sequence
 
 MAX_CHUNK_SIZE = 128
+ALTERNATIVE_SDPA = True
 
 
 @dataclass
@@ -129,7 +130,7 @@ class Transformer(Module):
 
         start_pos = cache.sequence_position if cache is not None else 0
 
-        if mask is None and start_pos != 0 and seq_len > 1:
+        if mask is None and ((start_pos != 0 and seq_len > 1) or ALTERNATIVE_SDPA):
             mask = ttnn.ones(
                 [batch_size, start_pos + seq_len],
                 dtype=ttnn.bfloat8_b,  # `bfloat4_b` is not supported by `ttnn.pad`
@@ -143,7 +144,9 @@ class Transformer(Module):
 
         # padding is should only be required by `ttnn.transformer.scaled_dot_product_attention` when
         # using an attention mask
-        if seq_len < MAX_CHUNK_SIZE:
+        if ALTERNATIVE_SDPA:
+            padded_seq_len = seq_len
+        elif seq_len < MAX_CHUNK_SIZE:
             # make sequence length a multiple of tile size
             padded_seq_len = -(-seq_len // 32) * 32
         else:
@@ -157,8 +160,9 @@ class Transformer(Module):
             assert mask.shape == (batch_size, start_pos + seq_len)
             attn_bias = _prepare_attn_bias(mask, query_length=seq_len)
 
-            bias_padding = -mask.shape[1] % 32
-            attn_bias = ttnn.pad(attn_bias, [(0, padded_seq_len - seq_len), (0, bias_padding)], value=0)
+            if not ALTERNATIVE_SDPA:
+                bias_padding = -mask.shape[1] % 32
+                attn_bias = ttnn.pad(attn_bias, [(0, padded_seq_len - seq_len), (0, bias_padding)], value=0)
             attn_bias = ttnn.clone(attn_bias, dtype=ttnn.bfloat4_b)
         else:
             attn_bias = None
@@ -474,20 +478,32 @@ class Attention(Module):
             k, v = cache.update(self._cache_id, k, v, unpadded_length)
 
         kv_seq_len = k.shape[2]
-        padded_kv_seq_len = -(-kv_seq_len // 32) * 32
-        k = ttnn.pad(k, [(0, padded_kv_seq_len - kv_seq_len), (0, 0)], value=0)
-        v = ttnn.pad(v, [(0, padded_kv_seq_len - kv_seq_len), (0, 0)], value=0)
+        if not ALTERNATIVE_SDPA:
+            padded_kv_seq_len = -(-kv_seq_len // 32) * 32
+            k = ttnn.pad(k, [(0, padded_kv_seq_len - kv_seq_len), (0, 0)], value=0)
+            v = ttnn.pad(v, [(0, padded_kv_seq_len - kv_seq_len), (0, 0)], value=0)
+        else:
+            padded_kv_seq_len = kv_seq_len
 
-        x = ttnn.transformer.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attn_bias,
-            is_causal=is_causal,
-            program_config=self._sdpa_program_config(padded_q_seq_len, padded_kv_seq_len),
-            compute_kernel_config=self._sdpa_compute_kernel_config,
-        )
-        del q, k, v
+        if ALTERNATIVE_SDPA:
+            k = ttnn.repeat_interleave(k, 4, 1)
+            x = q @ ttnn.transpose(k, 2, 3) * (1 / math.sqrt(self._head_size)) + attn_bias
+            del q, k
+            x = ttnn.softmax(x, dim=-1)
+            v = ttnn.repeat_interleave(v, 4, 1)
+            x = x @ v
+            del v
+        else:
+            x = ttnn.transformer.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_bias,
+                is_causal=is_causal,
+                program_config=self._sdpa_program_config(padded_q_seq_len, padded_kv_seq_len),
+                compute_kernel_config=self._sdpa_compute_kernel_config,
+            )
+            del q, k, v
 
         x = ttnn.transformer.concatenate_heads(x)
 
