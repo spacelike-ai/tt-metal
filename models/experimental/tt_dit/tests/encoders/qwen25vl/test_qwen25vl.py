@@ -68,8 +68,8 @@ def test_qwen25vl_attention(*, mesh_device: ttnn.MeshDevice, masked: bool) -> No
     model.load_torch_state_dict(torch_model.state_dict())
 
     sequence = torch.randn([batch_size, sequence_length, torch_model.config.hidden_size])
-    m = torch.randint(0, sequence_length + 1, [batch_size])
-    attention_mask = torch.arange(sequence_length) < m.unsqueeze(1) if masked else None
+    lengths = torch.randint(3 * sequence_length // 4, sequence_length + 1, [batch_size])
+    attention_mask = torch.arange(sequence_length).flip([0]) < lengths.unsqueeze(1) if masked else None
     cos, sin = create_rope_tensors(
         batch_size,
         sequence_length,
@@ -179,8 +179,8 @@ def test_qwen25vl_text_encoder(
     model.load_torch_state_dict(torch_text_model.state_dict())
 
     tokens = torch.randint(0, torch_model.config.vocab_size, [batch_size, sequence_length])
-    m = torch.randint(0, sequence_length + 1, [batch_size])
-    attention_mask = torch.arange(sequence_length) < m.unsqueeze(1) if masked else None
+    lengths = torch.randint(3 * sequence_length // 4, sequence_length + 1, [batch_size])
+    attention_mask = torch.arange(sequence_length).flip([0]) < lengths.unsqueeze(1) if masked else None
     cos, sin = model.create_rope_tensors(batch_size, sequence_length, attention_mask)
 
     tt_tokens = tensor.from_torch(tokens, device=mesh_device, dtype=ttnn.uint32)
