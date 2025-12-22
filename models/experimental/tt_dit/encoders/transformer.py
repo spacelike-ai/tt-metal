@@ -142,7 +142,7 @@ class Transformer(Module):
             pos = _make_positions(start=start_pos, sequence_length=seq_len, mask=mask, device=device)
             pos_embeds = self.pos_embedding.forward(pos, dtype=dtype)
 
-        # padding is should only be required by `ttnn.transformer.scaled_dot_product_attention` when
+        # padding is only required by `ttnn.transformer.scaled_dot_product_attention` when
         # using an attention mask
         if ALTERNATIVE_SDPA:
             padded_seq_len = seq_len
@@ -582,7 +582,7 @@ class TransformerRmsNorm(Module):
         # Somewhere between 3584 and 5120 channels is a threshold where `ttnn.rms_norm` starts to
         # trigger L1 OOM.
         self._use_rms_workaround |= num_channels >= 5120
-        self._use_rms_workaround = True # TODO: remove?
+        self._use_rms_workaround = True  # TODO: remove?
 
         if self._use_rms_workaround:
             self.weight = Parameter(total_shape=[num_channels], device=ctx.device)
