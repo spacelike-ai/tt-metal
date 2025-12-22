@@ -250,7 +250,7 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, batch_size: int, skip_laye
 
     logger.info("running torch model...")
     with torch.no_grad():
-        out = torch_model.forward(tokens, mask=mask, output_hidden_states=True)
+        out = torch_model.forward(tokens, attention_mask=mask, output_hidden_states=True)
         prompt_embeds = out.hidden_states[-1]
 
     if masked:
