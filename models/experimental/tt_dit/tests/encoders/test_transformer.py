@@ -234,7 +234,7 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, batch_size: int, skip_laye
         model.load_torch_state_dict(state_dict)
 
     tokens = torch.randint(0, config.vocab_size, [batch_size, sequence_length])
-    lengths = torch.randint(3 * sequence_length // 4, sequence_length + 1, [batch_size])
+    lengths = torch.randint(sequence_length // 4, 3 * sequence_length // 4, [batch_size])
     mask = torch.arange(sequence_length).flip([0]) < lengths.unsqueeze(1) if masked else None
 
     tt_tokens = tensor.from_torch(tokens, device=mesh_device, dtype=ttnn.uint32)

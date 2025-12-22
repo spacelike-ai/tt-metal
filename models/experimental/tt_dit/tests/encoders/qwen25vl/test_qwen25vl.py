@@ -68,7 +68,7 @@ def test_qwen25vl_attention(*, mesh_device: ttnn.MeshDevice, masked: bool) -> No
     model.load_torch_state_dict(torch_model.state_dict())
 
     sequence = torch.randn([batch_size, sequence_length, torch_model.config.hidden_size])
-    lengths = torch.randint(3 * sequence_length // 4, sequence_length + 1, [batch_size])
+    lengths = torch.randint(sequence_length // 4, 3 * sequence_length // 4, [batch_size])
     attention_mask = torch.arange(sequence_length).flip([0]) < lengths.unsqueeze(1) if masked else None
     cos, sin = create_rope_tensors(
         batch_size,
@@ -179,7 +179,7 @@ def test_qwen25vl_text_encoder(
     model.load_torch_state_dict(torch_text_model.state_dict())
 
     tokens = torch.randint(0, torch_model.config.vocab_size, [batch_size, sequence_length])
-    lengths = torch.randint(3 * sequence_length // 4, sequence_length + 1, [batch_size])
+    lengths = torch.randint(sequence_length // 4, 3 * sequence_length // 4, [batch_size])
     attention_mask = torch.arange(sequence_length).flip([0]) < lengths.unsqueeze(1) if masked else None
     cos, sin = model.create_rope_tensors(batch_size, sequence_length, attention_mask)
 
