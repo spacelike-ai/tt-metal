@@ -142,8 +142,8 @@ def test_generate(*, mesh_device: ttnn.MeshDevice, skip_layers: int, masked: boo
     logits = tensor.to_torch(ttnn.stack(out.logits, dim=1), mesh_axes=[..., tp_axis])
     logits_ref = torch.stack(out_ref.logits, dim=1)
 
-    # diffusers somtimes generate longer sequences than max_length,
-    # in particular when `max_length = 20` for whatever reason.
+    # diffusers somtimes generates longer sequences than max_length, in particular when `max_length
+    # = 20` for whatever reason.
     tokens_out_ref = tokens_out_ref[:, :max_length]
     logits_ref = logits_ref[:, : max_length - tokens.size(1)]
 
