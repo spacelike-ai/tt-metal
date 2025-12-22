@@ -151,6 +151,14 @@ def test_generate(*, mesh_device: ttnn.MeshDevice, skip_layers: int, masked: boo
     #     print(tokenizer.decode(tokens_out_ref[i]))
     #     print(tokenizer.decode(tokens_out[i]))
 
+    if mask is not None:
+        # Masked positions on the start of the sequence contain random values from computing softmax over all -inf
+        # so we remove them before comparison.
+        _, s, d = logits_ref.shape
+        padded_mask = torch.nn.functional.pad(mask.bool(), [0, s - mask.size(1)], value=True)
+        logits_ref = logits_ref.masked_select(padded_mask.unsqueeze(-1)).view([-1, d])
+        logits = logits.masked_select(padded_mask.unsqueeze(-1)).view([-1, d])
+
     assert_quality(logits_ref, logits, ccc=0.99999, relative_rmse=0.001)
     assert tokens_out.eq(tokens_out_ref).all()
 
@@ -252,6 +260,13 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, batch_size: int, skip_laye
     with torch.no_grad():
         out = torch_model.forward(tokens, attention_mask=mask, output_hidden_states=True)
         prompt_embeds = out.hidden_states[-1]
+
+    if mask is not None:
+        # Masked positions on the start of the sequence contain random values from computing softmax over all -inf
+        # so we remove them before comparison.
+        _, _, d = prompt_embeds.shape
+        prompt_embeds = prompt_embeds.masked_select(mask.unsqueeze(-1)).view([-1, d])
+        tt_prompt_embeds_torch = tt_prompt_embeds_torch.masked_select(mask.unsqueeze(-1)).view([-1, d])
 
     if masked:
         assert_quality(prompt_embeds, tt_prompt_embeds_torch, pcc=0.952, relative_rmse=0.31)
