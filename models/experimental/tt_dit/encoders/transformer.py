@@ -161,7 +161,7 @@ class Transformer(Module):
             attn_bias = _prepare_attn_bias(mask, query_length=seq_len)
 
             if not ALTERNATIVE_SDPA:
-                bias_padding = -mask.shape[1] % 32
+                bias_padding = -attn_bias.shape[3] % 32
                 attn_bias = ttnn.pad(attn_bias, [(0, padded_seq_len - seq_len), (0, bias_padding)], value=0)
             attn_bias = ttnn.clone(attn_bias, dtype=ttnn.bfloat4_b)
         else:
