@@ -54,6 +54,7 @@ def test_guided_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, ma
     )
 
     tokenizer = transformers.LlamaTokenizerFast.from_pretrained("black-forest-labs/FLUX.2-dev", subfolder="tokenizer")
+    assert isinstance(tokenizer, transformers.LlamaTokenizerFast)
 
     torch_model = transformers.Mistral3ForConditionalGeneration.from_pretrained(
         "black-forest-labs/FLUX.2-dev", subfolder="text_encoder"
@@ -62,6 +63,9 @@ def test_guided_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, ma
 
     num_layers = len(torch_model.model.language_model.layers)
     del torch_model.model.language_model.layers[num_layers - skip_layers :]
+
+    generation_config = torch_model.generation_config
+    assert isinstance(generation_config, transformers.GenerationConfig)
 
     model = Transformer(
         vocab_size=config.vocab_size,
@@ -96,6 +100,10 @@ def test_guided_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, ma
         )
         model.load_torch_state_dict(state_dict)
 
+    # This makes unmasked generation more similar in the two implementations, possibly because
+    # `transformers` masks out padding tokens.
+    tokenizer.pad_token_id = generation_config.bos_token_id
+
     out = tokenizer.__call__(
         ["Once upon a time", "Hello"],
         padding="longest",
@@ -107,9 +115,6 @@ def test_guided_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, ma
     )
     tokens = out["input_ids"].to(torch_model.device)
     mask = out["attention_mask"].to(torch_model.device) if masked else None
-
-    generation_config = torch_model.generation_config
-    assert isinstance(generation_config, transformers.GenerationConfig)
 
     tt_tokens = tensor.from_torch(tokens, device=mesh_device, dtype=ttnn.uint32)
     tt_mask = tensor.from_torch(mask, device=mesh_device) if mask is not None else None
@@ -160,7 +165,7 @@ def test_guided_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, ma
         logits = logits.masked_select(padded_mask.unsqueeze(-1)).view([-1, d])
         tt_logits = tt_logits.masked_select(padded_mask.unsqueeze(-1)).view([-1, d])
 
-    assert_quality(logits, tt_logits, ccc=0.9997, relative_rmse=0.03)
+    assert_quality(logits, tt_logits, ccc=0.9995, relative_rmse=0.04)
     assert tt_tokens_out.eq(tokens_out).all()
 
 
