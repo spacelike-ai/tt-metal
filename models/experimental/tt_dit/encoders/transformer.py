@@ -129,9 +129,10 @@ class Transformer(Module):
 
         start_pos = cache.sequence_position if cache is not None else 0
 
-        # There is no need for a mask if start_pos is zero, but
-        # `ttnn.transformer.scaled_dot_product_attention` produces incorrect results.
-        if mask is None and seq_len > 1:  # and start_pos != 0:
+        # There should be no need for a mask when start_pos is zero, but
+        # `ttnn.transformer.scaled_dot_product_attention` produces incorrect results when the
+        # sequence length is not a multiple of the tile size.
+        if mask is None and seq_len > 1 and (start_pos != 0 or seq_len % 32 != 0):
             mask = ttnn.ones(
                 [batch_size, start_pos + seq_len],
                 dtype=ttnn.bfloat8_b,  # `bfloat4_b` is not supported by `ttnn.pad`
