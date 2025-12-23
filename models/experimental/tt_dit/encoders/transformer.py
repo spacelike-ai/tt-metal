@@ -26,7 +26,6 @@ if TYPE_CHECKING:
     from collections.abc import Hashable, Mapping, Sequence
 
 MAX_CHUNK_SIZE = 128
-ALTERNATIVE_SDPA = True
 
 
 @dataclass
@@ -130,7 +129,7 @@ class Transformer(Module):
 
         start_pos = cache.sequence_position if cache is not None else 0
 
-        if mask is None and ((start_pos != 0 and seq_len > 1) or ALTERNATIVE_SDPA):
+        if mask is None and start_pos != 0 and seq_len > 1:
             mask = ttnn.ones(
                 [batch_size, start_pos + seq_len],
                 dtype=ttnn.bfloat8_b,  # `bfloat4_b` is not supported by `ttnn.pad`
@@ -489,25 +488,16 @@ class Attention(Module):
         else:
             padded_kv_seq_len = kv_seq_len
 
-        if ALTERNATIVE_SDPA:
-            k = ttnn.repeat_interleave(k, 4, 1)
-            x = q @ ttnn.transpose(k, 2, 3) * (1 / math.sqrt(self._head_size)) + attn_bias
-            del q, k
-            x = ttnn.softmax(x, dim=-1)
-            v = ttnn.repeat_interleave(v, 4, 1)
-            x = x @ v
-            del v
-        else:
-            x = ttnn.transformer.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=attn_bias,
-                is_causal=is_causal,
-                program_config=self._sdpa_program_config(padded_q_seq_len, padded_kv_seq_len),
-                compute_kernel_config=self._sdpa_compute_kernel_config,
-            )
-            del q, k, v
+        x = ttnn.transformer.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_bias,
+            is_causal=is_causal,
+            program_config=self._sdpa_program_config(padded_q_seq_len, padded_kv_seq_len),
+            compute_kernel_config=self._sdpa_compute_kernel_config,
+        )
+        del q, k, v
 
         x = ttnn.transformer.concatenate_heads(x)
 
