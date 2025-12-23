@@ -129,7 +129,7 @@ class Transformer(Module):
 
         start_pos = cache.sequence_position if cache is not None else 0
 
-        if mask is None and start_pos != 0 and seq_len > 1:
+        if mask is None and seq_len > 1:  # TODO: and start_pos != 0:
             mask = ttnn.ones(
                 [batch_size, start_pos + seq_len],
                 dtype=ttnn.bfloat8_b,  # `bfloat4_b` is not supported by `ttnn.pad`
