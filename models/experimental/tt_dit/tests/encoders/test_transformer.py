@@ -159,15 +159,15 @@ def test_guided_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, ma
         logits = logits.masked_select(padded_mask.unsqueeze(-1)).view([-1, d])
         tt_logits = tt_logits.masked_select(padded_mask.unsqueeze(-1)).view([-1, d])
 
-    assert_quality(logits, tt_logits, ccc=0.995, relative_rmse=0.11)
+    assert_quality(logits, tt_logits, ccc=0.9997, relative_rmse=0.03)
     assert tt_tokens_out.eq(tokens_out).all()
 
 
 @pytest.mark.parametrize(
     ("mesh_device", "batch_size", "skip_layers"),
     [
-        pytest.param((1, 2), 2, 22, id="1x2"),
         pytest.param((1, 1), 2, 32, id="1x1"),
+        pytest.param((1, 2), 2, 22, id="1x2"),
         pytest.param((1, 4), 2, 0, id="1x4"),
         pytest.param((1, 8), 2, 0, id="1x8"),
     ],
@@ -262,13 +262,10 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, batch_size: int, skip_laye
         prompt_embeds = out.hidden_states[-1]
 
     if mask is not None:
-        # Masked positions on the start of the sequence contain random values from computing softmax over all -inf
+        # Masked positions on the start of the sequence contain undefined values from computing softmax over all -inf
         # so we remove them before comparison.
         _, _, d = prompt_embeds.shape
         prompt_embeds = prompt_embeds.masked_select(mask.unsqueeze(-1)).view([-1, d])
         tt_prompt_embeds_torch = tt_prompt_embeds_torch.masked_select(mask.unsqueeze(-1)).view([-1, d])
 
-    if masked:
-        assert_quality(prompt_embeds, tt_prompt_embeds_torch, pcc=0.952, relative_rmse=0.31)
-    else:
-        assert_quality(prompt_embeds, tt_prompt_embeds_torch, pcc=0.991, relative_rmse=0.14)
+    assert_quality(prompt_embeds, tt_prompt_embeds_torch, pcc=0.997, relative_rmse=0.07)
