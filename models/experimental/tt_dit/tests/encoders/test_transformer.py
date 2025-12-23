@@ -21,10 +21,8 @@ from ...utils.check import assert_quality
 @pytest.mark.parametrize(
     ("mesh_device", "skip_layers"),
     [
-        # pytest.param((1, 1), 32, id="1x1"),
-        # pytest.param((1, 2), 22, id="1x2"),
         pytest.param((1, 4), 0, id="1x4"),
-        # pytest.param((1, 8), 0, id="1x8"), CRASHES HOST
+        pytest.param((1, 8), 0, id="1x8"),
     ],
     indirect=["mesh_device"],
 )
@@ -37,7 +35,7 @@ from ...utils.check import assert_quality
     "masked",
     [
         pytest.param(True, id="masked"),
-        # pytest.param(False, id="unmasked"),
+        pytest.param(False, id="unmasked"),
     ],
 )
 def test_generate(*, mesh_device: ttnn.MeshDevice, skip_layers: int, masked: bool) -> None:
@@ -169,7 +167,7 @@ def test_generate(*, mesh_device: ttnn.MeshDevice, skip_layers: int, masked: boo
         pytest.param((1, 2), 2, 22, id="1x2"),
         pytest.param((1, 1), 2, 32, id="1x1"),
         pytest.param((1, 4), 2, 0, id="1x4"),
-        # pytest.param((1, 8), 2, 0, id="1x8"), CRASHES HOST
+        pytest.param((1, 8), 2, 0, id="1x8"),
     ],
     indirect=["mesh_device"],
 )
