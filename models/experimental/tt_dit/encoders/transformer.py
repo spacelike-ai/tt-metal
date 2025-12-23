@@ -144,7 +144,7 @@ class Transformer(Module):
 
         # padding is only required by `ttnn.transformer.scaled_dot_product_attention` when
         # using an attention mask
-        if ALTERNATIVE_SDPA:
+        if mask is None:
             padded_seq_len = seq_len
         elif seq_len < MAX_CHUNK_SIZE:
             # make sequence length a multiple of tile size
@@ -160,9 +160,8 @@ class Transformer(Module):
             assert mask.shape == (batch_size, start_pos + seq_len)
             attn_bias = _prepare_attn_bias(mask, query_length=seq_len)
 
-            if not ALTERNATIVE_SDPA:
-                bias_padding = -attn_bias.shape[3] % 32
-                attn_bias = ttnn.pad(attn_bias, [(0, padded_seq_len - seq_len), (0, bias_padding)], value=0)
+            bias_padding = -attn_bias.shape[3] % 32
+            attn_bias = ttnn.pad(attn_bias, [(0, padded_seq_len - seq_len), (0, bias_padding)], value=-math.inf)
             attn_bias = ttnn.clone(attn_bias, dtype=ttnn.bfloat4_b)
         else:
             attn_bias = None
@@ -458,7 +457,7 @@ class Attention(Module):
         _, padded_q_seq_len, _ = x.shape
         # If the query length is one, all past tokens can be attended to, so there is no need for a
         # causal mask.
-        is_causal = attn_bias is None and padded_q_seq_len > 1
+        is_causal = attn_bias is None and unpadded_length > 1
 
         if cache is not None and cache.sequence_position != 0 and attn_bias is None:
             msg = "attn_bias must be provided with a populated cache"
@@ -483,7 +482,7 @@ class Attention(Module):
             k, v = cache.update(self._cache_id, k, v, unpadded_length)
 
         kv_seq_len = k.shape[2]
-        if not ALTERNATIVE_SDPA:
+        if attn_bias is not None:
             padded_kv_seq_len = -(-kv_seq_len // 32) * 32
             k = ttnn.pad(k, [(0, padded_kv_seq_len - kv_seq_len), (0, 0)], value=0)
             v = ttnn.pad(v, [(0, padded_kv_seq_len - kv_seq_len), (0, 0)], value=0)
