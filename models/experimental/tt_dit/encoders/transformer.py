@@ -459,8 +459,8 @@ class Attention(Module):
         # causal mask.
         is_causal = attn_bias is None and unpadded_length > 1
 
-        if cache is not None and cache.sequence_position != 0 and attn_bias is None:
-            msg = "attn_bias must be provided with a populated cache"
+        if cache is not None and cache.sequence_position != 0 and is_causal:
+            msg = "attn_bias must be provided with a populated cache and sequence length greater than 1"
             raise ValueError(msg)
 
         x = self.qkv_proj.forward(x)
