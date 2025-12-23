@@ -673,6 +673,8 @@ def _rotate_half(x: ttnn.Tensor) -> ttnn.Tensor:
 def _prepare_attn_bias(mask: ttnn.Tensor, *, query_length: int) -> ttnn.Tensor:
     batch_size, kv_length = mask.shape
 
+    mask = tensor.from_torch(tensor.to_torch(mask).unsqueeze(1).unsqueeze(1), device=mask.device())
+
     # convert to causal attention mask
     mask = mask.reshape([batch_size, 1, 1, kv_length])
     mask = ttnn.expand(mask, [batch_size, 1, query_length, kv_length])
