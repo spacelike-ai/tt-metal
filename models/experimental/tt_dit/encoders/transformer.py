@@ -210,6 +210,7 @@ class Transformer(Module):
         temperature: float = 1,
         use_cache: bool = True,
         return_logits: bool = False,
+        guide: torch.Tensor | None = None,
     ) -> GenerationOutput:
         # The original Llama implementation starts generation after the shortest
         # input, thereby overwriting any padding tokens that are on the right,
@@ -250,9 +251,13 @@ class Transformer(Module):
                 cache=cache,
             )[:, -1:, :]
 
-            torch_current_logits = tensor.to_torch(current_logits)
-            torch_prob = torch.softmax(torch_current_logits / temperature, 2)
-            torch_new_tokens = _sample(torch_prob, top_k=top_k, top_p=top_p).squeeze(1)
+            if guide is not None:
+                torch_new_tokens = guide[:, pos : pos + 1].float()
+            else:
+                torch_current_logits = tensor.to_torch(current_logits).float()
+                torch_prob = torch.softmax(torch_current_logits / temperature, 2)
+                torch_new_tokens = _sample(torch_prob, top_k=top_k, top_p=top_p).squeeze(1)
+
             new_tokens = tensor.from_torch(torch_new_tokens, dtype=tokens.dtype, device=device)
 
             tokens = ttnn.concat([tokens, new_tokens], dim=1)

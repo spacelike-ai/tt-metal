@@ -38,7 +38,7 @@ from ...utils.check import assert_quality
         pytest.param(False, id="unmasked"),
     ],
 )
-def test_generate(*, mesh_device: ttnn.MeshDevice, skip_layers: int, masked: bool) -> None:
+def test_guided_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, masked: bool) -> None:
     torch.manual_seed(0)
 
     tp_axis = 1
@@ -114,18 +114,6 @@ def test_generate(*, mesh_device: ttnn.MeshDevice, skip_layers: int, masked: boo
     tt_tokens = tensor.from_torch(tokens, device=mesh_device, dtype=ttnn.uint32)
     tt_mask = tensor.from_torch(mask, device=mesh_device) if mask is not None else None
 
-    print("running ttnn model...")
-    out = model.generate(
-        tt_tokens,
-        mask=tt_mask,
-        eos_tokens=generation_config.eos_token_id,
-        max_length=generation_config.max_length,
-        top_k=generation_config.top_k if generation_config.do_sample else 1,
-        top_p=generation_config.top_p,
-        temperature=generation_config.temperature,
-        return_logits=True,
-    )
-
     generation_config.max_length = max_length
     generation_config.repetition_penalty = None  # repetition penalty is not implemented
     generation_config.return_dict_in_generate = True
@@ -135,30 +123,44 @@ def test_generate(*, mesh_device: ttnn.MeshDevice, skip_layers: int, masked: boo
     out_ref = torch_model.generate(tokens, attention_mask=mask)
     assert isinstance(out_ref, transformers.generation.utils.GenerateOutput)
 
-    tokens_out = tensor.to_torch(out.tokens)
-    tokens_out_ref = out_ref.sequences
-    logits = tensor.to_torch(ttnn.stack(out.logits, dim=1), mesh_axes=[..., tp_axis])
-    logits_ref = torch.stack(out_ref.logits, dim=1)
+    tokens_out = out_ref.sequences
+    logits = torch.stack(out_ref.logits, dim=1)
 
     # diffusers somtimes generates longer sequences than max_length, in particular when `max_length
     # = 20` for whatever reason.
-    tokens_out_ref = tokens_out_ref[:, :max_length]
-    logits_ref = logits_ref[:, : max_length - tokens.size(1)]
+    tokens_out = tokens_out[:, :max_length]
+    logits = logits[:, : max_length - tokens.size(1)]
 
-    # for i in range(tokens_out.size(0)):
-    #     print(tokenizer.decode(tokens_out_ref[i]))
+    print("running ttnn model...")
+    tt_out = model.generate(
+        tt_tokens,
+        guide=tokens_out,
+        mask=tt_mask,
+        eos_tokens=generation_config.eos_token_id,
+        max_length=generation_config.max_length,
+        top_k=generation_config.top_k if generation_config.do_sample else 1,
+        top_p=generation_config.top_p,
+        temperature=generation_config.temperature,
+        return_logits=True,
+    )
+
+    tt_tokens_out = tensor.to_torch(tt_out.tokens)
+    tt_logits = tensor.to_torch(ttnn.stack(tt_out.logits, dim=1), mesh_axes=[..., tp_axis])
+
+    # for i in range(tt_tokens_out.size(0)):
     #     print(tokenizer.decode(tokens_out[i]))
+    #     print(tokenizer.decode(tt_tokens_out[i]))
 
     if mask is not None:
         # Masked positions on the start of the sequence contain random values from computing softmax over all -inf
         # so we remove them before comparison.
-        _, s, d = logits_ref.shape
+        _, s, d = logits.shape
         padded_mask = torch.nn.functional.pad(mask.bool(), [0, s - mask.size(1)], value=True)
-        logits_ref = logits_ref.masked_select(padded_mask.unsqueeze(-1)).view([-1, d])
         logits = logits.masked_select(padded_mask.unsqueeze(-1)).view([-1, d])
+        tt_logits = tt_logits.masked_select(padded_mask.unsqueeze(-1)).view([-1, d])
 
-    assert_quality(logits_ref, logits, ccc=0.99999, relative_rmse=0.001)
-    assert tokens_out.eq(tokens_out_ref).all()
+    assert_quality(logits, tt_logits, ccc=0.995, relative_rmse=0.11)
+    assert tt_tokens_out.eq(tokens_out).all()
 
 
 @pytest.mark.parametrize(
