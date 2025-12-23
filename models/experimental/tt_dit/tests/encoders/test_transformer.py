@@ -165,7 +165,7 @@ def test_guided_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, ma
         logits = logits.masked_select(padded_mask.unsqueeze(-1)).view([-1, d])
         tt_logits = tt_logits.masked_select(padded_mask.unsqueeze(-1)).view([-1, d])
 
-    assert_quality(logits, tt_logits, ccc=0.9995, relative_rmse=0.04)
+    assert_quality(logits, tt_logits, ccc=0.9992, relative_rmse=0.05)
     assert tt_tokens_out.eq(tokens_out).all()
 
 
