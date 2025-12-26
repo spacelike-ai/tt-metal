@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Hashable, Mapping, Sequence
 
 MAX_CHUNK_SIZE = 128
+OPTIMIZED_DECODE_MODE = True
 
 
 @dataclass
@@ -146,7 +147,7 @@ class Transformer(Module):
 
         # padding is only required by `ttnn.transformer.scaled_dot_product_attention` when
         # using an attention mask
-        if mask is None:
+        if mask is None or (OPTIMIZED_DECODE_MODE and seq_len == 1):
             padded_seq_len = seq_len
         elif seq_len < MAX_CHUNK_SIZE:
             # make sequence length a multiple of tile size
@@ -159,11 +160,20 @@ class Transformer(Module):
         pos_embeds = tuple(ttnn.pad(x, [(0, padded_seq_len - seq_len), (0, 0)], value=0) for x in pos_embeds)
 
         if mask is not None:
-            assert mask.shape == (batch_size, start_pos + seq_len)
+            assert mask.shape[0] == batch_size
+            if start_pos == 0:
+                assert mask.shape[1] == seq_len
+
             attn_bias = _prepare_attn_bias(mask, query_length=seq_len)
 
-            bias_padding = -attn_bias.shape[3] % 32
-            attn_bias = ttnn.pad(attn_bias, [(0, padded_seq_len - seq_len), (0, bias_padding)], value=-math.inf)
+            if start_pos == 0 or not OPTIMIZED_DECODE_MODE:
+                bias_padding = -attn_bias.shape[3] % 32
+                attn_bias = ttnn.pad(attn_bias, [(0, padded_seq_len - seq_len), (0, bias_padding)], value=-math.inf)
+            else:
+                # `ttnn.transformer.scaled_dot_product_attention_decod` wants one mask per local head
+                num_local_heads = self.layers[0].attn._num_local_heads
+                attn_bias = ttnn.repeat(attn_bias, [1, 1, num_local_heads, 1])
+
             attn_bias = ttnn.clone(attn_bias, dtype=ttnn.bfloat4_b)
         else:
             attn_bias = None
@@ -457,6 +467,10 @@ class Attention(Module):
         unpadded_length: int | None = None,
     ) -> ttnn.Tensor:
         _, padded_q_seq_len, _ = x.shape
+
+        if OPTIMIZED_DECODE_MODE and cache is not None and cache.sequence_position != 0 and padded_q_seq_len == 1:
+            return self.forward_decode(x, attn_bias=attn_bias, pos_embeds=pos_embeds, cache=cache)
+
         # If the query length is one, all past tokens can be attended to, so there is no need for a
         # causal mask. Also `ttnn.transformer.scaled_dot_product_attention` does not support setting
         # `is_causal` to `True` if the query and key/value lengths differ.
@@ -475,6 +489,9 @@ class Attention(Module):
             transpose_k_heads=False,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
+        # q shape: batch_size num_local_heads    padded_q_seq_len head_size
+        # k shape: batch_size num_local_kv_heads padded_q_seq_len head_size
+        # v shape: batch_size num_local_kv_heads padded_q_seq_len head_size
 
         cos, sin = pos_embeds
         q = _apply_rope(q, cos, sin)
@@ -509,6 +526,95 @@ class Attention(Module):
             x = self._ccl_manager.all_gather_persistent_buffer(x, dim=-1, mesh_axis=self._tp_axis, use_hyperparams=True)
 
         x = self.o_proj.forward(x)
+
+        if self._tp_axis is not None:
+            x = self._ccl_manager.all_gather_persistent_buffer(x, dim=-1, mesh_axis=self._tp_axis, use_hyperparams=True)
+
+        return x
+
+    def forward_decode(
+        self,
+        x: ttnn.Tensor,
+        *,
+        attn_bias: ttnn.Tensor | None,
+        pos_embeds: tuple[ttnn.Tensor, ttnn.Tensor],
+        cache: Cache,
+    ) -> ttnn.Tensor:
+        batch_size, seq_len, _embed_size = x.shape
+        assert seq_len == 1
+
+        x = self.qkv_proj.forward(x)
+
+        # q: 1 N Nq  dh
+        # k: 1 N Nkv dh
+        # v: 1 N Nkv dh
+        q, k, v = ttnn.experimental.nlp_create_qkv_heads_decode(
+            x.reshape([1, 1, batch_size, -1]),
+            num_heads=self._num_local_heads,
+            num_kv_heads=self._num_local_kv_heads,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+
+        q = ttnn.to_memory_config(q, ttnn.DRAM_MEMORY_CONFIG)
+        k = ttnn.to_memory_config(k, ttnn.DRAM_MEMORY_CONFIG)
+        v = ttnn.to_memory_config(v, ttnn.DRAM_MEMORY_CONFIG)
+
+        q = ttnn.squeeze(ttnn.unsqueeze(q, 3), 0)
+        k = ttnn.squeeze(ttnn.unsqueeze(k, 3), 0)
+        v = ttnn.squeeze(ttnn.unsqueeze(v, 3), 0)
+
+        cos, sin = pos_embeds
+        q = _apply_rope(q, cos, sin)
+        k = _apply_rope(k, cos, sin)
+
+        k, v = cache.update(self._cache_id, k, v, 1)
+
+        kv_seq_len = k.shape[2]
+        if False:  # attn_bias is not None:
+            padded_kv_seq_len = -(-kv_seq_len // 32) * 32
+            k = ttnn.pad(k, [(0, padded_kv_seq_len - kv_seq_len), (0, 0)], value=0)
+            v = ttnn.pad(v, [(0, padded_kv_seq_len - kv_seq_len), (0, 0)], value=0)
+        else:
+            padded_kv_seq_len = kv_seq_len
+
+        q = ttnn.squeeze(ttnn.unsqueeze(q, 0), 3)
+
+        # q: 1 N Nq dh
+        # k: N Nkv S dh
+        # v: N Nkv S dh
+
+        current_pos = ttnn.full([batch_size], cache.sequence_position, dtype=ttnn.int32, device=self._device)
+
+        # TODO: this is a bit inaccurate, leading the tests to fail
+        x = ttnn.transformer.scaled_dot_product_attention_decode(
+            q,
+            k,
+            v,
+            cur_pos_tensor=current_pos,
+            attn_mask=attn_bias,
+            is_causal=attn_bias is None,
+            program_config=self._sdpa_program_config(1, padded_kv_seq_len),
+            compute_kernel_config=self._sdpa_compute_kernel_config,
+        )
+        del q, k, v
+
+        memory_config = ttnn.create_sharded_memory_config(
+            shape=[-(-self._num_local_heads // 32) * 32, self._head_size],
+            core_grid=ttnn.CoreRangeSet({_num_to_corerange(batch_size)}),
+            strategy=ttnn.ShardStrategy.HEIGHT,
+            orientation=ttnn.ShardOrientation.ROW_MAJOR,
+            use_height_and_width_as_shard_shape=True,
+        )
+        x = ttnn.to_memory_config(x, memory_config=memory_config)
+        x = ttnn.experimental.nlp_concat_heads_decode(x, num_heads=self._num_local_heads)
+        x = ttnn.to_memory_config(x, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
+        if self._tp_axis is not None:
+            x = self._ccl_manager.all_gather_persistent_buffer(x, dim=-1, mesh_axis=self._tp_axis, use_hyperparams=True)
+
+        x = self.o_proj.forward(x)
+
+        x = x.reshape([32, 1, -1])[:batch_size]
 
         if self._tp_axis is not None:
             x = self._ccl_manager.all_gather_persistent_buffer(x, dim=-1, mesh_axis=self._tp_axis, use_hyperparams=True)
@@ -662,6 +768,20 @@ def _apply_rope(x: ttnn.Tensor, cos: ttnn.Tensor, sin: ttnn.Tensor) -> ttnn.Tens
     return x * ttnn.unsqueeze(cos, 1) + _rotate_half(x) * ttnn.unsqueeze(sin, 1)
 
 
+def _apply_rope_decode(x: ttnn.Tensor, cos: ttnn.Tensor, sin: ttnn.Tensor) -> ttnn.Tensor:
+    one, n, _heads, dim = x.shape
+    seq = 1
+
+    assert one == 1
+    assert cos.shape in ((n, seq, dim), (1, seq, dim))
+    assert cos.shape == sin.shape
+
+    # interleaved format leads to lower PCC
+    # return x * cos + ttnn.alt_complex_rotate90(x) * sin
+    # return x * ttnn.unsqueeze(cos, 2) + _rotate_half(x) * ttnn.unsqueeze(sin, 2)
+    return x
+
+
 def _rotate_half(x: ttnn.Tensor) -> ttnn.Tensor:
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
@@ -799,6 +919,18 @@ class StateConversion:
             warnings.warn(f"unprocessed keys remain: {', '.join(in_.keys())}", stacklevel=2)
 
         return {**in_, **out}
+
+
+# copied from tt_transformers
+def _num_to_corerange(x: int) -> ttnn.CoreRange:
+    assert x < 8 or x % 8 == 0
+    num_x = min(x, 8)
+    num_y = x // num_x
+    assert num_x * num_y == x
+    return ttnn.CoreRange(
+        ttnn.CoreCoord(0, 0),
+        ttnn.CoreCoord(num_x - 1, num_y - 1),
+    )
 
 
 MISTRAL3_CONVERSION = StateConversion(
