@@ -558,19 +558,19 @@ class Attention(Module):
         k = ttnn.to_memory_config(k, ttnn.DRAM_MEMORY_CONFIG)
         v = ttnn.to_memory_config(v, ttnn.DRAM_MEMORY_CONFIG)
 
-        q = ttnn.squeeze(ttnn.unsqueeze(q, 3), 0)
-        k = ttnn.squeeze(ttnn.unsqueeze(k, 3), 0)
-        v = ttnn.squeeze(ttnn.unsqueeze(v, 3), 0)
+        q = ttnn.unsqueeze(ttnn.squeeze(q, 0), 2)
+        k = ttnn.unsqueeze(ttnn.squeeze(k, 0), 2)
+        v = ttnn.unsqueeze(ttnn.squeeze(v, 0), 2)
 
         cos, sin = pos_embeds
         q = _apply_rope(q, cos, sin)
         k = _apply_rope(k, cos, sin)
 
+        q = ttnn.unsqueeze(ttnn.squeeze(q, 2), 0)
+
         k, v = cache.update(self._cache_id, k, v, 1)
 
-        q = ttnn.squeeze(ttnn.unsqueeze(q, 0), 3)
-
-        # q shape: 1 batch_size num_local_heads                      head_size
+        # q shape: 1 batch_size num_local_heads               head_size
         # k shape:   batch_size num_local_kv_heads kv_seq_len head_size
         # v shape:   batch_size num_local_kv_heads kv_seq_len head_size
 
