@@ -545,15 +545,15 @@ class Attention(Module):
 
         x = self.qkv_proj.forward(x)
 
-        # q: 1 N Nq  dh
-        # k: 1 N Nkv dh
-        # v: 1 N Nkv dh
         q, k, v = ttnn.experimental.nlp_create_qkv_heads_decode(
             x.reshape([1, 1, batch_size, -1]),
             num_heads=self._num_local_heads,
             num_kv_heads=self._num_local_kv_heads,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
+        # q shape: 1 batch_size num_local_heads    head_size
+        # k shape: 1 batch_size num_local_kv_heads head_size
+        # v shape: 1 batch_size num_local_kv_heads head_size
 
         q = ttnn.to_memory_config(q, ttnn.DRAM_MEMORY_CONFIG)
         k = ttnn.to_memory_config(k, ttnn.DRAM_MEMORY_CONFIG)
@@ -579,9 +579,9 @@ class Attention(Module):
 
         q = ttnn.squeeze(ttnn.unsqueeze(q, 0), 3)
 
-        # q: 1 N Nq dh
-        # k: N Nkv S dh
-        # v: N Nkv S dh
+        # q shape: 1 batch_size num_local_heads                      head_size
+        # k shape:   batch_size num_local_kv_heads padded_kv_seq_len head_size
+        # v shape:   batch_size num_local_kv_heads padded_kv_seq_len head_size
 
         current_pos = ttnn.full([batch_size], cache.sequence_position, dtype=ttnn.int32, device=self._device)
 
