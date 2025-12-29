@@ -549,7 +549,6 @@ class Attention(Module):
             x.reshape([1, 1, batch_size, -1]),
             num_heads=self._num_local_heads,
             num_kv_heads=self._num_local_kv_heads,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
         # q shape: 1 batch_size num_local_heads    head_size
         # k shape: 1 batch_size num_local_kv_heads head_size
