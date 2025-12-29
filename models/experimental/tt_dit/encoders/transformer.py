@@ -568,19 +568,11 @@ class Attention(Module):
 
         k, v = cache.update(self._cache_id, k, v, 1)
 
-        kv_seq_len = k.shape[2]
-        if False:  # attn_bias is not None:
-            padded_kv_seq_len = -(-kv_seq_len // 32) * 32
-            k = ttnn.pad(k, [(0, padded_kv_seq_len - kv_seq_len), (0, 0)], value=0)
-            v = ttnn.pad(v, [(0, padded_kv_seq_len - kv_seq_len), (0, 0)], value=0)
-        else:
-            padded_kv_seq_len = kv_seq_len
-
         q = ttnn.squeeze(ttnn.unsqueeze(q, 0), 3)
 
         # q shape: 1 batch_size num_local_heads                      head_size
-        # k shape:   batch_size num_local_kv_heads padded_kv_seq_len head_size
-        # v shape:   batch_size num_local_kv_heads padded_kv_seq_len head_size
+        # k shape:   batch_size num_local_kv_heads kv_seq_len head_size
+        # v shape:   batch_size num_local_kv_heads kv_seq_len head_size
 
         current_pos = ttnn.full([batch_size], cache.sequence_position, dtype=ttnn.int32, device=self._device)
 
@@ -592,7 +584,7 @@ class Attention(Module):
             cur_pos_tensor=current_pos,
             attn_mask=attn_bias,
             is_causal=attn_bias is None,
-            program_config=self._sdpa_program_config(1, padded_kv_seq_len),
+            program_config=self._sdpa_program_config(1, k.shape[2]),
             compute_kernel_config=self._sdpa_compute_kernel_config,
         )
         del q, k, v
