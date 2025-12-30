@@ -567,7 +567,7 @@ class Attention(Module):
             cur_pos=[cache.sequence_position] * batch_size,
             attn_mask=attn_bias,
             is_causal=attn_bias is None,
-            program_config=self._sdpa_program_config(1, k.shape[2]),
+            program_config=self._sdpa_program_config(seq_len, k.shape[2]),
             compute_kernel_config=self._sdpa_compute_kernel_config,
         )
         del q, k, v
