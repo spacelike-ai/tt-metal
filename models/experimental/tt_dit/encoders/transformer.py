@@ -493,7 +493,7 @@ class Attention(Module):
 
         if cache is not None:
             assert unpadded_length is not None
-            k, v = cache.update(self._cache_id, k, v, unpadded_length)
+            cache.prefill(self._cache_id, k, v, unpadded_length)
 
         kv_seq_len = k.shape[2]
         if attn_bias is not None:
@@ -555,20 +555,11 @@ class Attention(Module):
         # k shape: 1 batch_size num_local_kv_heads head_size
         # v shape: 1 batch_size num_local_kv_heads head_size
 
-        k = ttnn.to_memory_config(k, ttnn.DRAM_MEMORY_CONFIG)
-        v = ttnn.to_memory_config(v, ttnn.DRAM_MEMORY_CONFIG)
-
-        q = ttnn.unsqueeze(ttnn.squeeze(q, 0), 2)
-        k = ttnn.unsqueeze(ttnn.squeeze(k, 0), 2)
-        v = ttnn.unsqueeze(ttnn.squeeze(v, 0), 2)
-
         cos, sin = pos_embeds
-        q = _apply_rope(q, cos, sin)
-        k = _apply_rope(k, cos, sin)
+        q = _apply_rope_decode(q, cos, sin)
+        k = _apply_rope_decode(k, cos, sin)
 
-        q = ttnn.unsqueeze(ttnn.squeeze(q, 2), 0)
-
-        k, v = cache.update(self._cache_id, k, v, 1)
+        k, v = cache.update(self._cache_id, k, v)
 
         # q shape: 1 batch_size num_local_heads               head_size
         # k shape:   batch_size num_local_kv_heads kv_seq_len head_size
@@ -718,26 +709,29 @@ class Cache:
 
         self.max_length_minus_one = max_length_minus_one
 
-    def update(
+    def prefill(
         self, cache_id: Hashable, k: ttnn.Tensor, v: ttnn.Tensor, unpadded_length: int
     ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
-        k = k[:, :, :unpadded_length, :]
-        v = v[:, :, :unpadded_length, :]
+        assert self._sequence_position == 0
 
-        if cache_id in self.k_cache:
-            k_cache = self.k_cache[cache_id]
-            v_cache = self.v_cache[cache_id]
+        self.k_cache[cache_id] = k[:, :, :unpadded_length, :]
+        self.v_cache[cache_id] = v[:, :, :unpadded_length, :]
 
-            assert self._sequence_position == k_cache.shape[2]
-            assert self._sequence_position == v_cache.shape[2]
+    def update(self, cache_id: Hashable, k: ttnn.Tensor, v: ttnn.Tensor) -> tuple[ttnn.Tensor, ttnn.Tensor]:
+        k = ttnn.to_memory_config(k, ttnn.DRAM_MEMORY_CONFIG)
+        v = ttnn.to_memory_config(v, ttnn.DRAM_MEMORY_CONFIG)
 
-            k = self.k_cache[cache_id] = ttnn.concat([k_cache, k], dim=2)
-            v = self.v_cache[cache_id] = ttnn.concat([v_cache, v], dim=2)
-        else:
-            assert self._sequence_position == 0
+        k = ttnn.unsqueeze(ttnn.squeeze(k, 0), 2)
+        v = ttnn.unsqueeze(ttnn.squeeze(v, 0), 2)
 
-            self.k_cache[cache_id] = k
-            self.v_cache[cache_id] = v
+        k_cache = self.k_cache[cache_id]
+        v_cache = self.v_cache[cache_id]
+
+        assert self._sequence_position == k_cache.shape[2]
+        assert self._sequence_position == v_cache.shape[2]
+
+        k = self.k_cache[cache_id] = ttnn.concat([k_cache, k], dim=2)
+        v = self.v_cache[cache_id] = ttnn.concat([v_cache, v], dim=2)
 
         return k, v
 
