@@ -132,10 +132,10 @@ class Transformer(Module):
         # There should be no need for a mask when start_pos is zero, but
         # `ttnn.transformer.scaled_dot_product_attention` produces incorrect results when the
         # sequence length is not a multiple of the tile size.
-        if mask is None and seq_len > 1 and (start_pos != 0 or seq_len % 32 != 0):
+        if mask is None and start_pos == 0 and seq_len % 32 != 0:
             mask = ttnn.ones(
                 [batch_size, start_pos + seq_len],
-                dtype=ttnn.bfloat8_b,  # `bfloat4_b` is not supported by `ttnn.pad`
+                dtype=ttnn.bfloat16,
                 layout=ttnn.TILE_LAYOUT,
                 device=device,
             )
@@ -146,7 +146,7 @@ class Transformer(Module):
 
         # padding is only required by `ttnn.transformer.scaled_dot_product_attention` when
         # using an attention mask
-        if mask is None or seq_len == 1:
+        if mask is None or start_pos != 0:
             padded_seq_len = seq_len
         elif seq_len < MAX_CHUNK_SIZE:
             # make sequence length a multiple of tile size
@@ -168,12 +168,6 @@ class Transformer(Module):
             if start_pos == 0:
                 bias_padding = -attn_bias.shape[3] % 32
                 attn_bias = ttnn.pad(attn_bias, [(0, padded_seq_len - seq_len), (0, bias_padding)], value=-math.inf)
-            else:
-                # `ttnn.transformer.scaled_dot_product_attention_decod` wants one mask per local head
-                num_local_heads = self.layers[0].attn._num_local_heads
-                attn_bias = ttnn.repeat(attn_bias, [1, 1, num_local_heads, 1])
-
-            attn_bias = ttnn.clone(attn_bias, dtype=ttnn.bfloat4_b)
         else:
             attn_bias = None
 
@@ -248,7 +242,7 @@ class Transformer(Module):
         cos, sin = self.pos_embedding.forward(positions, dtype=dtype)
 
         finished = torch.zeros([batch_size], dtype=torch.bool)
-        cache = Cache() if use_cache else None
+        cache = Cache(device=device, max_length_minus_one=max_length - 1) if use_cache else None
         prev_pos = 0
 
         logits = [] if return_logits else None
@@ -465,19 +459,20 @@ class Attention(Module):
         cache: Cache | None = None,
         unpadded_length: int | None = None,
     ) -> ttnn.Tensor:
-        _, padded_q_seq_len, _ = x.shape
+        batch_size, padded_q_seq_len, _ = x.shape
 
-        if cache is not None and cache.sequence_position != 0 and padded_q_seq_len == 1:
+        if cache is not None and cache.sequence_position != 0 and padded_q_seq_len != 1:
+            msg = "sequence length must be 1 with a populated cache"
+            raise ValueError(msg)
+
+        if cache is not None and cache.sequence_position != 0:
             return self.forward_decode(x, attn_bias=attn_bias, pos_embeds=pos_embeds, cache=cache)
 
-        # If the query length is one, all past tokens can be attended to, so there is no need for a
-        # causal mask. Also `ttnn.transformer.scaled_dot_product_attention` does not support setting
-        # `is_causal` to `True` if the query and key/value lengths differ.
-        is_causal_flag = attn_bias is None and unpadded_length > 1
-
-        if cache is not None and cache.sequence_position != 0 and is_causal_flag:
-            msg = "attn_bias must be provided with a populated cache and sequence length greater than 1"
-            raise ValueError(msg)
+        if attn_bias is not None:
+            assert attn_bias.shape in (
+                (1, 1, padded_q_seq_len, padded_q_seq_len),
+                (batch_size, 1, padded_q_seq_len, padded_q_seq_len),
+            )
 
         x = self.qkv_proj.forward(x)
 
@@ -513,8 +508,8 @@ class Attention(Module):
             k,
             v,
             attn_mask=attn_bias,
-            is_causal=is_causal_flag,
-            program_config=self._sdpa_program_config(padded_q_seq_len, padded_kv_seq_len),
+            is_causal=attn_bias is None,
+            program_config=self._sdpa_program_config(padded_q_seq_len, padded_q_seq_len),
             compute_kernel_config=self._sdpa_compute_kernel_config,
         )
         del q, k, v
@@ -542,6 +537,13 @@ class Attention(Module):
         batch_size, seq_len, _embed_size = x.shape
         assert seq_len == 1
 
+        if attn_bias is not None:
+            assert attn_bias.shape in (
+                (1, 1, seq_len, cache.sequence_position + seq_len),
+                (batch_size, 1, seq_len, cache.sequence_position + seq_len),
+            )
+            attn_bias = ttnn.repeat(attn_bias, [1, 1, self._num_local_heads, 1])
+
         x = self.qkv_proj.forward(x)
 
         q, k, v = ttnn.experimental.nlp_create_qkv_heads_decode(
@@ -553,7 +555,6 @@ class Attention(Module):
         # k shape: 1 batch_size num_local_kv_heads head_size
         # v shape: 1 batch_size num_local_kv_heads head_size
 
-        q = ttnn.to_memory_config(q, ttnn.DRAM_MEMORY_CONFIG)
         k = ttnn.to_memory_config(k, ttnn.DRAM_MEMORY_CONFIG)
         v = ttnn.to_memory_config(v, ttnn.DRAM_MEMORY_CONFIG)
 
@@ -573,14 +574,12 @@ class Attention(Module):
         # k shape:   batch_size num_local_kv_heads kv_seq_len head_size
         # v shape:   batch_size num_local_kv_heads kv_seq_len head_size
 
-        current_pos = ttnn.full([batch_size], cache.sequence_position, dtype=ttnn.int32, device=self._device)
-
         # TODO: this is a bit inaccurate, leading the tests to fail
         x = ttnn.transformer.scaled_dot_product_attention_decode(
             q,
             k,
             v,
-            cur_pos_tensor=current_pos,
+            cur_pos=[cache.sequence_position] * batch_size,
             attn_mask=attn_bias,
             is_causal=attn_bias is None,
             program_config=self._sdpa_program_config(1, k.shape[2]),
@@ -710,11 +709,14 @@ class TransformerRmsNorm(Module):
 
 
 class Cache:
-    def __init__(self) -> None:
+    def __init__(self, *, device: ttnn.MeshDevice, max_length_minus_one: int) -> None:
         self.k_cache = {}
         self.v_cache = {}
 
         self._sequence_position = 0
+        self._device = device
+
+        self.max_length_minus_one = max_length_minus_one
 
     def update(
         self, cache_id: Hashable, k: ttnn.Tensor, v: ttnn.Tensor, unpadded_length: int
@@ -766,10 +768,11 @@ def _apply_rope_decode(x: ttnn.Tensor, cos: ttnn.Tensor, sin: ttnn.Tensor) -> tt
     assert cos.shape in ((n, seq, dim), (1, seq, dim))
     assert cos.shape == sin.shape
 
-    # interleaved format leads to lower PCC
-    # return x * cos + ttnn.alt_complex_rotate90(x) * sin
-    # return x * ttnn.unsqueeze(cos, 2) + _rotate_half(x) * ttnn.unsqueeze(sin, 2)
-    return x
+    memory_config = x.memory_config()  # TODO
+
+    x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
+    x = x * ttnn.unsqueeze(cos, 0) + _rotate_half(x) * ttnn.unsqueeze(sin, 0)
+    return ttnn.to_memory_config(x, memory_config)
 
 
 def _rotate_half(x: ttnn.Tensor) -> ttnn.Tensor:
