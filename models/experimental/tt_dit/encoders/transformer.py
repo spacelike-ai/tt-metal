@@ -250,7 +250,7 @@ class Transformer(Module):
         for pos in range(input_length, max_length):
             current_logits = self.forward(
                 tokens=tokens[:, prev_pos:],
-                mask=mask[:, :pos] if mask is not None else None,
+                mask=mask[:, :pos] if prev_pos == 0 and mask is not None else mask,
                 pos_embeds=(cos[:, prev_pos:pos], sin[:, prev_pos:pos]),
                 cache=cache,
             )[:, -1:, :]
@@ -539,8 +539,8 @@ class Attention(Module):
 
         if attn_bias is not None:
             assert attn_bias.shape in (
-                (1, 1, seq_len, cache.sequence_position + seq_len),
-                (batch_size, 1, seq_len, cache.sequence_position + seq_len),
+                (1, 1, seq_len, cache.max_length_minus_one),
+                (batch_size, 1, seq_len, cache.max_length_minus_one),
             )
             attn_bias = ttnn.repeat(attn_bias, [1, 1, self._num_local_heads, 1])
 
@@ -560,6 +560,11 @@ class Attention(Module):
         k = _apply_rope_decode(k, cos, sin)
 
         k, v = cache.update(self._cache_id, k, v)
+
+        # TODO: remove this!
+        k = k[:, :, : cache.sequence_position + 1, :]
+        v = v[:, :, : cache.sequence_position + 1, :]
+        attn_bias = attn_bias[:, :, :, : cache.sequence_position + 1] if attn_bias is not None else None
 
         # q shape: 1 batch_size num_local_heads               head_size
         # k shape:   batch_size num_local_kv_heads kv_seq_len head_size
@@ -732,6 +737,9 @@ class Cache:
 
         k = self.k_cache[cache_id] = ttnn.concat([k_cache, k], dim=2)
         v = self.v_cache[cache_id] = ttnn.concat([v_cache, v], dim=2)
+
+        k = ttnn.pad(k, [(0, self.max_length_minus_one - k.shape[2]), (0, 0)], value=0)
+        v = ttnn.pad(v, [(0, self.max_length_minus_one - v.shape[2]), (0, 0)], value=0)
 
         return k, v
 
