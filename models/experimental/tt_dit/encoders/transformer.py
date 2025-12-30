@@ -26,7 +26,6 @@ if TYPE_CHECKING:
     from collections.abc import Hashable, Mapping, Sequence
 
 MAX_CHUNK_SIZE = 128
-OPTIMIZED_DECODE_MODE = True
 
 
 @dataclass
@@ -147,7 +146,7 @@ class Transformer(Module):
 
         # padding is only required by `ttnn.transformer.scaled_dot_product_attention` when
         # using an attention mask
-        if mask is None or (OPTIMIZED_DECODE_MODE and seq_len == 1):
+        if mask is None or seq_len == 1:
             padded_seq_len = seq_len
         elif seq_len < MAX_CHUNK_SIZE:
             # make sequence length a multiple of tile size
@@ -166,7 +165,7 @@ class Transformer(Module):
 
             attn_bias = _prepare_attn_bias(mask, query_length=seq_len)
 
-            if start_pos == 0 or not OPTIMIZED_DECODE_MODE:
+            if start_pos == 0:
                 bias_padding = -attn_bias.shape[3] % 32
                 attn_bias = ttnn.pad(attn_bias, [(0, padded_seq_len - seq_len), (0, bias_padding)], value=-math.inf)
             else:
@@ -468,7 +467,7 @@ class Attention(Module):
     ) -> ttnn.Tensor:
         _, padded_q_seq_len, _ = x.shape
 
-        if OPTIMIZED_DECODE_MODE and cache is not None and cache.sequence_position != 0 and padded_q_seq_len == 1:
+        if cache is not None and cache.sequence_position != 0 and padded_q_seq_len == 1:
             return self.forward_decode(x, attn_bias=attn_bias, pos_embeds=pos_embeds, cache=cache)
 
         # If the query length is one, all past tokens can be attended to, so there is no need for a
