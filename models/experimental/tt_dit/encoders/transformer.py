@@ -141,7 +141,7 @@ class Transformer(Module):
             )
 
         if pos_embeds is None:
-            pos = _make_positions(start=start_pos, sequence_length=seq_len, mask=mask, device=device)
+            pos = _make_positions(start=start_pos, sequence_length=seq_len, device=device)
             pos_embeds = self.pos_embedding.forward(pos, dtype=dtype)
 
         # padding is only required by `ttnn.transformer.scaled_dot_product_attention` when
@@ -237,7 +237,7 @@ class Transformer(Module):
 
         eos_token_tensor = torch.tensor(eos_tokens, dtype=torch.uint32) if eos_tokens else None
 
-        positions = _make_positions(start=0, sequence_length=max_length - 1, mask=mask, device=device)
+        positions = _make_positions(start=0, sequence_length=max_length - 1, device=device)
         cos, sin = self.pos_embedding.forward(positions, dtype=dtype)
 
         finished = torch.zeros([batch_size], dtype=torch.bool)
@@ -799,26 +799,16 @@ def _prepare_attn_bias(mask: ttnn.Tensor, *, query_length: int, query_pos: int) 
     return (mask - 1.0) * math.inf
 
 
-def _make_positions(
-    *, start: int, sequence_length: int, mask: torch.Tensor | None, device: ttnn.MeshDevice
-) -> ttnn.Tensor:
-    if mask is None:
-        pos = ttnn.arange(start, start + sequence_length, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=device)
-        return ttnn.unsqueeze(pos, 0)
+def _make_positions(*, start: int, sequence_length: int, device: ttnn.MeshDevice) -> ttnn.Tensor:
+    pos = ttnn.arange(start, start + sequence_length, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=device)
+    return ttnn.unsqueeze(pos, 0)
 
-    _, seq = mask.shape
-    assert seq == start + sequence_length
-
-    # Since attention is invariant under position shifts, this is only needed if the mask is not
-    # contiguous, i.e., has masked tokens in the middle. For continuous masks we could just return a
-    # fixed sequence as above.
-    # TODO: why is this currently not true?
-    # TODO: why do values of masked tokens matter?
-    mask = ttnn.clone(mask, dtype=ttnn.float32)
-    # equivalent to: pos = mask.cumsum(1) - 1; pos.masked_fill_(mask == 0, 1)
-    pos = (ttnn.cumsum(mask, 1) - 2) * mask + 1
-
-    return pos[:, start:]
+    # If the attention mask had holes, i.e., contained zeros between ones, this would have to be
+    # done instead:
+    # mask = ttnn.clone(mask, dtype=ttnn.float32)
+    # # equivalent to: pos = mask.cumsum(1) - 1; pos.masked_fill_(mask == 0, 1)
+    # pos = (ttnn.cumsum(mask, 1) - 2) * mask + 1
+    # return pos[:, start:]
 
 
 def _sample(prob: torch.Tensor, *, top_k: int | None = None, top_p: float = 1, num_samples: int = 1) -> torch.Tensor:
