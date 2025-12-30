@@ -559,7 +559,8 @@ class Attention(Module):
         # k shape:   batch_size num_local_kv_heads kv_seq_len head_size
         # v shape:   batch_size num_local_kv_heads kv_seq_len head_size
 
-        # TODO: this is a bit inaccurate, leading the tests to fail
+        # TODO: This is a bit inaccurate when supplied with a bias. When replaced with a manual SDPA
+        # implementation, the bias works fine.
         x = ttnn.transformer.scaled_dot_product_attention_decode(
             q,
             k,
