@@ -395,10 +395,6 @@ class Attention(Module):
             k = k.unflatten(0, [self._group_count, 1, self._head_size])
             v = v.unflatten(0, [self._group_count, 1, self._head_size])
 
-            # convert to interleaved ROPE format
-            # q = q.unflatten(2, [2, -1]).transpose(2, 3).flatten(2, 3)
-            # k = k.unflatten(2, [2, -1]).transpose(2, 3).flatten(2, 3)
-
             # pad group size
             q = _pad(q, self._group_size_padding, dim=1)
 
@@ -580,9 +576,9 @@ class Attention(Module):
             orientation=ttnn.ShardOrientation.ROW_MAJOR,
             use_height_and_width_as_shard_shape=True,
         )
-        x = ttnn.to_memory_config(x, memory_config=memory_config)
+        x = ttnn.to_memory_config(x, memory_config)
         x = ttnn.experimental.nlp_concat_heads_decode(x, num_heads=self._num_local_heads)
-        x = ttnn.to_memory_config(x, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
 
         if self._tp_axis is not None:
             x = self._ccl_manager.all_gather_persistent_buffer(x, dim=-1, mesh_axis=self._tp_axis, use_hyperparams=True)
@@ -655,13 +651,9 @@ class TransformerRmsNorm(Module):
     def __init__(self, num_channels: int, *, eps: float, ctx: TransformerContext) -> None:
         super().__init__()
 
-        # https://github.com/tenstorrent/tt-metal/issues/31216
-        self._use_rms_workaround = num_channels % 32 != 0
-
         # Somewhere between 3584 and 5120 channels is a threshold where `ttnn.rms_norm` starts to
         # trigger L1 OOM.
-        self._use_rms_workaround |= num_channels >= 5120
-        self._use_rms_workaround = True  # TODO: remove?
+        self._use_rms_workaround = num_channels >= 5120
 
         if self._use_rms_workaround:
             self.weight = Parameter(total_shape=[num_channels], device=ctx.device)
@@ -760,8 +752,6 @@ def _apply_rope(x: ttnn.Tensor, cos: ttnn.Tensor, sin: ttnn.Tensor) -> ttnn.Tens
     assert cos.shape in ((n, seq, dim), (1, seq, dim))
     assert cos.shape == sin.shape
 
-    # interleaved format leads to lower PCC
-    # return x * cos + ttnn.alt_complex_rotate90(x) * sin
     return x * ttnn.unsqueeze(cos, 1) + _rotate_half(x) * ttnn.unsqueeze(sin, 1)
 
 
@@ -773,8 +763,7 @@ def _apply_rope_decode(x: ttnn.Tensor, cos: ttnn.Tensor, sin: ttnn.Tensor) -> tt
     assert cos.shape in ((n, seq, dim), (1, seq, dim))
     assert cos.shape == sin.shape
 
-    memory_config = x.memory_config()  # TODO
-
+    memory_config = x.memory_config()
     x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
     x = x * ttnn.unsqueeze(cos, 0) + _rotate_half(x) * ttnn.unsqueeze(sin, 0)
     return ttnn.to_memory_config(x, memory_config)
