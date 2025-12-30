@@ -163,7 +163,7 @@ class Transformer(Module):
             if start_pos == 0:
                 assert mask.shape[1] == seq_len
 
-            attn_bias = _prepare_attn_bias(mask, query_length=seq_len)
+            attn_bias = _prepare_attn_bias(mask, query_length=seq_len, query_pos=start_pos)
 
             if start_pos == 0:
                 bias_padding = -attn_bias.shape[3] % 32
@@ -555,11 +555,6 @@ class Attention(Module):
 
         k, v = cache.update(self._cache_id, k, v)
 
-        # TODO: remove this!
-        k = k[:, :, : cache.sequence_position + 1, :]
-        v = v[:, :, : cache.sequence_position + 1, :]
-        attn_bias = attn_bias[:, :, :, : cache.sequence_position + 1] if attn_bias is not None else None
-
         # q shape: 1 batch_size num_local_heads               head_size
         # k shape:   batch_size num_local_kv_heads kv_seq_len head_size
         # v shape:   batch_size num_local_kv_heads kv_seq_len head_size
@@ -790,7 +785,7 @@ def _rotate_half(x: ttnn.Tensor) -> ttnn.Tensor:
     return ttnn.concat([ttnn.neg(x2), x1], dim=-1)
 
 
-def _prepare_attn_bias(mask: ttnn.Tensor, *, query_length: int) -> ttnn.Tensor:
+def _prepare_attn_bias(mask: ttnn.Tensor, *, query_length: int, query_pos: int) -> ttnn.Tensor:
     batch_size, kv_length = mask.shape
 
     # convert to causal attention mask
@@ -798,7 +793,7 @@ def _prepare_attn_bias(mask: ttnn.Tensor, *, query_length: int) -> ttnn.Tensor:
     mask = mask.reshape([batch_size, 1, 1, kv_length])
     mask = ttnn.to_layout(mask, ttnn.TILE_LAYOUT)
     mask = ttnn.expand(mask, [batch_size, 1, query_length, kv_length])
-    mask = ttnn.tril(mask, diagonal=kv_length - query_length)
+    mask = ttnn.tril(mask, diagonal=query_pos)
 
     return (mask - 1.0) * math.inf
 
