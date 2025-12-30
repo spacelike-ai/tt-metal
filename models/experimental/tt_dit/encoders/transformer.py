@@ -186,7 +186,6 @@ class Transformer(Module):
                 attn_bias=attn_bias,
                 pos_embeds=pos_embeds,
                 cache=cache,
-                unpadded_length=seq_len,
             )
 
         if cache is not None:
@@ -318,13 +317,10 @@ class DecoderLayer(Module):
         attn_bias: ttnn.Tensor | None = None,
         pos_embeds: tuple[ttnn.Tensor, ttnn.Tensor],
         cache: Cache | None = None,
-        unpadded_length: int,
     ) -> ttnn.Tensor:
         residual = x
         x = self.attn_norm.forward(x)
-        x = self.attn.forward(
-            x, attn_bias=attn_bias, pos_embeds=pos_embeds, cache=cache, unpadded_length=unpadded_length
-        )
+        x = self.attn.forward(x, attn_bias=attn_bias, pos_embeds=pos_embeds, cache=cache)
         x = x + residual
 
         residual = x
@@ -457,7 +453,6 @@ class Attention(Module):
         attn_bias: ttnn.Tensor | None,
         pos_embeds: tuple[ttnn.Tensor, ttnn.Tensor],
         cache: Cache | None = None,
-        unpadded_length: int | None = None,
     ) -> ttnn.Tensor:
         batch_size, padded_q_seq_len, _ = x.shape
 
@@ -492,8 +487,7 @@ class Attention(Module):
         k = _apply_rope(k, cos, sin)
 
         if cache is not None:
-            assert unpadded_length is not None
-            cache.prefill(self._cache_id, k, v, unpadded_length)
+            cache.prefill(self._cache_id, k, v)
 
         kv_seq_len = k.shape[2]
         if attn_bias is not None:
@@ -714,34 +708,47 @@ class Cache:
 
         self.max_length_minus_one = max_length_minus_one
 
-    def prefill(
-        self, cache_id: Hashable, k: ttnn.Tensor, v: ttnn.Tensor, unpadded_length: int
-    ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
+    def prefill(self, cache_id: Hashable, k: ttnn.Tensor, v: ttnn.Tensor) -> None:
+        batch_size, local_kv_heads, _seq_len, head_dim = k.shape
+
         assert self._sequence_position == 0
 
-        self.k_cache[cache_id] = k[:, :, :unpadded_length, :]
-        self.v_cache[cache_id] = v[:, :, :unpadded_length, :]
+        k_cache = ttnn.zeros(
+            [batch_size, local_kv_heads, self.max_length_minus_one, head_dim],
+            dtype=k.dtype,
+            layout=ttnn.TILE_LAYOUT,
+            device=self._device,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+
+        v_cache = ttnn.zeros(
+            [batch_size, local_kv_heads, self.max_length_minus_one, head_dim],
+            dtype=v.dtype,
+            layout=ttnn.TILE_LAYOUT,
+            device=self._device,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+
+        self.k_cache[cache_id] = k_cache
+        self.v_cache[cache_id] = v_cache
+
+        for batch_idx in range(batch_size):
+            ttnn.fill_cache(k_cache, k[batch_idx : batch_idx + 1], batch_idx)
+            ttnn.fill_cache(v_cache, v[batch_idx : batch_idx + 1], batch_idx)
 
     def update(self, cache_id: Hashable, k: ttnn.Tensor, v: ttnn.Tensor) -> tuple[ttnn.Tensor, ttnn.Tensor]:
-        k = ttnn.to_memory_config(k, ttnn.DRAM_MEMORY_CONFIG)
-        v = ttnn.to_memory_config(v, ttnn.DRAM_MEMORY_CONFIG)
-
-        k = ttnn.unsqueeze(ttnn.squeeze(k, 0), 2)
-        v = ttnn.unsqueeze(ttnn.squeeze(v, 0), 2)
+        one, batch_size, _local_kv_heads, _head_dim = k.shape
+        assert one == 1
 
         k_cache = self.k_cache[cache_id]
         v_cache = self.v_cache[cache_id]
 
-        assert self._sequence_position == k_cache.shape[2]
-        assert self._sequence_position == v_cache.shape[2]
+        pos = [self._sequence_position] * batch_size
 
-        k = self.k_cache[cache_id] = ttnn.concat([k_cache, k], dim=2)
-        v = self.v_cache[cache_id] = ttnn.concat([v_cache, v], dim=2)
+        ttnn.experimental.paged_update_cache(k_cache, k, update_idxs=pos)
+        ttnn.experimental.paged_update_cache(v_cache, v, update_idxs=pos)
 
-        k = ttnn.pad(k, [(0, self.max_length_minus_one - k.shape[2]), (0, 0)], value=0)
-        v = ttnn.pad(v, [(0, self.max_length_minus_one - v.shape[2]), (0, 0)], value=0)
-
-        return k, v
+        return k_cache, v_cache
 
     def advance(self, distance: int) -> None:
         self._sequence_position += distance
