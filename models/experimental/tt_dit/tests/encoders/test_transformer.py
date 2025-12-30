@@ -252,7 +252,8 @@ def test_guided_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, ma
     generation_config.output_logits = True
 
     print("running torch model...")
-    out_ref = torch_model.generate(tokens, attention_mask=mask)
+    torch_mask_input = mask if mask is not None else torch.ones_like(tokens)
+    out_ref = torch_model.generate(tokens, attention_mask=torch_mask_input)
     assert isinstance(out_ref, transformers.generation.utils.GenerateOutput)
 
     tokens_out = out_ref.sequences
@@ -390,8 +391,9 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, batch_size: int, skip_laye
     tt_prompt_embeds_torch = tensor.to_torch(tt_prompt_embeds)
 
     logger.info("running torch model...")
+    torch_mask_input = mask if mask is not None else torch.ones_like(tokens)
     with torch.no_grad():
-        out = torch_model.forward(tokens, attention_mask=mask, output_hidden_states=True)
+        out = torch_model.forward(tokens, attention_mask=torch_mask_input, output_hidden_states=True)
         prompt_embeds = out.hidden_states[-1]
 
     if mask is not None:
