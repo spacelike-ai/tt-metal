@@ -146,14 +146,7 @@ class Transformer(Module):
 
         # padding is only required by `ttnn.transformer.scaled_dot_product_attention` when
         # using an attention mask
-        if mask is None or start_pos != 0:
-            padded_seq_len = seq_len
-        elif seq_len < MAX_CHUNK_SIZE:
-            # make sequence length a multiple of tile size
-            padded_seq_len = -(-seq_len // 32) * 32
-        else:
-            # make sequence length a multiple of MAX_CHUNK_SIZE
-            padded_seq_len = -(-seq_len // MAX_CHUNK_SIZE) * MAX_CHUNK_SIZE
+        padded_seq_len = seq_len if mask is None or start_pos != 0 else _padded_sequence_length(seq_len)
 
         tokens = ttnn.pad(tokens, [(0, padded_seq_len - seq_len)], value=0)
         pos_embeds = tuple(ttnn.pad(x, [(0, padded_seq_len - seq_len), (0, 0)], value=0) for x in pos_embeds)
@@ -228,9 +221,11 @@ class Transformer(Module):
         device = tokens.device()
         dtype = self.token_embedding.weight.dtype
 
+        padded_seq_len = _padded_sequence_length(max_length - 1)
+
         if mask is not None:
             assert mask.shape == tokens.shape
-            mask = ttnn.pad(mask, [(0, max_length - input_length - 1)], value=1)
+            mask = ttnn.pad(mask, [(0, padded_seq_len - input_length)], value=1)
 
         if eos_tokens is not None:
             if isinstance(eos_tokens, int):
@@ -240,11 +235,11 @@ class Transformer(Module):
 
         eos_token_tensor = torch.tensor(eos_tokens, dtype=torch.uint32) if eos_tokens else None
 
-        positions = _make_positions(start=0, sequence_length=max_length - 1, device=device)
+        positions = _make_positions(start=0, sequence_length=padded_seq_len, device=device)
         cos, sin = self.pos_embedding.forward(positions, dtype=dtype)
 
         finished = torch.zeros([batch_size], dtype=torch.bool)
-        cache = Cache(device=device, max_length_minus_one=max_length - 1) if use_cache else None
+        cache = Cache(device=device, size=padded_seq_len) if use_cache else None
         prev_pos = 0
 
         logits = [] if return_logits else None
@@ -532,8 +527,8 @@ class Attention(Module):
 
         if attn_bias is not None:
             assert attn_bias.shape in (
-                (1, 1, seq_len, cache.max_length_minus_one),
-                (batch_size, 1, seq_len, cache.max_length_minus_one),
+                (1, 1, seq_len, cache.size),
+                (batch_size, 1, seq_len, cache.size),
             )
             attn_bias = ttnn.repeat(attn_bias, [1, 1, self._num_local_heads, 1])
 
@@ -687,14 +682,14 @@ class TransformerRmsNorm(Module):
 
 
 class Cache:
-    def __init__(self, *, device: ttnn.MeshDevice, max_length_minus_one: int) -> None:
+    def __init__(self, *, device: ttnn.MeshDevice, size: int) -> None:
         self.k_cache = {}
         self.v_cache = {}
 
         self._sequence_position = 0
         self._device = device
 
-        self.max_length_minus_one = max_length_minus_one
+        self.size = size
 
     def prefill(self, cache_id: Hashable, k: ttnn.Tensor, v: ttnn.Tensor) -> None:
         batch_size, local_kv_heads, _seq_len, head_dim = k.shape
@@ -702,7 +697,7 @@ class Cache:
         assert self._sequence_position == 0
 
         k_cache = ttnn.zeros(
-            [batch_size, local_kv_heads, self.max_length_minus_one, head_dim],
+            [batch_size, local_kv_heads, self.size, head_dim],
             dtype=k.dtype,
             layout=ttnn.TILE_LAYOUT,
             device=self._device,
@@ -710,7 +705,7 @@ class Cache:
         )
 
         v_cache = ttnn.zeros(
-            [batch_size, local_kv_heads, self.max_length_minus_one, head_dim],
+            [batch_size, local_kv_heads, self.size, head_dim],
             dtype=v.dtype,
             layout=ttnn.TILE_LAYOUT,
             device=self._device,
@@ -896,6 +891,15 @@ class StateConversion:
             warnings.warn(f"unprocessed keys remain: {', '.join(in_.keys())}", stacklevel=2)
 
         return {**in_, **out}
+
+
+def _padded_sequence_length(sequence_length: int) -> int:
+    if sequence_length < MAX_CHUNK_SIZE:
+        # make sequence length a multiple of tile size
+        return -(-sequence_length // 32) * 32
+
+    # make sequence length a multiple of MAX_CHUNK_SIZE
+    return -(-sequence_length // MAX_CHUNK_SIZE) * MAX_CHUNK_SIZE
 
 
 # copied from tt_transformers
