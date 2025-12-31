@@ -211,11 +211,10 @@ class Transformer(Module):
         return_logits: bool = False,
         guide: torch.Tensor | None = None,
     ) -> GenerationOutput:
-        # The original Llama implementation starts generation after the shortest
-        # input, thereby overwriting any padding tokens that are on the right,
-        # resuing that space. We use a slightly simpler approach and start
-        # generation at the end of the inputs, which is also what the transformers
-        # library does.
+        # The original Llama implementation starts generation after the shortest input, thereby
+        # overwriting any padding tokens that are on the right, resuing that space. We use a
+        # slightly simpler approach and start generation after the longest input, which is also what
+        # the transformers library does.
 
         batch_size, input_length = tokens.shape
         device = tokens.device()
