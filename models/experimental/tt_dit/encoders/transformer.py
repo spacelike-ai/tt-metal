@@ -15,7 +15,7 @@ import ttnn
 
 from ..layers.embeddings import Embedding
 from ..layers.linear import ColParallelLinear, RowParallelLinear
-from ..layers.module import Module, ModuleList, Parameter
+from ..layers.module import Module, ModuleList
 from ..layers.normalization import RMSNorm
 from ..parallel.config import EncoderParallelConfig
 from ..parallel.manager import CCLManager
@@ -654,19 +654,12 @@ class TransformerRmsNorm(Module):
     def __init__(self, num_channels: int, *, eps: float, ctx: TransformerContext) -> None:
         super().__init__()
 
-        # Somewhere between 3584 and 5120 channels is a threshold where `ttnn.rms_norm` starts to
-        # trigger L1 OOM.
-        self._use_rms_workaround = num_channels >= 5120
-
-        if self._use_rms_workaround:
-            self.weight = Parameter(total_shape=[num_channels], device=ctx.device)
-        else:
-            self.inner = RMSNorm(
-                num_channels,
-                norm_eps=eps,
-                bias=False,
-                mesh_device=ctx.device,
-            )
+        self.inner = RMSNorm(
+            num_channels,
+            norm_eps=eps,
+            bias=False,
+            mesh_device=ctx.device,
+        )
 
         self.eps = eps
 
@@ -677,16 +670,20 @@ class TransformerRmsNorm(Module):
         )
 
     def _prepare_torch_state(self, state: dict[str, torch.Tensor]) -> None:
-        if "weight" in state and not self._use_rms_workaround:
-            state["inner.weight"] = state.pop("weight")
+        state["inner.weight"] = state.pop("weight")
 
     def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        if not self._use_rms_workaround:
-            return self.inner.forward(x, compute_kernel_config=self._compute_kernel_config)
+        dtype = x.dtype
+        if dtype not in (ttnn.bfloat4_b, ttnn.bfloat8_b):
+            # reduce L1 memory requirements
+            x = ttnn.clone(x, dtype=ttnn.bfloat8_b)
 
-        norm = ttnn.mean(ttnn.pow(x, 2), dim=-1, keepdim=True)
-        norm = ttnn.rsqrt(norm + self.eps)
-        return x * (norm * self.weight.data)
+        x = self.inner.forward(x, compute_kernel_config=self._compute_kernel_config)
+
+        if x.dtype != dtype:
+            x = ttnn.clone(x, dtype=dtype)
+
+        return x
 
 
 class Cache:

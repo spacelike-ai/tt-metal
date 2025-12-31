@@ -293,12 +293,7 @@ def test_guided_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, ma
         logits = logits.masked_select(padded_mask.unsqueeze(-1)).view([-1, d])
         tt_logits = tt_logits.masked_select(padded_mask.unsqueeze(-1)).view([-1, d])
 
-    if masked:
-        # Supplying a mask to `ttnn.transformer.scaled_dot_product_attention_decode` decreases
-        # accuracy. It is not clear why.
-        assert_quality(logits, tt_logits, ccc=0.9960, relative_rmse=0.09)
-    else:
-        assert_quality(logits, tt_logits, ccc=0.9991, relative_rmse=0.05)
+    assert_quality(logits, tt_logits, ccc=0.9980, relative_rmse=0.063)
 
     assert tt_tokens_out.eq(tokens_out).all()
 
