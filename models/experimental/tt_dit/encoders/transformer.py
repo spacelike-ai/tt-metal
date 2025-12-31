@@ -180,13 +180,16 @@ class Transformer(Module):
             # clone to move out of persistent buffer
             x = ttnn.clone(x)
 
-        for decoder_layer in self.layers:
+        for i, decoder_layer in enumerate(self.layers, start=1):
             x = decoder_layer.forward(
                 x,
                 attn_bias=attn_bias,
                 pos_embeds=pos_embeds,
                 cache=cache,
             )
+
+            if i % 10 == 0:
+                ttnn.ReadDeviceProfiler(self._device)
 
         if cache is not None:
             cache.advance(seq_len)
