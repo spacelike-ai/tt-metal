@@ -127,7 +127,7 @@ class Transformer(Module):
         device = tokens.device()
         dtype = self.token_embedding.weight.dtype
 
-        start_pos = cache.sequence_position if cache is not None else 0
+        start_pos = cache.position if cache is not None else 0
 
         # There should be no need for a mask when start_pos is zero, but
         # `ttnn.transformer.scaled_dot_product_attention` produces incorrect results when the
@@ -450,11 +450,11 @@ class Attention(Module):
     ) -> ttnn.Tensor:
         batch_size, padded_q_seq_len, _ = x.shape
 
-        if cache is not None and cache.sequence_position != 0 and padded_q_seq_len != 1:
+        if cache is not None and cache.position != 0 and padded_q_seq_len != 1:
             msg = "sequence length must be 1 with a populated cache"
             raise ValueError(msg)
 
-        if cache is not None and cache.sequence_position != 0:
+        if cache is not None and cache.position != 0:
             return self.forward_decode(x, attn_bias=attn_bias, pos_embeds=pos_embeds, cache=cache)
 
         if attn_bias is not None:
@@ -559,7 +559,7 @@ class Attention(Module):
             q,
             k,
             v,
-            cur_pos=[cache.sequence_position] * batch_size,
+            cur_pos=[cache.position] * batch_size,
             attn_mask=attn_bias,
             is_causal=attn_bias is None,
             program_config=self._sdpa_program_config(seq_len, k.shape[2]),
@@ -686,7 +686,7 @@ class Cache:
         self.k_cache = {}
         self.v_cache = {}
 
-        self._sequence_position = 0
+        self._position = 0
         self._device = device
 
         self.size = size
@@ -694,7 +694,7 @@ class Cache:
     def prefill(self, cache_id: Hashable, k: ttnn.Tensor, v: ttnn.Tensor) -> None:
         batch_size, local_kv_heads, _seq_len, head_dim = k.shape
 
-        assert self._sequence_position == 0
+        assert self._position == 0
 
         k_cache = ttnn.zeros(
             [batch_size, local_kv_heads, self.size, head_dim],
@@ -726,7 +726,7 @@ class Cache:
         k_cache = self.k_cache[cache_id]
         v_cache = self.v_cache[cache_id]
 
-        pos = [self._sequence_position] * batch_size
+        pos = [self._position] * batch_size
 
         ttnn.experimental.paged_update_cache(k_cache, k, update_idxs=pos)
         ttnn.experimental.paged_update_cache(v_cache, v, update_idxs=pos)
@@ -734,11 +734,11 @@ class Cache:
         return k_cache, v_cache
 
     def advance(self, distance: int) -> None:
-        self._sequence_position += distance
+        self._position += distance
 
     @property
-    def sequence_position(self) -> int:
-        return self._sequence_position
+    def position(self) -> int:
+        return self._position
 
 
 def _apply_rope(x: ttnn.Tensor, cos: ttnn.Tensor, sin: ttnn.Tensor) -> ttnn.Tensor:
