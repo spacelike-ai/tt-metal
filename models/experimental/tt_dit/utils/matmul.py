@@ -142,6 +142,9 @@ def get_matmul_config(M, K, N, core_grid):
         grid_y = getattr(core_grid, "y", None)
         signature = (M, K, N, grid_x, grid_y)
         if signature not in _warned_matmul_signatures:
+            logger.warning(
+                f"No known best blocking for (M, K, N) = ({M}, {K}, {N}) on {grid_x}x{grid_y} core grid; using default {M_block_size}x{K_block_size}x{N_block_size}"
+            )
             _warned_matmul_signatures.add(signature)
     else:
         M_block_size, K_block_size, N_block_size = config_tuple
