@@ -123,7 +123,12 @@ class Transformer(Module):
         cache: Cache | None = None,
         skip_final_linear: bool = False,
     ) -> ttnn.Tensor:
-        batch_size, seq_len = tokens.shape
+        if cache is not None and cache.position != 0:
+            (batch_size,) = tokens.shape
+            seq_len = 1
+        else:
+            batch_size, seq_len = tokens.shape
+
         device = tokens.device()
         dtype = self.token_embedding.weight.dtype
 
@@ -245,18 +250,20 @@ class Transformer(Module):
 
         for pos in range(input_length, max_length):
             current_logits = self.forward(
-                tokens=tokens[:, prev_pos:],
+                tokens=tokens if prev_pos == 0 else tokens[:, -1],
                 mask=mask[:, :pos] if prev_pos == 0 and mask is not None else mask,
                 pos_embeds=(cos[:, prev_pos:pos], sin[:, prev_pos:pos]),
                 cache=cache,
-            )[:, -1:, :]
+            )
+            if prev_pos == 0:
+                current_logits = current_logits[:, -1]
 
             if guide is not None:
                 torch_new_tokens = guide[:, pos : pos + 1].float()
             else:
                 torch_current_logits = tensor.to_torch(current_logits).float()
-                torch_prob = torch.softmax(torch_current_logits / temperature, 2)
-                torch_new_tokens = _sample(torch_prob, top_k=top_k, top_p=top_p).squeeze(1)
+                torch_prob = torch.softmax(torch_current_logits / temperature, 1)
+                torch_new_tokens = _sample(torch_prob, top_k=top_k, top_p=top_p)
 
             new_tokens = tensor.from_torch(torch_new_tokens, dtype=tokens.dtype, device=device)
 
@@ -447,14 +454,10 @@ class Attention(Module):
         pos_embeds: tuple[ttnn.Tensor, ttnn.Tensor],
         cache: Cache | None = None,
     ) -> ttnn.Tensor:
-        batch_size, padded_q_seq_len, _ = x.shape
-
-        if cache is not None and cache.position != 0 and padded_q_seq_len != 1:
-            msg = "sequence length must be 1 with a populated cache"
-            raise ValueError(msg)
-
         if cache is not None and cache.position != 0:
             return self.forward_decode(x, attn_bias=attn_bias, pos_embeds=pos_embeds, cache=cache)
+
+        batch_size, padded_q_seq_len, _ = x.shape
 
         if attn_bias is not None:
             assert attn_bias.shape in (
@@ -521,8 +524,12 @@ class Attention(Module):
         pos_embeds: tuple[ttnn.Tensor, ttnn.Tensor],
         cache: Cache,
     ) -> ttnn.Tensor:
-        batch_size, seq_len, _embed_size = x.shape
-        assert seq_len == 1
+        if len(x.shape) != 2:
+            msg = "decode mode expects input shape of (batch_size, embed_size)"
+            raise ValueError(msg)
+
+        batch_size, _embed_size = x.shape
+        seq_len = 1
 
         if attn_bias is not None:
             assert attn_bias.shape in (
@@ -582,7 +589,7 @@ class Attention(Module):
 
         x = self.o_proj.forward(x)
 
-        x = x.reshape([32, 1, -1])[:batch_size]
+        x = ttnn.squeeze(ttnn.squeeze(x, 0), 0)[:batch_size]
 
         if self._tp_axis is not None:
             x = self._ccl_manager.all_gather_persistent_buffer(x, dim=-1, mesh_axis=self._tp_axis, use_hyperparams=True)
