@@ -29,6 +29,7 @@ class PromptEncoder:
     def __init__(
         self,
         *,
+        checkpoint_name: str,
         device: ttnn.MeshDevice,
         ccl_manager: CCLManager,
         parallel_config: EncoderParallelConfig,
@@ -38,13 +39,11 @@ class PromptEncoder:
         self._ccl_manager = ccl_manager
         self._parallel_config = parallel_config
 
-        self._tokenizer = transformers.LlamaTokenizerFast.from_pretrained(
-            "black-forest-labs/FLUX.2-dev", subfolder="tokenizer"
-        )
+        self._tokenizer = transformers.LlamaTokenizerFast.from_pretrained(checkpoint_name, subfolder="tokenizer")
         assert isinstance(self._tokenizer, transformers.LlamaTokenizerFast)
 
         if use_torch_encoder:
-            self._encoder = _load_torch_encoder()
+            self._encoder = _load_torch_encoder(checkpoint_name)
             return
 
         self._encoder = TransformerEncoder(
@@ -64,6 +63,9 @@ class PromptEncoder:
             ccl_manager=ccl_manager,
         )
 
+        def get_torch_state_dict() -> dict[str, torch.Tensor]:
+            return MISTRAL3_CONVERSION.convert(_load_torch_encoder(checkpoint_name).state_dict())
+
         cache.load_model(
             self._encoder,
             model_name="flux2",
@@ -71,7 +73,7 @@ class PromptEncoder:
             parallel_config=parallel_config,
             mesh_shape=tuple(device.shape),
             dtype="bf16",
-            get_torch_state_dict=lambda: MISTRAL3_CONVERSION.convert(_load_torch_encoder().state_dict()),
+            get_torch_state_dict=get_torch_state_dict,
         )
 
     def encode(
@@ -88,10 +90,8 @@ class PromptEncoder:
         )
 
 
-def _load_torch_encoder() -> transformers.Mistral3ForConditionalGeneration:
-    return transformers.Mistral3ForConditionalGeneration.from_pretrained(
-        "black-forest-labs/FLUX.2-dev", subfolder="text_encoder"
-    )
+def _load_torch_encoder(checkpoint_name: str) -> transformers.Mistral3ForConditionalGeneration:
+    return transformers.Mistral3ForConditionalGeneration.from_pretrained(checkpoint_name, subfolder="text_encoder")
 
 
 def _get_prompt_embeds(

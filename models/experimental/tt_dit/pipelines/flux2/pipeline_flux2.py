@@ -14,17 +14,17 @@ import torch
 import tqdm
 import ttnn
 from diffusers.image_processor import VaeImageProcessor
-from diffusers.models.autoencoders.autoencoder_kl_Flux2 import AutoencoderKLFlux2
+from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from loguru import logger
 
-from ...encoders.qwen25vl.encoder_pair import Qwen25VlTokenizerEncoderPair
-from ...models.transformers.transformer_Flux2 import Flux2Transformer
-from ...models.vae.vae_Flux2 import Flux2VaeDecoder
+from ...models.transformers.transformer_flux2 import Flux2Transformer
+from ...models.vae.vae_flux2 import Flux2VaeDecoder
 from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, ParallelFactor, VAEParallelConfig
 from ...parallel.manager import CCLManager
 from ...utils import cache, tensor
 from ...utils.padding import PaddingConfig
+from .prompt_encoder import PromptEncoder
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -116,7 +116,7 @@ class Flux2Pipeline:
 
         logger.info("loading models...")
 
-        checkpoint_name = "Qwen/Qwen-Image"
+        checkpoint_name = "black-forest-labs/FLUX.2-dev"
 
         torch_transformer = diffusers.Flux2Transformer2DModel.from_pretrained(
             checkpoint_name,
@@ -132,11 +132,11 @@ class Flux2Pipeline:
 
         logger.info("creating TT-NN transformer...")
 
-        head_dim = torch_transformer.config.attention_head_dim
-        num_heads = torch_transformer.config.num_attention_heads
-        self._num_channels_latents = 16
-        self._patch_size = torch_transformer.config.patch_size
-        self._vae_scale_factor = 8
+        head_dim = 128
+        num_heads = 48
+        self._num_channels_latents = 16  # TODO
+        self._patch_size = 1
+        self._vae_scale_factor = 8  # TODO
 
         if num_heads % parallel_config.tensor_parallel.factor != 0:
             padding_config = PaddingConfig.from_tensor_parallel_factor(
@@ -150,13 +150,14 @@ class Flux2Pipeline:
         self.transformers = []
         for i, submesh_device in enumerate(self._submesh_devices):
             tt_transformer = Flux2Transformer(
-                patch_size=torch_transformer.config.patch_size,
-                in_channels=torch_transformer.config.in_channels,
-                num_layers=torch_transformer.config.num_layers,
+                patch_size=self._patch_size,
+                in_channels=128,
+                num_layers=8,
+                num_single_layers=48,
                 attention_head_dim=head_dim,
                 num_attention_heads=num_heads,
-                joint_attention_dim=torch_transformer.config.joint_attention_dim,
-                out_channels=torch_transformer.config.out_channels,
+                joint_attention_dim=15360,
+                out_channels=128,
                 device=submesh_device,
                 ccl_manager=self._ccl_managers[i],
                 parallel_config=parallel_config,
@@ -166,7 +167,7 @@ class Flux2Pipeline:
             if not cache.initialize_from_cache(
                 tt_model=tt_transformer,
                 torch_state_dict=torch_transformer.state_dict(),
-                model_name="qwen-image",
+                model_name="flux2-dev",
                 subfolder="transformer",
                 parallel_config=self._parallel_config,
                 mesh_shape=tuple(submesh_device.shape),
@@ -187,11 +188,9 @@ class Flux2Pipeline:
 
         with self.encoder_reshape(self.encoder_device):
             logger.info("creating TT-NN text encoder...")
-            self._text_encoder = Qwen25VlTokenizerEncoderPair(
-                checkpoint_name,
-                tokenizer_subfolder="tokenizer",
-                encoder_subfolder="text_encoder",
-                use_torch=use_torch_text_encoder,
+            self._text_encoder = PromptEncoder(
+                checkpoint_name=checkpoint_name,
+                use_torch_encoder=use_torch_text_encoder,
                 device=self.encoder_device,
                 parallel_config=self._encoder_parallel_config,
                 ccl_manager=self._ccl_managers[self.encoder_submesh_idx],
@@ -203,11 +202,10 @@ class Flux2Pipeline:
             if not use_torch_vae_decoder:
                 logger.info("creating TT-NN VAE decoder...")
                 self._vae_decoder = Flux2VaeDecoder(
-                    base_dim=self._torch_vae.config["base_dim"],
-                    z_dim=self._torch_vae.config["z_dim"],
-                    dim_mult=self._torch_vae.config["dim_mult"],
-                    num_res_blocks=self._torch_vae.config["num_res_blocks"],
-                    temperal_downsample=self._torch_vae.config["temperal_downsample"],
+                    # out_channels=torch_model.config.out_channels,
+                    # block_out_channels=torch_model.config.block_out_channels,
+                    # layers_per_block=torch_model.config.layers_per_block,
+                    # z_channels=z_channels,
                     device=self.vae_device,
                     parallel_config=self._vae_parallel_config,
                     ccl_manager=self._ccl_managers[self.vae_submesh_idx],
@@ -241,11 +239,11 @@ class Flux2Pipeline:
     def create_pipeline(
         *,
         mesh_device: ttnn.MeshDevice,
-        dit_cfg: tuple[int, int] | None = None,
-        dit_sp: tuple[int, int] | None = None,
-        dit_tp: tuple[int, int] | None = None,
-        encoder_tp: tuple[int, int] | None = None,
-        vae_tp: tuple[int, int] | None = None,
+        dit_cfg: tuple[int, int],
+        dit_sp: tuple[int, int],
+        dit_tp: tuple[int, int],
+        encoder_tp: tuple[int, int],
+        vae_tp: tuple[int, int],
         use_torch_text_encoder: bool = False,
         use_torch_vae_decoder: bool = False,
         num_links: int,
@@ -253,30 +251,11 @@ class Flux2Pipeline:
         width: int = 1024,
         height: int = 1024,
     ) -> Flux2Pipeline:
-        default_config = {
-            (2, 4): {
-                "cfg_config": (2, 1),
-                "sp": (2, 0),
-                "tp": (2, 1),
-                "encoder_tp": (4, 1),
-                "vae_tp": (4, 1),
-                "num_links": 1,
-            },
-            (4, 8): {
-                "cfg_config": (2, 1),
-                "sp": (4, 0),
-                "tp": (4, 1),
-                "encoder_tp": (4, 1),
-                "vae_tp": (4, 1),
-                "num_links": 4,
-            },
-        }
-        cfg_factor, cfg_axis = dit_cfg or default_config[tuple(mesh_device.shape)]["cfg_config"]
-        sp_factor, sp_axis = dit_sp or default_config[tuple(mesh_device.shape)]["sp"]
-        tp_factor, tp_axis = dit_tp or default_config[tuple(mesh_device.shape)]["tp"]
-        encoder_tp_factor, encoder_tp_axis = encoder_tp or default_config[tuple(mesh_device.shape)]["encoder_tp"]
-        vae_tp_factor, vae_tp_axis = vae_tp or default_config[tuple(mesh_device.shape)]["vae_tp"]
-        num_links = num_links or default_config[tuple(mesh_device.shape)]["num_links"]
+        cfg_factor, cfg_axis = dit_cfg
+        sp_factor, sp_axis = dit_sp
+        tp_factor, tp_axis = dit_tp
+        encoder_tp_factor, encoder_tp_axis = encoder_tp
+        vae_tp_factor, vae_tp_axis = vae_tp
 
         dit_parallel_config = DiTParallelConfig(
             cfg_parallel=ParallelFactor(factor=cfg_factor, mesh_axis=cfg_axis),
