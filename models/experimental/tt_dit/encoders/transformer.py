@@ -41,7 +41,14 @@ class TransformerContext:
     ccl_manager: CCLManager | None
 
 
-class Transformer(Module):
+class TransformerEncoder(Module):
+    """Transformer encoder model with causal self-attention and support for decode mode.
+
+    Like `torch.nn.TransformerEncoder` it is an encoder model in the sense that it does not feature
+    cross-attention. Confusingly it is commonly known as a 'decoder-only' transformer, since it is
+    often used autoregressively to generate sequences.
+    """
+
     def __init__(
         self,
         *,
@@ -76,7 +83,7 @@ class Transformer(Module):
 
         self.token_embedding = Embedding(vocab_size, embed_size, device=ctx.device, mesh_axis=ctx.tp_axis)
         self.layers = ModuleList(
-            DecoderLayer(
+            TransformerEncoderLayer(
                 head_size=head_size,
                 embed_size=embed_size,
                 ff_size=ff_size,
@@ -283,7 +290,7 @@ class Transformer(Module):
         return GenerationOutput(tokens=tokens, logits=logits)
 
 
-class DecoderLayer(Module):
+class TransformerEncoderLayer(Module):
     def __init__(
         self,
         *,

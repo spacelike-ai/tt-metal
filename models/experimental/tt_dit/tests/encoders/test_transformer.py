@@ -13,7 +13,7 @@ import ttnn
 from loguru import logger
 
 from ...encoders.rope import RopeConfig
-from ...encoders.transformer import MISTRAL3_CONVERSION, Transformer
+from ...encoders.transformer import MISTRAL3_CONVERSION, TransformerEncoder
 from ...parallel.config import EncoderParallelConfig, ParallelFactor
 from ...parallel.manager import CCLManager
 from ...utils import cache, tensor
@@ -68,7 +68,7 @@ def test_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, masked: b
     generation_config = torch_model.generation_config
     assert isinstance(generation_config, transformers.GenerationConfig)
 
-    model = Transformer(
+    model = TransformerEncoder(
         vocab_size=config.vocab_size,
         head_size=config.head_dim,
         embed_size=config.hidden_size,
@@ -194,7 +194,7 @@ def test_guided_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, ma
     generation_config = torch_model.generation_config
     assert isinstance(generation_config, transformers.GenerationConfig)
 
-    model = Transformer(
+    model = TransformerEncoder(
         vocab_size=config.vocab_size,
         head_size=config.head_dim,
         embed_size=config.hidden_size,
@@ -343,7 +343,7 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, batch_size: int, skip_laye
     num_layers = len(torch_model.model.language_model.layers)
     del torch_model.model.language_model.layers[num_layers - skip_layers :]
 
-    model = Transformer(
+    model = TransformerEncoder(
         vocab_size=config.vocab_size,
         head_size=config.head_dim,
         embed_size=config.hidden_size,
