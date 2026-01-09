@@ -113,9 +113,10 @@ def load_model(
     )
 
     if cache_dict_exists(cache_path):
-        logger.info(f"loading {subfolder} from cache... {cache_path}")
+        logger.info(f"loading cache at '{cache_path}'.")
         tt_model.from_cached_state_dict(load_cache_dict(cache_path))
 
-    logger.info(f"Cache does not exist. Creating cache: {cache_path} and loading {subfolder} from PyTorch state dict")
+    logger.info("Cache does not exist. Creating cache and loading PyTorch state dict.")
     tt_model.load_torch_state_dict(get_torch_state_dict())
+    logger.info(f"Writing cache to '{cache_path}'.")
     save_cache_dict(tt_model.to_cached_state_dict(cache_path), cache_path)
