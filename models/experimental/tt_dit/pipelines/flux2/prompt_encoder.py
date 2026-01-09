@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from ...parallel.manager import CCLManager
 
 
-class TextEncoder:
+class PromptEncoder:
     def __init__(
         self,
         *,
