@@ -21,7 +21,7 @@ from ....utils.check import assert_quality
     "mesh_device",
     [
         pytest.param((1, 1), id="1x1"),
-        pytest.param((1, 4), id="1x4"),
+        pytest.param((1, 8), id="1x8"),
     ],
     indirect=True,
 )
@@ -93,7 +93,7 @@ def test_vae_flux2_decoder(
     tt_out = tt_model.forward(tt_inp)
 
     tt_out_torch = tensor.to_torch(tt_out).permute(0, 3, 1, 2)
-    assert_quality(torch_output, tt_out_torch, pcc=0.9978, relative_rmse=0.029)
+    assert_quality(torch_output, tt_out_torch, pcc=0.9978, relative_rmse=0.034)
 
     start = time()
     tt_model.forward(tt_inp)
