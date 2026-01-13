@@ -121,9 +121,8 @@ def _get_prompt_embeds(
         padding="max_length",
         max_length=sequence_length,
         truncation=True,
-        # return_dict=True,
+        return_dict=True,
     )
-    print(tokenizer_out)
     tokens = tokenizer_out.input_ids
     attention_mask = tokenizer_out.attention_mask
 
@@ -131,7 +130,7 @@ def _get_prompt_embeds(
         conversation,
         return_tensors="pt",
         padding="longest",
-        # return_dict=True,
+        return_dict=True,
     )
     untruncated_tokens = untruncated_out.input_ids
 
