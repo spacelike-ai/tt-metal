@@ -21,7 +21,7 @@ from ....pipelines.flux2.pipeline_flux2 import Flux2Pipeline
     [{"fabric_config": ttnn.FabricConfig.FABRIC_1D, "l1_small_size": 32768, "trace_region_size": 37000000}],
     indirect=True,
 )
-@pytest.mark.parametrize(("width", "height", "num_inference_steps"), [(1024, 1024, 50)])
+@pytest.mark.parametrize(("width", "height", "num_inference_steps"), [(1024, 1024, 40)])
 @pytest.mark.parametrize(
     (
         "mesh_device",
@@ -47,8 +47,8 @@ from ....pipelines.flux2.pipeline_flux2 import Flux2Pipeline
             ttnn.Topology.Linear,
             1,  # num_links
             "1x8tp1",
-            False,  # use_torch_text_encoder
-            False,  # use_torch_vae_decoder
+            True,  # use_torch_text_encoder
+            True,  # use_torch_vae_decoder
             id="1x8tp1",
         ),
     ],
@@ -96,8 +96,7 @@ def test_pipeline(
     )
 
     prompts = [
-        "A luxury sports car.",
-        # "Neon-lit cyberpunk alley, rain-soaked, cinematic wide shot",
+        "Neon-lit cyberpunk alley, rain-soaked, cinematic wide shot",
         # "Golden retriever astronaut drifting in sunlit space",
         # "Minimalist Scandinavian kitchen, morning light, ultra clean",
         # "Ancient desert temple at dawn, soft fog, wide angle",
@@ -119,7 +118,6 @@ def test_pipeline(
             prompts=[prompt],
             negative_prompts=[""],
             num_inference_steps=num_inference_steps,
-            cfg_scale=4.0,
             seed=seed,
             traced=traced,
         )

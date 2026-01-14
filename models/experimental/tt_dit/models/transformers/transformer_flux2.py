@@ -193,7 +193,6 @@ class Flux2Transformer(Module):
     def __init__(
         self,
         *,
-        patch_size: int,
         in_channels: int,
         num_layers: int,
         num_single_layers: int,
@@ -271,7 +270,7 @@ class Flux2Transformer(Module):
             ccl_manager=ccl_manager,
         )
 
-        self.proj_out = Linear(inner_dim, patch_size * patch_size * out_channels, bias=False, mesh_device=device)
+        self.proj_out = Linear(inner_dim, out_channels, bias=False, mesh_device=device)
 
         self.double_stream_modulation_img = Flux2Modulation(inner_dim, mod_param_sets=2, tp_axis=tp_axis, device=device)
         self.double_stream_modulation_txt = Flux2Modulation(inner_dim, mod_param_sets=2, tp_axis=tp_axis, device=device)

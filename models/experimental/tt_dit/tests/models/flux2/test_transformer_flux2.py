@@ -298,7 +298,6 @@ def test_transformer(
         padding_config = None
 
     tt_model = Flux2Transformer(
-        patch_size=torch_model.config.patch_size,
         in_channels=in_channels,
         num_layers=torch_model.config.num_layers - skip_layers,
         num_single_layers=torch_model.config.num_single_layers - skip_single_layers,

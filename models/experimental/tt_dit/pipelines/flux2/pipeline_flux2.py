@@ -41,6 +41,7 @@ class PipelineTrace:
     spatial_input: ttnn.Tensor
     prompt_input: ttnn.Tensor
     timestep_input: ttnn.Tensor
+    guidance_input: ttnn.Tensor
     sigma_difference_input: ttnn.Tensor
     latents_output: ttnn.Tensor
     spatial_rope_cos: ttnn.Tensor
@@ -98,8 +99,8 @@ class Flux2Pipeline:
         submesh_shape[parallel_config.sequence_parallel.mesh_axis] = parallel_config.sequence_parallel.factor
         submesh_shape[parallel_config.tensor_parallel.mesh_axis] = parallel_config.tensor_parallel.factor
         logger.info(f"Parallel config: {parallel_config}")
-        logger.info(f"Original mesh shape: {mesh_device.shape}")
-        logger.info(f"Creating submeshes with shape {submesh_shape}")
+        # logger.info(f"Original mesh shape: {mesh_device.shape}")
+        # logger.info(f"Creating submeshes with shape {submesh_shape}")
         self._submesh_devices = self._mesh_device.create_submeshes(ttnn.MeshShape(*submesh_shape))[
             0 : parallel_config.cfg_parallel.factor
         ]
@@ -134,9 +135,9 @@ class Flux2Pipeline:
 
         head_dim = 128
         num_heads = 48
-        self._num_channels_latents = 16  # TODO
-        self._patch_size = 1
-        self._vae_scale_factor = 8  # TODO
+        self._num_channels_latents = 32
+        self._patch_size = 2
+        self._vae_scale_factor = 8
 
         if num_heads % parallel_config.tensor_parallel.factor != 0:
             padding_config = PaddingConfig.from_tensor_parallel_factor(
@@ -150,7 +151,6 @@ class Flux2Pipeline:
         self.transformers = []
         for i, submesh_device in enumerate(self._submesh_devices):
             tt_transformer = Flux2Transformer(
-                patch_size=self._patch_size,
                 in_channels=128,
                 num_layers=8,
                 num_single_layers=48,
@@ -181,10 +181,7 @@ class Flux2Pipeline:
 
         self._pos_embed = torch_transformer.pos_embed
 
-        self._latents_scaling = 1.0 / torch.tensor(self._torch_vae.config.latents_std)
-        self._latents_shift = torch.tensor(self._torch_vae.config.latents_mean)
-
-        self._image_processor = VaeImageProcessor(vae_scale_factor=2 * self._vae_scale_factor)
+        self._image_processor = VaeImageProcessor()
 
         with self.encoder_reshape(self.encoder_device):
             logger.info("creating TT-NN text encoder...")
@@ -202,10 +199,10 @@ class Flux2Pipeline:
             if not use_torch_vae_decoder:
                 logger.info("creating TT-NN VAE decoder...")
                 self._vae_decoder = Flux2VaeDecoder(
-                    # out_channels=torch_model.config.out_channels,
-                    # block_out_channels=torch_model.config.block_out_channels,
-                    # layers_per_block=torch_model.config.layers_per_block,
-                    # z_channels=z_channels,
+                    out_channels=3,
+                    block_out_channels=[128, 256, 512, 512],
+                    layers_per_block=2,
+                    z_channels=32,
                     device=self.vae_device,
                     parallel_config=self._vae_parallel_config,
                     ccl_manager=self._ccl_managers[self.vae_submesh_idx],
@@ -226,9 +223,9 @@ class Flux2Pipeline:
             return
 
         original_mesh_shape = ttnn.MeshShape(tuple(device.shape))
-        assert original_mesh_shape.mesh_size() == self.encoder_mesh_shape.mesh_size(), (
-            f"Device cannot be reshaped device shape: {device.shape} encoder mesh shape: {self.encoder_mesh_shape}"
-        )
+        assert (
+            original_mesh_shape.mesh_size() == self.encoder_mesh_shape.mesh_size()
+        ), f"Device cannot be reshaped device shape: {device.shape} encoder mesh shape: {self.encoder_mesh_shape}"
         if original_mesh_shape != self.encoder_mesh_shape:
             device.reshape(self.encoder_mesh_shape)
         yield
@@ -269,7 +266,7 @@ class Flux2Pipeline:
             tensor_parallel=ParallelFactor(factor=vae_tp_factor, mesh_axis=vae_tp_axis)
         )
 
-        logger.info(f"Mesh device shape: {mesh_device.shape}")
+        # logger.info(f"Mesh device shape: {mesh_device.shape}")
         logger.info(f"Parallel config: {dit_parallel_config}")
         logger.info(f"Encoder parallel config: {encoder_parallel_config}")
         logger.info(f"VAE parallel config: {vae_parallel_config}")
@@ -291,7 +288,8 @@ class Flux2Pipeline:
         self,
         *,
         num_images_per_prompt: int = 1,
-        cfg_scale: float,
+        cfg_scale: float = 1.0,
+        guidance_scale: float = 4.0,
         prompts: list[str],
         negative_prompts: list[str],
         num_inference_steps: int,
@@ -333,33 +331,24 @@ class Flux2Pipeline:
                 spatial_sequence_length=spatial_sequence_length,
             )
 
+            guidance = torch.full([transformer_batch_size], fill_value=guidance_scale)
+
             logger.info("preparing latents...")
 
             if seed is not None:
                 torch.manual_seed(seed)
 
-            shape = [
-                transformer_batch_size,
-                self._num_channels_latents,
-                self._height // self._vae_scale_factor,
-                self._width // self._vae_scale_factor,
-            ]
-            # We let randn generate a permuted latent tensor in float32, so that the generated noise
-            # matches the reference implementation.
-            latents = self.transformers[0].patchify(torch.randn(shape).permute(0, 2, 3, 1))
+            shape = [transformer_batch_size, self._num_channels_latents, latents_height, latents_width]
+            latents = self._patchify(torch.randn(shape).permute(0, 2, 3, 1))
 
-            p = self._patch_size
-            img_shapes = [[(1, latents_height // p, latents_width // p)]] * transformer_batch_size
-            txt_seq_lens = [prompt_sequence_length] * transformer_batch_size
-            spatial_rope, prompt_rope = self._pos_embed.forward(img_shapes, txt_seq_lens, "cpu")
-
-            spatial_rope_cos = spatial_rope.real.repeat_interleave(2, dim=-1)
-            spatial_rope_sin = spatial_rope.imag.repeat_interleave(2, dim=-1)
-            prompt_rope_cos = prompt_rope.real.repeat_interleave(2, dim=-1)
-            prompt_rope_sin = prompt_rope.imag.repeat_interleave(2, dim=-1)
+            text_ids = _prepare_ids(text_sequence_length=prompt_sequence_length)
+            image_ids = _prepare_ids(height=self._height // 16, width=self._width // 16)
+            prompt_rope_cos, prompt_rope_sin = self._pos_embed.forward(text_ids)
+            spatial_rope_cos, spatial_rope_sin = self._pos_embed.forward(image_ids)
 
             tt_prompt_embeds_list = []
             tt_latents_step_list = []
+            tt_guidance_list = []
             tt_spatial_rope_cos_list = []
             tt_spatial_rope_sin_list = []
             tt_prompt_rope_cos_list = []
@@ -375,6 +364,8 @@ class Flux2Pipeline:
                     latents, device=submesh_device, on_host=traced, mesh_axes=[None, sp_axis, None]
                 )
 
+                tt_guidance = tensor.from_torch(guidance.unsqueeze(1), device=submesh_device, on_host=traced)
+
                 tt_spatial_rope_cos = tensor.from_torch(
                     spatial_rope_cos, device=submesh_device, on_host=traced, mesh_axes=[sp_axis, None]
                 )
@@ -388,6 +379,7 @@ class Flux2Pipeline:
                     if self._traces is None:
                         tt_initial_latents = tt_initial_latents.to(submesh_device)
                         tt_prompt_embeds = tt_prompt_embeds.to(submesh_device)
+                        tt_guidance = tt_guidance.to(submesh_device)
                         tt_spatial_rope_cos = tt_spatial_rope_cos.to(submesh_device)
                         tt_spatial_rope_sin = tt_spatial_rope_sin.to(submesh_device)
                         tt_prompt_rope_cos = tt_prompt_rope_cos.to(submesh_device)
@@ -395,6 +387,7 @@ class Flux2Pipeline:
                     else:
                         ttnn.copy_host_to_device_tensor(tt_initial_latents, self._traces[i].spatial_input)
                         ttnn.copy_host_to_device_tensor(tt_prompt_embeds, self._traces[i].prompt_input)
+                        ttnn.copy_host_to_device_tensor(tt_guidance, self._traces[i].guidance_input)
                         ttnn.copy_host_to_device_tensor(tt_spatial_rope_cos, self._traces[i].spatial_rope_cos)
                         ttnn.copy_host_to_device_tensor(tt_spatial_rope_sin, self._traces[i].spatial_rope_sin)
                         ttnn.copy_host_to_device_tensor(tt_prompt_rope_cos, self._traces[i].prompt_rope_cos)
@@ -402,6 +395,7 @@ class Flux2Pipeline:
 
                         tt_initial_latents = self._traces[i].spatial_input
                         tt_prompt_embeds = self._traces[i].prompt_input
+                        tt_guidance = self._traces[i].guidance_input
                         tt_spatial_rope_cos = self._traces[i].spatial_rope_cos
                         tt_spatial_rope_sin = self._traces[i].spatial_rope_sin
                         tt_prompt_rope_cos = self._traces[i].prompt_rope_cos
@@ -409,6 +403,7 @@ class Flux2Pipeline:
 
                 tt_prompt_embeds_list.append(tt_prompt_embeds)
                 tt_latents_step_list.append(tt_initial_latents)
+                tt_guidance_list.append(tt_guidance)
                 tt_spatial_rope_cos_list.append(tt_spatial_rope_cos)
                 tt_spatial_rope_sin_list.append(tt_spatial_rope_sin)
                 tt_prompt_rope_cos_list.append(tt_prompt_rope_cos)
@@ -443,6 +438,7 @@ class Flux2Pipeline:
 
                     tt_latents_step_list = self._step(
                         timestep=tt_timestep_list,
+                        guidance=tt_guidance_list,
                         latents=tt_latents_step_list,
                         cfg_enabled=cfg_enabled,
                         prompt_embeds=tt_prompt_embeds_list,
@@ -471,19 +467,37 @@ class Flux2Pipeline:
                 )
 
                 torch_latents = ttnn.to_torch(ttnn.get_device_tensors(tt_latents)[0])
-
-                torch_latents = self.transformers[0].unpatchify(
-                    torch_latents,
-                    height=latents_height,
-                    width=latents_width,
+                torch_latents = torch_latents.reshape(
+                    [
+                        transformer_batch_size,
+                        latents_height // self._patch_size,
+                        latents_width // self._patch_size,
+                        self._num_channels_latents * self._patch_size**2,
+                    ]
                 )
 
-                torch_latents = torch_latents / self._latents_scaling + self._latents_shift
-
                 if self._vae_decoder is None:
-                    torch_latents = torch_latents.permute(0, 3, 1, 2).unsqueeze(2)
+                    vae = self._torch_vae
+
+                    torch_latents = torch_latents.permute(0, 3, 1, 2).to(torch.float32)
+
+                    # torch_latents = self._unpack_latents_with_ids(torch_latents, latent_ids)
+
+                    latents_bn_mean = vae.bn.running_mean.view(1, -1, 1, 1)
+                    latents_bn_std = torch.sqrt(vae.bn.running_var.view(1, -1, 1, 1) + vae.config.batch_norm_eps)
+                    torch_latents = torch_latents * latents_bn_std + latents_bn_mean
+
+                    batch_size, num_channels_latents, height, width = torch_latents.shape
+                    torch_latents = torch_latents.reshape(
+                        batch_size, num_channels_latents // (2 * 2), 2, 2, height, width
+                    )
+                    torch_latents = torch_latents.permute(0, 1, 4, 2, 5, 3)
+                    torch_latents = torch_latents.reshape(
+                        batch_size, num_channels_latents // (2 * 2), height * 2, width * 2
+                    )
+
                     with torch.no_grad():
-                        decoded_output = self._torch_vae.decode(torch_latents).sample[:, :, 0]
+                        decoded_output = vae.decode(torch_latents).sample
                 else:
                     with self.encoder_reshape(self.encoder_device):
                         tt_latents = tensor.from_torch(torch_latents, device=self.vae_device)
@@ -506,6 +520,7 @@ class Flux2Pipeline:
         latent: ttnn.Tensor,
         prompt: ttnn.Tensor,
         timestep: ttnn.Tensor,
+        guidance: ttnn.Tensor,
         submesh_index: int,
         spatial_rope_cos: ttnn.Tensor,
         spatial_rope_sin: ttnn.Tensor,
@@ -521,6 +536,7 @@ class Flux2Pipeline:
             spatial=latent,
             prompt=prompt,
             timestep=timestep,
+            guidance=guidance,
             spatial_rope=(spatial_rope_cos, spatial_rope_sin),
             prompt_rope=(prompt_rope_cos, prompt_rope_sin),
             spatial_sequence_length=spatial_sequence_length,
@@ -534,6 +550,7 @@ class Flux2Pipeline:
         cfg_scale: float,
         latents: list[ttnn.Tensor],  # device tensor
         timestep: list[ttnn.Tensor],  # host tensor
+        guidance: list[ttnn.Tensor],  # device tensor
         prompt_embeds: list[ttnn.Tensor],  # device tensor
         sigma_difference: list[ttnn.Tensor],  # device tensor
         spatial_rope_cos: list[ttnn.Tensor],
@@ -557,6 +574,7 @@ class Flux2Pipeline:
                     latent=latents[submesh_id],
                     prompt=prompt_embeds[submesh_id],
                     timestep=timestep_device,
+                    guidance=guidance[submesh_id],
                     spatial_rope_cos=spatial_rope_cos[submesh_id],
                     spatial_rope_sin=spatial_rope_sin[submesh_id],
                     prompt_rope_cos=prompt_rope_cos[submesh_id],
@@ -572,6 +590,7 @@ class Flux2Pipeline:
                     latent=latents[submesh_id],
                     prompt=prompt_embeds[submesh_id],
                     timestep=timestep_device,
+                    guidance=guidance[submesh_id],
                     spatial_rope_cos=spatial_rope_cos[submesh_id],
                     spatial_rope_sin=spatial_rope_sin[submesh_id],
                     prompt_rope_cos=prompt_rope_cos[submesh_id],
@@ -590,6 +609,7 @@ class Flux2Pipeline:
                         spatial_input=latents[submesh_id],
                         prompt_input=prompt_embeds[submesh_id],
                         timestep_input=timestep_device,
+                        guidance_input=guidance[submesh_id],
                         spatial_rope_cos=spatial_rope_cos[submesh_id],
                         spatial_rope_sin=spatial_rope_sin[submesh_id],
                         prompt_rope_cos=prompt_rope_cos[submesh_id],
@@ -620,6 +640,7 @@ class Flux2Pipeline:
                     latent=latents[submesh_id],
                     prompt=prompt_embeds[submesh_id],
                     timestep=timestep[submesh_id],
+                    guidance=guidance[submesh_id],
                     spatial_rope_cos=spatial_rope_cos[submesh_id],
                     spatial_rope_sin=spatial_rope_sin[submesh_id],
                     prompt_rope_cos=prompt_rope_cos[submesh_id],
@@ -706,6 +727,18 @@ class Flux2Pipeline:
 
         return embeds[:, PROMPT_DROP_IDX:]  # , mask[:, PROMPT_DROP_IDX:]
 
+    def _patchify(self, latents: torch.Tensor) -> torch.Tensor:
+        # N, H, W, C -> N, (H / P) * (W / P), C * P * P
+        batch_size, height, width, channels = latents.shape
+        p = self._patch_size
+
+        if height % p != 0 or width % p != 0:
+            msg = f"height ({height}) and width ({width}) must be divisible by patch_size ({p})"
+            raise ValueError(msg)
+
+        latents = latents.reshape([batch_size, height // p, p, width // p, p, channels])
+        return latents.permute(0, 1, 3, 5, 2, 4).flatten(3, 5).flatten(1, 2)
+
 
 def _schedule(
     scheduler: FlowMatchEulerDiscreteScheduler,
@@ -743,3 +776,12 @@ def _calculate_shift(
     m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
     b = base_shift - m * base_seq_len
     return image_seq_len * m + b
+
+
+def _prepare_ids(*, height: int = 1, width: int = 1, text_sequence_length: int = 1) -> torch.Tensor:
+    t = torch.arange(1)
+    h = torch.arange(height)
+    w = torch.arange(width)
+    s = torch.arange(text_sequence_length)
+
+    return torch.cartesian_prod(t, h, w, s)
