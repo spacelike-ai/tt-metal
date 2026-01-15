@@ -118,7 +118,6 @@ def test_pipeline(
     def run(*, prompt: str, number: int, seed: int) -> None:
         images = pipeline(
             prompts=[prompt],
-            negative_prompts=[""],
             num_inference_steps=num_inference_steps,
             seed=seed,
             traced=traced,

@@ -31,9 +31,6 @@ if TYPE_CHECKING:
 
     from PIL import Image
 
-PROMPT_TEMPLATE = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
-PROMPT_DROP_IDX = 34
-
 
 @dataclass
 class PipelineTrace:
@@ -313,11 +310,8 @@ class Flux2Pipeline:
 
             with timer.time_section("total_encoding") if timer else nullcontext():
                 with self.encoder_reshape(self.encoder_device):
-                    prompt_embeds = self._encode_prompts(
-                        prompts=prompts,
-                        negative_prompts=negative_prompts,
-                        num_images_per_prompt=num_images_per_prompt,
-                        cfg_enabled=cfg_enabled,
+                    prompt_embeds, _mask = self._text_encoder.encode(
+                        prompts, num_images_per_prompt=num_images_per_prompt, sequence_length=512
                     )
             _, prompt_sequence_length, _ = prompt_embeds.shape
 
@@ -684,39 +678,6 @@ class Flux2Pipeline:
             ttnn.add_(latents[submesh_id], noise_pred_list[submesh_id])
 
         return latents
-
-    def _encode_prompts(
-        self,
-        *,
-        prompts: list[str],
-        negative_prompts: list[str],
-        num_images_per_prompt: int,
-        cfg_enabled: bool,
-    ) -> torch.Tensor:
-        timer = self.timing_collector
-
-        assert len(prompts) == len(negative_prompts), "prompts and negative_prompts must have the same length"
-
-        if cfg_enabled:
-            prompts = negative_prompts + prompts
-
-        prompts = [PROMPT_TEMPLATE.format(e) for e in prompts]
-
-        # In order to support tracing, we encode to a fixed sequence length by zero padding. Since
-        # `ttnn.transformer.joint_scaled_dot_product_attention` and
-        # `ttnn.transformer.ring_joint_scaled_dot_product_attention` do not currently support
-        # attention masking, these tokens slightly affect the generated images.
-
-        with timer.time_section("text_encoding") if timer else nullcontext():
-            embeds, mask = self._text_encoder.encode(
-                prompts,
-                num_images_per_prompt=num_images_per_prompt,
-                sequence_length=512 + PROMPT_DROP_IDX,
-            )
-
-        embeds[torch.logical_not(mask)] = 0.0
-
-        return embeds[:, PROMPT_DROP_IDX:]  # , mask[:, PROMPT_DROP_IDX:]
 
     def _patchify(self, latents: torch.Tensor) -> torch.Tensor:
         # N, H, W, C -> N, (H / P) * (W / P), C * P * P
