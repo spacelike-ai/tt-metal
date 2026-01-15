@@ -129,7 +129,8 @@ class TransformerEncoder(Module):
         pos_embeds: tuple[ttnn.Tensor, ttnn.Tensor] | None = None,
         cache: Cache | None = None,
         skip_final_linear: bool = False,
-    ) -> ttnn.Tensor:
+        output_hidden_states: bool = False,
+    ) -> ttnn.Tensor | list[ttnn.Tensor]:
         if cache is not None and cache.position != 0:
             (batch_size,) = tokens.shape
             seq_len = 1
@@ -185,7 +186,12 @@ class TransformerEncoder(Module):
             # clone to move out of persistent buffer
             x = ttnn.clone(x)
 
+        hidden_states = []
+
         for i, decoder_layer in enumerate(self.layers, start=1):
+            if output_hidden_states:
+                hidden_states.append(x)
+
             x = decoder_layer.forward(
                 x,
                 attn_bias=attn_bias,
@@ -204,10 +210,16 @@ class TransformerEncoder(Module):
 
         x = self.final_norm.forward(x)
 
+        if output_hidden_states:
+            hidden_states.append(x)
+
         if not skip_final_linear:
             x = self.final_linear.forward(x)
 
-        return x
+            if output_hidden_states:
+                hidden_states.append(x)
+
+        return hidden_states if output_hidden_states else x
 
     def generate(
         self,

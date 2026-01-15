@@ -143,7 +143,12 @@ def _get_prompt_embeds(
         tt_tokens = tensor.from_torch(tokens, device=mesh_device, dtype=ttnn.uint32)
         tt_attention_mask = tensor.from_torch(attention_mask, device=mesh_device)
 
-        tt_hidden_states = text_encoder.forward(tt_tokens, attention_mask=tt_attention_mask)
+        tt_hidden_states = text_encoder.forward(
+            tt_tokens,
+            mask=tt_attention_mask,
+            skip_final_linear=True,
+            output_hidden_states=True,
+        )
         tt_prompt_embeds = ttnn.concat([tt_hidden_states[k] for k in output_from_layers], dim=-1)
 
         prompt_embeds = ttnn.to_torch(ttnn.get_device_tensors(tt_prompt_embeds)[0])

@@ -384,24 +384,29 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, batch_size: int, skip_laye
     tt_mask = tensor.from_torch(mask, device=mesh_device) if mask is not None else None
 
     logger.info("running ttnn model...")
-    tt_prompt_embeds = model.forward(
+    tt_hidden_states = model.forward(
         tt_tokens,
         mask=tt_mask,
         skip_final_linear=True,
+        output_hidden_states=True,
     )
-    tt_prompt_embeds_torch = tensor.to_torch(tt_prompt_embeds)
+    tt_hidden_states_torch = [tensor.to_torch(t) for t in tt_hidden_states]
 
     logger.info("running torch model...")
     torch_mask_input = mask if mask is not None else torch.ones_like(tokens)
     with torch.no_grad():
-        out = torch_model.forward(tokens, attention_mask=torch_mask_input, output_hidden_states=True)
-        prompt_embeds = out.hidden_states[-1]
+        hidden_states = torch_model.forward(
+            tokens, attention_mask=torch_mask_input, output_hidden_states=True
+        ).hidden_states
 
     if mask is not None:
         # Masked positions on the start of the sequence contain undefined values from computing softmax over all -inf
         # so we remove them before comparison.
-        _, _, d = prompt_embeds.shape
-        prompt_embeds = prompt_embeds.masked_select(mask.unsqueeze(-1)).view([-1, d])
-        tt_prompt_embeds_torch = tt_prompt_embeds_torch.masked_select(mask.unsqueeze(-1)).view([-1, d])
+        _, _, d = hidden_states[0].shape
+        hidden_states = [t.masked_select(mask.unsqueeze(-1)).view([-1, d]) for t in hidden_states]
+        tt_hidden_states_torch = [t.masked_select(mask.unsqueeze(-1)).view([-1, d]) for t in tt_hidden_states_torch]
 
-    assert_quality(prompt_embeds, tt_prompt_embeds_torch, pcc=0.997, relative_rmse=0.07)
+    assert len(hidden_states) == len(tt_hidden_states_torch)
+
+    for x, tt_x in zip(hidden_states[-4:], tt_hidden_states_torch[-4:], strict=True):
+        assert_quality(x, tt_x, pcc=0.998, relative_rmse=0.06)
