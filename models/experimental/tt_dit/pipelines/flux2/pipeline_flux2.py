@@ -288,6 +288,8 @@ class Flux2Pipeline:
         self,
         *,
         num_images_per_prompt: int = 1,
+        # The diffusers implementation of FLUX.2 does not support CFG but we might as well keep the
+        # code to support it.
         cfg_scale: float = 1.0,
         guidance_scale: float = 4.0,
         prompts: list[str],
@@ -705,16 +707,7 @@ class Flux2Pipeline:
         # In order to support tracing, we encode to a fixed sequence length by zero padding. Since
         # `ttnn.transformer.joint_scaled_dot_product_attention` and
         # `ttnn.transformer.ring_joint_scaled_dot_product_attention` do not currently support
-        # attention masking, these tokens slightly affect the generated images. For comparison: The
-        # Hugging Face implementation, which we use as a reference, as well as the DiffSynth-Studio
-        # implementation do not add any padding when generating a single image. The Hugging Face
-        # implementation does add zero padding when generating multiple images with different
-        # prompts at once. It also creates an attention mask to mask out the padded tokens, but as
-        # of diffusers version 0.35.2, this attention mask passed to the transformer but never used.
-        # The DiffSynth-Studio implementation does not support generating multiple images with
-        # different prompts at once, so it never adds any padding. We created a comparison of images
-        # generated with and without padding. While small differences were visible, no clear
-        # difference in quality could be observed.
+        # attention masking, these tokens slightly affect the generated images.
 
         with timer.time_section("text_encoding") if timer else nullcontext():
             embeds, mask = self._text_encoder.encode(
@@ -748,13 +741,7 @@ def _schedule(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     scheduler.set_timesteps(
         sigmas=np.linspace(1.0, 1 / step_count, step_count),
-        mu=_calculate_shift(
-            spatial_sequence_length,
-            scheduler.config.get("base_image_seq_len", 256),
-            scheduler.config.get("max_image_seq_len", 4096),
-            scheduler.config.get("base_shift", 0.5),
-            scheduler.config.get("max_shift", 1.15),
-        ),
+        mu=compute_empirical_mu(image_seq_len=spatial_sequence_length, num_steps=step_count),
     )
 
     timesteps = scheduler.timesteps
@@ -766,16 +753,23 @@ def _schedule(
     return timesteps, sigmas
 
 
-def _calculate_shift(
-    image_seq_len: int,
-    base_seq_len: int,
-    max_seq_len: int,
-    base_shift: float,
-    max_shift: float,
-) -> float:
-    m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
-    b = base_shift - m * base_seq_len
-    return image_seq_len * m + b
+# From https://github.com/black-forest-labs/flux2/blob/ab7cca68018ad3ceadcace9d6ecb1bc1f6f46b4e/src/flux2/sampling.py#L251C1-L266C21
+def compute_empirical_mu(image_seq_len: int, num_steps: int) -> float:
+    a1, b1 = 8.73809524e-05, 1.89833333
+    a2, b2 = 0.00016927, 0.45666666
+
+    if image_seq_len > 4300:
+        mu = a2 * image_seq_len + b2
+        return float(mu)
+
+    m_200 = a2 * image_seq_len + b2
+    m_10 = a1 * image_seq_len + b1
+
+    a = (m_200 - m_10) / 190.0
+    b = m_200 - 200.0 * a
+    mu = a * num_steps + b
+
+    return float(mu)
 
 
 def _prepare_ids(*, height: int = 1, width: int = 1, text_sequence_length: int = 1) -> torch.Tensor:
