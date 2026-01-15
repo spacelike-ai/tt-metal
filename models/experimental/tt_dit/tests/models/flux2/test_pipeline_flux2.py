@@ -110,6 +110,8 @@ def test_pipeline(
     filename_prefix = f"flux2_{width}_{height}_{mesh_test_id}"
     if use_torch_text_encoder:
         filename_prefix += "_encodercpu"
+    if use_torch_vae_decoder:
+        filename_prefix += "_vaecpu"
     if not traced:
         filename_prefix += "_untraced"
 

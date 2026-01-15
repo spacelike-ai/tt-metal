@@ -469,21 +469,19 @@ class Flux2Pipeline:
                 )
 
                 torch_latents = ttnn.to_torch(ttnn.get_device_tensors(tt_latents)[0])
-                torch_latents = torch_latents.reshape(
-                    [
-                        transformer_batch_size,
-                        latents_height // self._patch_size,
-                        latents_width // self._patch_size,
-                        self._num_channels_latents * self._patch_size**2,
-                    ]
-                )
 
                 if self._vae_decoder is None:
                     vae = self._torch_vae
 
+                    torch_latents = torch_latents.reshape(
+                        [
+                            transformer_batch_size,
+                            latents_height // self._patch_size,
+                            latents_width // self._patch_size,
+                            self._num_channels_latents * self._patch_size**2,
+                        ]
+                    )
                     torch_latents = torch_latents.permute(0, 3, 1, 2).to(torch.float32)
-
-                    # torch_latents = self._unpack_latents_with_ids(torch_latents, latent_ids)
 
                     latents_bn_mean = vae.bn.running_mean.view(1, -1, 1, 1)
                     latents_bn_std = torch.sqrt(vae.bn.running_var.view(1, -1, 1, 1) + vae.config.batch_norm_eps)
@@ -503,7 +501,12 @@ class Flux2Pipeline:
                 else:
                     with self.encoder_reshape(self.encoder_device):
                         tt_latents = tensor.from_torch(torch_latents, device=self.vae_device)
-                        tt_decoded_output = self._vae_decoder(tt_latents)
+                        tt_latents = self._vae_decoder.preprocess_and_unpatchify(
+                            tt_latents,
+                            height=self._height // self._vae_scale_factor,
+                            width=self._width // self._vae_scale_factor,
+                        )
+                        tt_decoded_output = self._vae_decoder.forward(tt_latents)
                         decoded_output = ttnn.to_torch(ttnn.get_device_tensors(tt_decoded_output)[0]).permute(
                             0, 3, 1, 2
                         )

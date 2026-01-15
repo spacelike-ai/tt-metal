@@ -77,7 +77,7 @@ def test_vae_flux2_decoder(
     f = vae_scale_factor * patch_size
     inp = torch.randn(batch_size, z_channels * patch_size**2, height // f, width // f)
 
-    tt_inp = tensor.from_torch(inp.permute(0, 2, 3, 1), device=mesh_device)
+    tt_inp = tensor.from_torch(inp.permute(0, 2, 3, 1).flatten(1, 2), device=mesh_device)
 
     with torch.no_grad():
         # https://github.com/huggingface/diffusers/blob/1b91856d0eee7b6fb58340e9b54ea2c3d5424311/src/diffusers/pipelines/flux2/pipeline_flux2.py#L866
@@ -90,6 +90,9 @@ def test_vae_flux2_decoder(
         latents = latents.reshape(b, c // (2 * 2), h * 2, w * 2)
         torch_output = torch_model.decode(latents).sample
 
+    tt_inp = tt_model.preprocess_and_unpatchify(
+        tt_inp, height=height // vae_scale_factor, width=width // vae_scale_factor
+    )
     tt_out = tt_model.forward(tt_inp)
 
     tt_out_torch = tensor.to_torch(tt_out).permute(0, 3, 1, 2)

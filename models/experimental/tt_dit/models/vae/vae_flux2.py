@@ -110,19 +110,23 @@ class Flux2VaeDecoder(Module):
         m = self.bn_running_mean.data
         return z * s + m
 
-    def forward(self, z: ttnn.Tensor, /) -> ttnn.Tensor:
-        n, h, w, _ = z.shape
+    def preprocess_and_unpatchify(self, z: ttnn.Tensor, *, height: int, width: int) -> ttnn.Tensor:
+        # N, (H / P) * (W / P), C * P * P -> N, H, W, C
+
+        n, _, _ = z.shape
         p = self._PATCH_SIZE
 
         z = self._inv_normalize(z)
 
-        # N H W (C P P) -> N (H P) (W P) C
         z = ttnn.to_layout(z, ttnn.ROW_MAJOR_LAYOUT)
-        z = z.reshape([n, h, w, -1, p, p])
+        z = z.reshape([n, height // p, width // p, -1, p, p])
         z = ttnn.permute(z, [0, 1, 4, 2, 5, 3])
-        z = z.reshape([n, h * p, w * p, -1])
+        z = z.reshape([n, height, width, -1])
         z = ttnn.to_layout(z, ttnn.TILE_LAYOUT)
 
+        return z
+
+    def forward(self, z: ttnn.Tensor, /) -> ttnn.Tensor:
         z = self.post_quant_conv.forward(z)
         z = self.conv_in.forward(z)
 
