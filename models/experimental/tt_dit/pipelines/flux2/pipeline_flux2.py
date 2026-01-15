@@ -288,12 +288,8 @@ class Flux2Pipeline:
         self,
         *,
         num_images_per_prompt: int = 1,
-        # The diffusers implementation of FLUX.2 does not support CFG but we might as well keep the
-        # code to support it.
-        cfg_scale: float = 1.0,
         guidance_scale: float = 4.0,
         prompts: list[str],
-        negative_prompts: list[str],
         num_inference_steps: int,
         seed: int | None = None,
         traced: bool = False,
@@ -313,7 +309,6 @@ class Flux2Pipeline:
         spatial_sequence_length = (latents_height // self._patch_size) * (latents_width // self._patch_size)
 
         with timer.time_section("total") if timer else nullcontext():
-            cfg_enabled = cfg_scale > 1
             logger.info("encoding prompts...")
 
             with timer.time_section("total_encoding") if timer else nullcontext():
@@ -442,9 +437,9 @@ class Flux2Pipeline:
                         timestep=tt_timestep_list,
                         guidance=tt_guidance_list,
                         latents=tt_latents_step_list,
-                        cfg_enabled=cfg_enabled,
+                        cfg_enabled=False,
                         prompt_embeds=tt_prompt_embeds_list,
-                        cfg_scale=cfg_scale,
+                        cfg_scale=1.0,
                         sigma_difference=tt_sigma_difference_list,
                         spatial_rope_cos=tt_spatial_rope_cos_list,
                         spatial_rope_sin=tt_spatial_rope_sin_list,
