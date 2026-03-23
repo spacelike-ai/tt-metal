@@ -574,7 +574,17 @@ class WanTransformer3DModel(Module):
 
         return spatial_out
 
-    def inner_step(self, spatial_1BNI_torch, prompt_1BLP, rope_cos_1HND, rope_sin_1HND, trans_mat, N, timestep_torch):
+    def inner_step(
+        self,
+        spatial_1BNI,
+        prompt_1BLP,
+        rope_cos_1HND,
+        rope_sin_1HND,
+        trans_mat,
+        N,
+        timestep_torch,
+        gather_output=True,
+    ):
         """
         Reduced forward function which assumes outer loop has cached certain inputs that are step independent:
             - prompt_1BLP
@@ -583,17 +593,12 @@ class WanTransformer3DModel(Module):
             - trans_mat
             - N
 
-        Spatial input is a torch tensor with layout `1 B (patch_F patch_H patch_W) (pF pH pW C)`.
+        Spatial input is a bf16 ttnn.Tensor on device, SP-sharded, with layout
+        `1 B (patch_F patch_H patch_W) (pF pH pW C)`.
+
         Spatial output is an fp32 ttnn.Tensor on device with same layout.
         """
 
-        # Push spatial input to device
-        spatial_1BNI = bf16_tensor(
-            spatial_1BNI_torch,
-            device=self.mesh_device,
-            mesh_axis=self.parallel_config.sequence_parallel.mesh_axis,
-            shard_dim=-2,
-        )
         temb_11BD, timestep_proj_1BTD = self.prepare_timestep_conditioning(timestep_torch)
 
         spatial_1BND = self.patch_embedding(spatial_1BNI)
@@ -624,12 +629,13 @@ class WanTransformer3DModel(Module):
             spatial_norm_1BND, compute_kernel_config=self.hifi4_compute_kernel_config, dtype=ttnn.float32
         )
 
-        # Gather fp32 spatial output across sequence parallel devices (remains on device)
-        spatial_1BNI = self.ccl_manager.all_gather_persistent_buffer(
-            proj_out_1BNI, dim=2, mesh_axis=self.parallel_config.sequence_parallel.mesh_axis
-        )
+        if gather_output:
+            # Gather fp32 spatial output across sequence parallel devices (remains on device)
+            proj_out_1BNI = self.ccl_manager.all_gather_persistent_buffer(
+                proj_out_1BNI, dim=2, mesh_axis=self.parallel_config.sequence_parallel.mesh_axis
+            )
 
-        return spatial_1BNI
+        return proj_out_1BNI
 
     @staticmethod
     def device_to_host(tt_tensor: ttnn.Tensor) -> torch.Tensor:

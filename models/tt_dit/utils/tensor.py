@@ -268,3 +268,8 @@ def unflatten(x: ttnn.Tensor, dim: int, sizes: Sequence[int]) -> ttnn.Tensor:
     else:
         new_shape[dim : dim + 1] = sizes
     return ttnn.reshape(x, new_shape)
+
+
+def empty_like(x: ttnn.Tensor, /) -> ttnn.Tensor:
+    """Allocate an uninitialized tensor with the same specs as an existing tensor."""
+    return ttnn.allocate_tensor_on_device(x.shape, x.dtype, x.layout, x.device(), x.memory_config())
