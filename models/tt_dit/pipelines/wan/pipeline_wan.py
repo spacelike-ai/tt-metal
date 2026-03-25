@@ -803,7 +803,10 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
             )
 
         # 4. Prepare timesteps
-        schedule = schedules.shifted_linear(num_inference_steps, shift=self._flow_shift)
+        schedule = schedules.shifted_linear(
+            num_inference_steps, shift=self._flow_shift, sigma_min=0.001 + 0.999 / num_inference_steps
+        )
+        print(schedule.sigmas)
         timesteps = torch.tensor([s * 1000 for s in schedule.sigmas[:-1]])
 
         # 5. Prepare latent variables
