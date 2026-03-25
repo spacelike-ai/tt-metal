@@ -28,10 +28,10 @@ class EulerSolver(Solver):
 
         sigma_curr = sigmas[step]
         sigma_next = sigmas[step + 1]
-        dt = sigma_next - sigma_curr
 
         if sigma_curr == 0:
             msg = "current sigma is zero; schedule should not step from a fully denoised state"
             raise ValueError(msg)
 
-        return latent + (latent - clean_pred) / sigma_curr * dt
+        f = sigma_next / sigma_curr
+        return f * latent + (1 - f) * clean_pred

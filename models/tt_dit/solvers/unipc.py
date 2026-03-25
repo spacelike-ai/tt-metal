@@ -108,18 +108,17 @@ class UniPCSolver(Solver):
         lam_next = _log_div(alpha_next, sigma_next)
         h = lam_next - lam_curr
 
-        clean_pred = clean_preds[-1]
+        coeff_latent = sigma_next / sigma_curr
+        coeff_curr = alpha_next * (1 - math.exp(-h))
 
-        # order 1: DDIM
-        x = (sigma_next / sigma_curr) * latent + alpha_next * (1 - math.exp(-h)) * clean_pred
+        if order == 1:
+            return coeff_latent * latent + coeff_curr * clean_preds[-1]
 
-        if order >= 2:
-            lam_prev = _log_div(alphas[step - 1], sigmas[step - 1])
-            r = (lam_prev - lam_curr) / h
-            d = clean_preds[-2] - clean_pred
-            x = x + alpha_next * self.variant.b(h) * 0.5 / r * d
+        lam_prev = _log_div(alphas[step - 1], sigmas[step - 1])
+        r = (lam_prev - lam_curr) / h
+        w = alpha_next * self.variant.b(h) * 0.5 / r
 
-        return x
+        return coeff_latent * latent + (coeff_curr - w) * clean_preds[-1] + w * clean_preds[-2]
 
     def _correct(
         self,
@@ -137,40 +136,40 @@ class UniPCSolver(Solver):
         lam_curr = _log_div(alpha_curr, sigma_curr)
         lam_next = _log_div(alpha_next, sigma_next)
         h = lam_next - lam_curr
+        exp_neg_h = math.exp(-h)
 
-        clean_pred = clean_preds[-2]
-        predicted_clean_pred = clean_preds[-1]
-
-        # base DDIM step from corrected latent
-        x = (sigma_next / sigma_curr) * latent + alpha_next * (1 - math.exp(-h)) * clean_pred
+        coeff_latent = sigma_next / sigma_curr
+        coeff_clean = alpha_next * (1 - exp_neg_h)
 
         if order == 1:
             # UniC-1: c=0.5, r=1
-            x = x + alpha_next * self.variant.b(h) * 0.5 * (predicted_clean_pred - clean_pred)
+            w = alpha_next * self.variant.b(h) * 0.5
+            return coeff_latent * latent + (coeff_clean - w) * clean_preds[-2] + w * clean_preds[-1]
 
-        elif order == 2:
-            # UniC-2: solve 2x2 system
-            lam_prev = _log_div(alphas[step - 1], sigmas[step - 1])
-            r_1 = (lam_prev - lam_curr) / h
+        # UniC-2: solve 2x2 system
+        lam_prev = _log_div(alphas[step - 1], sigmas[step - 1])
+        r_1 = (lam_prev - lam_curr) / h
 
-            d_1 = clean_preds[-3] - clean_pred
-            d_2 = predicted_clean_pred - clean_pred
+        g1 = (h - 1 + exp_neg_h) / h**2
+        g2 = (h**2 - 2 * h + 2 - 2 * exp_neg_h) / h**2
 
-            exp_neg_h = math.exp(-h)
-            g1 = (h - 1 + exp_neg_h) / h**2
-            g2 = (h**2 - 2 * h + 2 - 2 * exp_neg_h) / h**2
+        det = h * (1 - r_1)
+        c_1 = (h * g1 - g2) / det
+        c_2 = (g2 - r_1 * h * g1) / det
 
-            det = h * (1 - r_1)
-            c_1 = (h * g1 - g2) / det
-            c_2 = (g2 - r_1 * h * g1) / det
+        w_prev = alpha_next * h * c_1 / r_1
+        w_pred = alpha_next * h * c_2
 
-            x = x + alpha_next * h * (c_1 / r_1 * d_1 + c_2 * d_2)
+        return (
+            coeff_latent * latent
+            + w_prev * clean_preds[-3]
+            + (coeff_clean - w_prev - w_pred) * clean_preds[-2]
+            + w_pred * clean_preds[-1]
+        )
 
-        return x
 
-
-def _taper(order: int, step_index: int, num_steps: int) -> int:
-    return min(order, step_index + 1, num_steps - step_index)
+def _taper(order: int, step: int, num_steps: int) -> int:
+    return min(order, step + 1, num_steps - step)
 
 
 def _log_div(alpha: float, sigma: float) -> float:

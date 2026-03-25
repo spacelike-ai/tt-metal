@@ -29,8 +29,7 @@ from ...models.transformers.wan2_2.transformer_wan import WanTransformer3DModel
 from ...models.vae.vae_wan2_1 import WanDecoder
 from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, ParallelFactor, VaeHWParallelConfig
 from ...parallel.manager import CCLManager
-from ...solvers import UniPCSolver, UniPCVariant
-from ...solvers.schedules import shifted_linear
+from ...solvers import UniPCSolver, UniPCVariant, schedules
 from ...utils import cache, tensor
 from ...utils.conv3d import conv_pad_height, conv_pad_in_channels
 from ...utils.tensor import typed_tensor_2dshard
@@ -804,7 +803,7 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
             )
 
         # 4. Prepare timesteps
-        schedule = shifted_linear(num_inference_steps, shift=self._flow_shift)
+        schedule = schedules.shifted_linear(num_inference_steps, shift=self._flow_shift)
         timesteps = torch.tensor([s * 1000 for s in schedule.sigmas[:-1]])
 
         # 5. Prepare latent variables
