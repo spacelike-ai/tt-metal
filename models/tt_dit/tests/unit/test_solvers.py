@@ -22,6 +22,7 @@ from models.tt_dit.utils.check import assert_quality
 
 _NUM_STEPS = 17
 
+
 # Schedule tests: linear
 
 
