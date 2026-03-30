@@ -34,7 +34,7 @@ class UniPCVariant(Enum):
     def b(self, h: float) -> float:
         if self is UniPCVariant.B1:
             return h
-        return 1 - math.exp(-h)
+        return -math.expm1(-h)
 
 
 class UniPCSolver(Solver):
@@ -112,7 +112,7 @@ class UniPCSolver(Solver):
         h = lam_next - lam_curr
 
         coeff_latent = sigma_next / sigma_curr
-        coeff_curr = alpha_next * (1 - math.exp(-h))
+        coeff_curr = -alpha_next * math.expm1(-h)
 
         if order == 1:
             return coeff_latent * latent + coeff_curr * clean_preds[-1]
@@ -139,10 +139,10 @@ class UniPCSolver(Solver):
         lam_curr = _log_div(alpha_curr, sigma_curr)
         lam_next = _log_div(alpha_next, sigma_next)
         h = lam_next - lam_curr
-        exp_neg_h = math.exp(-h)
+        expm1 = math.expm1(-h)
 
         coeff_latent = sigma_next / sigma_curr
-        coeff_clean = alpha_next * (1 - exp_neg_h)
+        coeff_clean = -alpha_next * expm1
 
         if order == 1:
             # UniC-1: c=0.5, r=1
@@ -153,8 +153,8 @@ class UniPCSolver(Solver):
         lam_prev = _log_div(alphas[step - 1], sigmas[step - 1])
         r_1 = (lam_prev - lam_curr) / h
 
-        g1 = (h - 1 + exp_neg_h) / h**2
-        g2 = (h**2 - 2 * h + 2 - 2 * exp_neg_h) / h**2
+        g1 = (h + expm1) / h**2
+        g2 = (h**2 - 2 * h - 2 * expm1) / h**2
 
         det = h * (1 - r_1)
         c_1 = (h * g1 - g2) / det
