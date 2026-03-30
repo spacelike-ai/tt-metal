@@ -191,5 +191,5 @@ def _taper(order: int, step: int, num_steps: int) -> int:
 
 
 def _log_div(alpha: float, sigma: float) -> float:
-    eps = 1e-6
+    eps = 1.013e-06  # tuned to match diffusers (≈ 1 - (1 - 1e-6) using float32)
     return math.log(max(alpha, eps) / max(sigma, eps))
