@@ -22,7 +22,7 @@ class Solver(ABC):
         latent: ttnn.Tensor,
         sigmas: Sequence[float],
         alphas: Sequence[float],
-        clean_pred: ttnn.Tensor,
+        velocity_pred: ttnn.Tensor,
     ) -> ttnn.Tensor:
         """Advance the latent one step toward the clean data.
 
@@ -31,8 +31,7 @@ class Solver(ABC):
             latent: Noisy latent at the current step.
             sigmas: Full noise schedule (length = num_steps + 1).
             alphas: Full signal schedule (length = num_steps + 1).
-            clean_pred: Denoised prediction x_0 at the current step, i.e. the model's estimate of
-                the clean data.
+            velocity_pred: Predicted velocity at the current step.
 
         Returns:
             The predicted latent at the next step.

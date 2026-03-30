@@ -54,8 +54,10 @@ class UniPCSolver(Solver):
         latent: Tensor,
         sigmas: Sequence[float],
         alphas: Sequence[float],
-        clean_pred: Tensor,
+        velocity_pred: torch.Tensor,
     ) -> Tensor:
+        clean_pred = latent - sigmas[step] * velocity_pred
+
         state = self._state or _State(
             tuple(_empty_like(latent) for _ in range(self.order)),
             _empty_like(latent),

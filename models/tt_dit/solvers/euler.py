@@ -22,16 +22,11 @@ class EulerSolver(Solver):
         latent: ttnn.Tensor,
         sigmas: Sequence[float],
         alphas: Sequence[float],
-        clean_pred: ttnn.Tensor,
+        velocity_pred: ttnn.Tensor,
     ) -> ttnn.Tensor:
         del alphas
 
         sigma_curr = sigmas[step]
         sigma_next = sigmas[step + 1]
 
-        if sigma_curr == 0:
-            msg = "current sigma is zero; schedule should not step from a fully denoised state"
-            raise ValueError(msg)
-
-        f = sigma_next / sigma_curr
-        return f * latent + (1 - f) * clean_pred
+        return latent + (sigma_next - sigma_curr) * velocity_pred

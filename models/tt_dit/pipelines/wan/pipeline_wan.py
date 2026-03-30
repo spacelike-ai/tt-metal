@@ -936,7 +936,7 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                     latent=permuted_latent_tt,
                     sigmas=schedule.sigmas,
                     alphas=schedule.alphas,
-                    clean_pred=permuted_latent_tt - schedule.sigmas[i] * permuted_noise_pred_tt,
+                    velocity_pred=permuted_noise_pred_tt,
                 )
 
                 progress_bar.update()

@@ -126,12 +126,7 @@ def test_linear_quadratic_matches_mochi_diffusers() -> None:
 
 @pytest.mark.parametrize("mesh_device", [(1, 1)], indirect=True)
 def test_euler_matches_diffusers(mesh_device: ttnn.MeshDevice) -> None:
-    """EulerSolver should match FlowMatchEulerDiscreteScheduler at every step.
-
-    Diffusers computes: x_{t+1} = x_t + dt * velocity.
-    Our solver takes clean_pred (x0) and computes: x_{t+1} = x_t + (x_t - x0) / sigma * dt.
-    These are equivalent because velocity = (x_t - x0) / sigma in flow-matching.
-    """
+    """EulerSolver should match FlowMatchEulerDiscreteScheduler at every step."""
     torch.manual_seed(42)
 
     torch_latent = torch.randn(1, 1, 32, 32)
@@ -147,20 +142,19 @@ def test_euler_matches_diffusers(mesh_device: ttnn.MeshDevice) -> None:
 
     for step_idx in range(_NUM_STEPS):
         torch.manual_seed(step_idx)
-        torch_clean_pred = torch.randn_like(torch_latent)
+        torch_velocity = torch.randn_like(torch_latent)
 
         # reference step
-        velocity = (ref - torch_clean_pred) / schedule.sigmas[step_idx]
-        ref = reference.step(velocity, reference.timesteps[step_idx], ref, return_dict=False)[0]
+        ref = reference.step(torch_velocity, reference.timesteps[step_idx], ref, return_dict=False)[0]
 
         # our step
-        clean_pred = tensor.from_torch(torch_clean_pred, device=mesh_device, dtype=ttnn.float32)
+        velocity = tensor.from_torch(torch_velocity, device=mesh_device, dtype=ttnn.float32)
         latent = solver.step(
             step=step_idx,
             latent=latent,
             sigmas=schedule.sigmas,
             alphas=schedule.alphas,
-            clean_pred=clean_pred,
+            velocity_pred=velocity,
         )
 
         result_ours = ttnn.to_torch(latent)
@@ -190,10 +184,9 @@ def test_unipc_matches_diffusers_torch(shift: float) -> None:
 
     for step_idx in range(_NUM_STEPS):
         torch.manual_seed(step_idx)
-        torch_clean_pred = torch.randn_like(torch_latent)
+        velocity = torch.randn_like(torch_latent)
 
         # reference step
-        velocity = (ref - torch_clean_pred) / scheduler.sigmas[step_idx]
         ref = scheduler.step(velocity, scheduler.timesteps[step_idx], ref, return_dict=False)[0]
 
         # our step
@@ -202,7 +195,7 @@ def test_unipc_matches_diffusers_torch(shift: float) -> None:
             latent=latent,
             sigmas=schedule.sigmas,
             alphas=schedule.alphas,
-            clean_pred=torch_clean_pred,
+            velocity_pred=velocity,
         )
 
         assert torch.allclose(latent, ref, rtol=1e-8, atol=1e-8)
@@ -229,20 +222,19 @@ def test_unipc_matches_diffusers(mesh_device: ttnn.MeshDevice, shift: float) -> 
 
     for step_idx in range(_NUM_STEPS):
         torch.manual_seed(step_idx)
-        torch_clean_pred = torch.randn_like(torch_latent)
+        torch_velocity = torch.randn_like(torch_latent)
 
         # reference step
-        velocity = (ref - torch_clean_pred) / scheduler.sigmas[step_idx]
-        ref = scheduler.step(velocity, scheduler.timesteps[step_idx], ref, return_dict=False)[0]
+        ref = scheduler.step(torch_velocity, scheduler.timesteps[step_idx], ref, return_dict=False)[0]
 
         # our step
-        clean_pred = tensor.from_torch(torch_clean_pred, device=mesh_device, dtype=ttnn.float32)
+        velocity = tensor.from_torch(torch_velocity, device=mesh_device, dtype=ttnn.float32)
         latent = solver.step(
             step=step_idx,
             latent=latent,
             sigmas=schedule.sigmas,
             alphas=schedule.alphas,
-            clean_pred=clean_pred,
+            velocity_pred=velocity,
         )
 
         result_ours = ttnn.to_torch(latent)
