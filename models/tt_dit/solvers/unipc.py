@@ -54,7 +54,7 @@ class UniPCSolver(Solver):
         latent: Tensor,
         sigmas: Sequence[float],
         alphas: Sequence[float],
-        velocity_pred: torch.Tensor,
+        velocity_pred: Tensor,
     ) -> Tensor:
         clean_pred = latent - sigmas[step] * velocity_pred
 
