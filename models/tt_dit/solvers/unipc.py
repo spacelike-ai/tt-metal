@@ -7,9 +7,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING
 
-import torch
 import ttnn
 
 from ..utils import tensor
@@ -18,13 +17,11 @@ from .base import Solver
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    Tensor = Union[torch.Tensor, ttnn.Tensor]
-
 
 @dataclass(frozen=True)
 class _State:
-    clean_preds: tuple[Tensor, ...]
-    corrected: Tensor
+    clean_preds: tuple[ttnn.Tensor, ...]
+    corrected: ttnn.Tensor
 
 
 class UniPCVariant(Enum):
@@ -51,16 +48,16 @@ class UniPCSolver(Solver):
         self,
         *,
         step: int,
-        latent: Tensor,
+        latent: ttnn.Tensor,
         sigmas: Sequence[float],
         alphas: Sequence[float],
-        velocity_pred: Tensor,
-    ) -> Tensor:
+        velocity_pred: ttnn.Tensor,
+    ) -> ttnn.Tensor:
         clean_pred = latent - sigmas[step] * velocity_pred
 
         state = self._state or _State(
-            tuple(_empty_like(latent) for _ in range(self.order)),
-            _empty_like(latent),
+            tuple(tensor.empty_like(latent) for _ in range(self.order)),
+            tensor.empty_like(latent),
         )
 
         if step != 0:
@@ -77,10 +74,10 @@ class UniPCSolver(Solver):
 
         del latent
 
-        _copy(corrected, state.corrected)
+        ttnn.copy(corrected, state.corrected)
         del corrected
 
-        _copy(clean_pred, state.clean_preds[0])
+        ttnn.copy(clean_pred, state.clean_preds[0])
         clean_preds = (*state.clean_preds[1:], state.clean_preds[0])
         del clean_pred
 
@@ -100,12 +97,12 @@ class UniPCSolver(Solver):
         self,
         *,
         order: int,
-        latent: Tensor,
+        latent: ttnn.Tensor,
         step: int,
         sigmas: Sequence[float],
         alphas: Sequence[float],
-        clean_preds: Sequence[Tensor],
-    ) -> Tensor:
+        clean_preds: Sequence[ttnn.Tensor],
+    ) -> ttnn.Tensor:
         sigma_curr, sigma_next = sigmas[step : step + 2]
         alpha_curr, alpha_next = alphas[step : step + 2]
 
@@ -129,12 +126,12 @@ class UniPCSolver(Solver):
         self,
         *,
         order: int,
-        latent: Tensor,
+        latent: ttnn.Tensor,
         step: int,
         sigmas: Sequence[float],
         alphas: Sequence[float],
-        clean_preds: Sequence[Tensor],
-    ) -> Tensor:
+        clean_preds: Sequence[ttnn.Tensor],
+    ) -> ttnn.Tensor:
         sigma_curr, sigma_next = sigmas[step : step + 2]
         alpha_curr, alpha_next = alphas[step : step + 2]
 
@@ -171,19 +168,6 @@ class UniPCSolver(Solver):
             + (coeff_clean - w_prev - w_pred) * clean_preds[-2]
             + w_pred * clean_preds[-1]
         )
-
-
-def _empty_like(x: Tensor) -> Tensor:
-    if isinstance(x, torch.Tensor):
-        return torch.empty_like(x)
-    return tensor.empty_like(x)
-
-
-def _copy(src: Tensor, dst: Tensor) -> None:
-    if isinstance(src, torch.Tensor):
-        dst.copy_(src)
-    else:
-        ttnn.copy(src, dst)
 
 
 def _taper(order: int, step: int, num_steps: int) -> int:
