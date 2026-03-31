@@ -804,7 +804,7 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
 
         # 4. Prepare schedule
         (sigmas, alphas) = schedules.shifted_linear(
-            num_inference_steps, shift=self._flow_shift, sigma_min=0.001 + 0.999 / num_inference_steps
+            num_inference_steps, shift=self._flow_shift, sigma_small=0.001 + 0.999 / num_inference_steps
         )
         sigmas[0] -= 1e-6
 

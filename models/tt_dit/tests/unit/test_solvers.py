@@ -36,11 +36,11 @@ def test_linear() -> None:
 
 
 def test_linear_matches_flow_match_euler() -> None:
-    """linear(sigma_min=0.001) should match FlowMatchEulerDiscreteScheduler defaults."""
+    """linear(sigma_small=0.001) should match FlowMatchEulerDiscreteScheduler defaults."""
     reference = FlowMatchEulerDiscreteScheduler()
     reference.set_timesteps(_NUM_STEPS)
 
-    schedule = schedules.linear(_NUM_STEPS, sigma_min=0.001)
+    schedule = schedules.linear(_NUM_STEPS, sigma_small=0.001)
 
     assert torch.equal(reference.sigmas, torch.tensor(schedule.sigmas))
 
@@ -58,14 +58,14 @@ def test_linear_alpha_sigma_sum_to_one() -> None:
 def test_shifted_linear_matches_flow_match_euler_static(shift: float) -> None:
     """shifted_linear() should match FlowMatchEulerDiscreteScheduler defaults.
 
-    Diffusers double-applies the shift: once in __init__ (shifting sigma_min from 0.001
+    Diffusers double-applies the shift: once in __init__ (shifting sigma_small from 0.001
     to shift*0.001/(1+(shift-1)*0.001)), then again in set_timesteps. We match by using
-    the pre-shifted sigma_min.
+    the pre-shifted sigma_small.
     """
     reference = FlowMatchEulerDiscreteScheduler(shift=shift)
     reference.set_timesteps(_NUM_STEPS)
 
-    schedule = schedules.shifted_linear(_NUM_STEPS, shift=shift, sigma_min=reference.sigma_min)
+    schedule = schedules.shifted_linear(_NUM_STEPS, shift=shift, sigma_small=reference.sigma_small)
 
     assert torch.equal(reference.sigmas, torch.tensor(schedule.sigmas))
 
@@ -76,8 +76,8 @@ def test_shifted_linear_matches_flow_match_euler_dynamic(mu: float) -> None:
     reference = FlowMatchEulerDiscreteScheduler(use_dynamic_shifting=True, time_shift_type="exponential")
     reference.set_timesteps(_NUM_STEPS, mu=mu)
 
-    sigma_min = np.float32(0.001).item()
-    schedule = schedules.shifted_linear(_NUM_STEPS, shift=math.exp(mu), sigma_min=sigma_min)
+    sigma_small = np.float32(0.001).item()
+    schedule = schedules.shifted_linear(_NUM_STEPS, shift=math.exp(mu), sigma_small=sigma_small)
 
     assert torch.equal(reference.sigmas, torch.tensor(schedule.sigmas))
 
@@ -87,15 +87,15 @@ def test_shifted_linear_matches_unipc_flow_sigmas(shift: float) -> None:
     """shifted_linear() should match UniPCMultistepScheduler in flow-matching mode.
 
     UniPCMultistepScheduler uses linspace(1, 0.001, N+1)[:-1] as base, giving an
-    effective sigma_min of 0.001 + 0.999/N, and subtracts 1e-6 from the first sigma
+    effective sigma_small of 0.001 + 0.999/N, and subtracts 1e-6 from the first sigma
     to avoid log(1) = 0.
     """
     reference = UniPCMultistepScheduler(use_flow_sigmas=True, flow_shift=shift, prediction_type="flow_prediction")
     reference.set_timesteps(_NUM_STEPS)
 
-    # Diffusers' effective sigma_min from its linspace(1, 0.001, N+1) discretization.
-    unipc_sigma_min = 0.001 + 0.999 / _NUM_STEPS
-    schedule = schedules.shifted_linear(_NUM_STEPS, shift=shift, sigma_min=unipc_sigma_min)
+    # Diffusers' effective sigma_small from its linspace(1, 0.001, N+1) discretization.
+    unipc_sigma_small = 0.001 + 0.999 / _NUM_STEPS
+    schedule = schedules.shifted_linear(_NUM_STEPS, shift=shift, sigma_small=unipc_sigma_small)
 
     schedule.sigmas[0] -= 1e-6
 
@@ -135,7 +135,7 @@ def test_euler_matches_diffusers(mesh_device: ttnn.MeshDevice) -> None:
     reference = FlowMatchEulerDiscreteScheduler()
     reference.set_timesteps(_NUM_STEPS)
 
-    schedule = schedules.linear(_NUM_STEPS, sigma_min=0.001)
+    schedule = schedules.linear(_NUM_STEPS, sigma_small=0.001)
     solver = EulerSolver()
 
     ref = torch_latent.clone()
@@ -182,7 +182,7 @@ def test_unipc_matches_diffusers(mesh_device: ttnn.MeshDevice, variant: UniPCVar
     )
     scheduler.set_timesteps(_NUM_STEPS)
 
-    (sigmas, alphas) = schedules.shifted_linear(_NUM_STEPS, shift=shift, sigma_min=0.001 + 0.999 / _NUM_STEPS)
+    (sigmas, alphas) = schedules.shifted_linear(_NUM_STEPS, shift=shift, sigma_small=0.001 + 0.999 / _NUM_STEPS)
     sigmas[0] -= 1e-6
 
     # diffusers uses float32 for the schedule

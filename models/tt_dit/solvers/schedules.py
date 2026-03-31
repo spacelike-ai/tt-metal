@@ -12,30 +12,30 @@ class Schedule(NamedTuple):
     alphas: list[float]
 
 
-def linear(num_steps: int, *, sigma_min: float | None = None) -> Schedule:
+def linear(num_steps: int, *, sigma_small: float | None = None) -> Schedule:
     """Linear flow-matching schedule.
 
-    Produces num_steps sigmas evenly spaced from 1.0 to sigma_min, plus a terminal 0
+    Produces num_steps sigmas evenly spaced from 1.0 to sigma_small, plus a terminal 0
     (num_steps + 1 total). alpha = 1 - sigma at each point.
 
-    When sigma_min is None, produces uniform spacing from 1.0 to 0.0.
+    When sigma_small is None, produces uniform spacing from 1.0 to 0.0.
     """
-    if sigma_min is None:
-        sigma_min = 1 / num_steps
+    if sigma_small is None:
+        sigma_small = 1 / num_steps
 
-    sigmas = [1.0 - i * (1.0 - sigma_min) / (num_steps - 1) for i in range(num_steps)]
+    sigmas = [1.0 - i * (1.0 - sigma_small) / (num_steps - 1) for i in range(num_steps)]
     sigmas.append(0.0)
     alphas = [1 - s for s in sigmas]
     return Schedule(sigmas, alphas)
 
 
-def shifted_linear(num_steps: int, *, shift: float, sigma_min: float | None = None) -> Schedule:
+def shifted_linear(num_steps: int, *, shift: float, sigma_small: float | None = None) -> Schedule:
     """Shifted linear flow-matching schedule."""
 
     def _shift(t: float) -> float:
         return shift * t / (1 + (shift - 1) * t)
 
-    base = linear(num_steps, sigma_min=sigma_min)
+    base = linear(num_steps, sigma_small=sigma_small)
     sigmas = [_shift(t) for t in base.sigmas[:-1]]
     sigmas.append(0.0)
     alphas = [1 - s for s in sigmas]
