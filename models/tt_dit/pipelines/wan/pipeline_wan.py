@@ -802,12 +802,17 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                 max_sequence_length=max_sequence_length,
             )
 
-        # 4. Prepare timesteps
-        schedule = schedules.shifted_linear(
+        # 4. Prepare schedule
+        (sigmas, alphas) = schedules.shifted_linear(
             num_inference_steps, shift=self._flow_shift, sigma_min=0.001 + 0.999 / num_inference_steps
         )
-        print(schedule.sigmas)
-        timesteps = torch.tensor([s * 1000 for s in schedule.sigmas[:-1]])
+        sigmas[0] -= 1e-6
+
+        # diffusers uses float32 for the schedule
+        sigmas = torch.tensor(sigmas, dtype=torch.float32).tolist()
+        alphas = (1 - torch.tensor(sigmas, dtype=torch.float32)).tolist()
+
+        timesteps = torch.tensor([s * 1000 for s in sigmas[:-1]])
 
         # 5. Prepare latent variables
         if seed is not None:
@@ -934,8 +939,8 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                 permuted_latent_tt = self._solver.step(
                     step=i,
                     latent=permuted_latent_tt,
-                    sigmas=schedule.sigmas,
-                    alphas=schedule.alphas,
+                    sigmas=sigmas,
+                    alphas=alphas,
                     velocity_pred=permuted_noise_pred_tt,
                 )
 

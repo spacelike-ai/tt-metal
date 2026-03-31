@@ -106,21 +106,23 @@ class UniPCSolver(Solver):
         sigma_curr, sigma_next = sigmas[step : step + 2]
         alpha_curr, alpha_next = alphas[step : step + 2]
 
-        lam_curr = _log_div(alpha_curr, sigma_curr)
-        lam_next = _log_div(alpha_next, sigma_next)
+        lam_curr = _log(alpha_curr) - _log(sigma_curr)
+        lam_next = _log(alpha_next) - _log(sigma_next)
         h = lam_next - lam_curr
 
         coeff_latent = sigma_next / sigma_curr
         coeff_curr = -alpha_next * math.expm1(-h)
 
-        if order == 1:
-            return coeff_latent * latent + coeff_curr * clean_preds[-1]
+        latent = coeff_latent * latent + coeff_curr * clean_preds[-1]
 
-        lam_prev = _log_div(alphas[step - 1], sigmas[step - 1])
-        r = (lam_prev - lam_curr) / h
+        if order == 1:
+            return latent
+
+        lam_prev = _log(alphas[step - 1]) - _log(sigmas[step - 1])
+        r = (lam_curr - lam_prev) / h
         w = alpha_next * self.variant.b(h) * 0.5 / r
 
-        return coeff_latent * latent + (coeff_curr - w) * clean_preds[-1] + w * clean_preds[-2]
+        return latent + w * (clean_preds[-1] - clean_preds[-2])
 
     def _correct(
         self,
@@ -135,45 +137,46 @@ class UniPCSolver(Solver):
         sigma_curr, sigma_next = sigmas[step : step + 2]
         alpha_curr, alpha_next = alphas[step : step + 2]
 
-        lam_curr = _log_div(alpha_curr, sigma_curr)
-        lam_next = _log_div(alpha_next, sigma_next)
+        lam_curr = _log(alpha_curr) - _log(sigma_curr)
+        lam_next = _log(alpha_next) - _log(sigma_next)
         h = lam_next - lam_curr
-        expm1 = math.expm1(-h)
 
         coeff_latent = sigma_next / sigma_curr
-        coeff_clean = -alpha_next * expm1
+        coeff_clean = -alpha_next * math.expm1(-h)
+
+        latent = coeff_latent * latent + coeff_clean * clean_preds[-2]
 
         if order == 1:
             # UniC-1: c=0.5, r=1
             w = alpha_next * self.variant.b(h) * 0.5
-            return coeff_latent * latent + (coeff_clean - w) * clean_preds[-2] + w * clean_preds[-1]
+            return latent + w * (clean_preds[-1] - clean_preds[-2])
 
         # UniC-2: solve 2x2 system
-        lam_prev = _log_div(alphas[step - 1], sigmas[step - 1])
-        r_1 = (lam_prev - lam_curr) / h
+        exp_neg_h = math.expm1(-h)
 
-        g1 = (h + expm1) / h**2
-        g2 = (h**2 - 2 * h - 2 * expm1) / h**2
+        lam_prev = _log(alphas[step - 1]) - _log(sigmas[step - 1])
+        r_1 = (lam_curr - lam_prev) / h
 
-        det = h * (1 - r_1)
-        c_1 = (h * g1 - g2) / det
-        c_2 = (g2 - r_1 * h * g1) / det
+        g1 = (h + exp_neg_h) / h**2
+        g2 = (h**2 - 2 * h - 2 * exp_neg_h) / h**2
 
-        w_prev = alpha_next * h * c_1 / r_1
-        w_pred = alpha_next * h * c_2
+        if math.isinf(r_1):
+            w_prev = 0.0
+            w_pred = alpha_next * h * g1
+        else:
+            det = h * (1 + r_1)
+            c_1 = (h * g1 - g2) / det
+            c_2 = (g2 + r_1 * h * g1) / det
 
-        return (
-            coeff_latent * latent
-            + w_prev * clean_preds[-3]
-            + (coeff_clean - w_prev - w_pred) * clean_preds[-2]
-            + w_pred * clean_preds[-1]
-        )
+            w_prev = alpha_next * h * c_1 / r_1
+            w_pred = alpha_next * h * c_2
+
+        return latent + w_prev * (clean_preds[-2] - clean_preds[-3]) + w_pred * (clean_preds[-1] - clean_preds[-2])
 
 
 def _taper(order: int, step: int, num_steps: int) -> int:
     return min(order, step + 1, num_steps - step)
 
 
-def _log_div(alpha: float, sigma: float) -> float:
-    eps = 1.013e-06  # tuned to match diffusers (≈ 1 - (1 - 1e-6) using float32)
-    return math.log(max(alpha, eps) / max(sigma, eps))
+def _log(x: float, /) -> float:
+    return math.log(x) if x != 0 else -math.inf

@@ -182,7 +182,13 @@ def test_unipc_matches_diffusers(mesh_device: ttnn.MeshDevice, variant: UniPCVar
     )
     scheduler.set_timesteps(_NUM_STEPS)
 
-    schedule = schedules.shifted_linear(_NUM_STEPS, shift=shift, sigma_min=0.001 + 0.999 / _NUM_STEPS)
+    (sigmas, alphas) = schedules.shifted_linear(_NUM_STEPS, shift=shift, sigma_min=0.001 + 0.999 / _NUM_STEPS)
+    sigmas[0] -= 1e-6
+
+    # diffusers uses float32 for the schedule
+    sigmas = torch.tensor(sigmas, dtype=torch.float32).tolist()
+    alphas = (1 - torch.tensor(sigmas, dtype=torch.float32)).tolist()
+
     solver = UniPCSolver(order=2, variant=variant)
 
     ref = torch_latent.clone()
@@ -203,10 +209,10 @@ def test_unipc_matches_diffusers(mesh_device: ttnn.MeshDevice, variant: UniPCVar
         latent = solver.step(
             step=step_idx,
             latent=latent,
-            sigmas=schedule.sigmas,
-            alphas=schedule.alphas,
+            sigmas=sigmas,
+            alphas=alphas,
             velocity_pred=velocity,
         )
 
         result_ours = ttnn.to_torch(latent)
-        assert_quality(result_ours, ref, pcc=0.999_999, relative_rmse=1e-5)
+        assert_quality(result_ours, ref, pcc=1 - 3e-14, relative_rmse=3e-7)
