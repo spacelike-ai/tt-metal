@@ -293,17 +293,17 @@ class MotifPipeline:
 
     def run_single_prompt(
         self,
-        prompt,
-        negative_prompt=None,
-        num_inference_steps=40,
-        cfg_scale=5.0,
-        seed=None,
-        traced=True,
+        prompt: str,
+        negative_prompt: str | None = None,
+        num_inference_steps: int = 40,
+        cfg_scale: float = 5.0,
+        seed: int | None = None,
+        traced: bool = True,
         vae_traced: bool | None = None,
         encoder_traced: bool | None = None,
-        profiler=None,
-        profiler_iteration=0,
-    ):
+        profiler: BenchmarkProfiler | None = None,
+        profiler_iteration: int = 0,
+    ) -> list[Image.Image]:
         return self.__call__(
             prompt_1=[prompt],
             prompt_2=[prompt],
