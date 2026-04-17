@@ -26,6 +26,7 @@ from ...utils import cache, tensor
 from ...utils.padding import PaddingConfig
 from ...utils.substate import substate
 from ...utils.tracing import Tracer
+from ..cfg import CFGCombiner
 from ..events import PipelineEvent, SectionEnd, SectionStart, null_callback
 from .text_encoder import TextEncoder
 
@@ -90,21 +91,7 @@ class MotifPipeline:
             for submesh_device in self._submesh_devices
         ]
 
-        if parallel_config.cfg_parallel.factor != 1:
-            socket_connections = [
-                ttnn.SocketConnection(
-                    ttnn.MeshCoreCoord(coord, ttnn.CoreCoord(0, 0)),
-                    ttnn.MeshCoreCoord(coord, ttnn.CoreCoord(0, 0)),
-                )
-                for coord in ttnn.MeshCoordinateRange(ttnn.MeshShape(*submesh_shape))
-            ]
-            socket_config = ttnn.SocketConfig(socket_connections, ttnn.SocketMemoryConfig(ttnn.BufferType.L1, 4096))
-            self._tx_0to1, self._rx_0to1 = ttnn.create_socket_pair(
-                self._submesh_devices[0], self._submesh_devices[1], socket_config
-            )
-            self._tx_1to0, self._rx_1to0 = ttnn.create_socket_pair(
-                self._submesh_devices[1], self._submesh_devices[0], socket_config
-            )
+        self._combiner = CFGCombiner(tuple(self._submesh_devices))
 
         self.encoder_device = self._submesh_devices[0]
         original_encoder_mesh_shape = list(self.encoder_device.shape)
@@ -608,25 +595,8 @@ class MotifPipeline:
             noise_pred_list.append(noise_pred)
 
         if cfg_enabled:
-            if self._parallel_config.cfg_parallel.factor == 1:
-                split_pos = noise_pred_list[0].shape[0] // 2
-                uncond = noise_pred_list[0][0:split_pos]
-                cond = noise_pred_list[0][split_pos:]
-                noise_pred_list[0] = uncond + cfg_scale * (cond - uncond)
-            else:
-                uncond0 = noise_pred_list[0]
-                cond1 = noise_pred_list[1]
-
-                uncond1 = ttnn.allocate_tensor_on_device(uncond0.spec, self._submesh_devices[1])
-                cond0 = ttnn.allocate_tensor_on_device(cond1.spec, self._submesh_devices[0])
-
-                ttnn.experimental.send_async(uncond0, self._tx_0to1)
-                ttnn.experimental.recv_async(uncond1, self._rx_0to1)
-                ttnn.experimental.send_async(cond1, self._tx_1to0)
-                ttnn.experimental.recv_async(cond0, self._rx_1to0)
-
-                noise_pred_list[0] = uncond0 + cfg_scale * (cond0 - uncond0)
-                noise_pred_list[1] = uncond1 + cfg_scale * (cond1 - uncond1)
+            for submesh_id in range(len(self._submesh_devices)):
+                noise_pred_list[submesh_id] = self._combiner.combine(noise_pred_list[submesh_id], cfg_scale)
 
         for submesh_id, submesh_device in enumerate(self._submesh_devices):
             ttnn.synchronize_device(submesh_device)  # Helps with accurate time profiling.
