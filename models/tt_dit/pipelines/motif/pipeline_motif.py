@@ -17,8 +17,6 @@ from loguru import logger
 import ttnn
 from models.perf.benchmarking_utils import BenchmarkProfiler
 
-from ...encoders.clip.encoder_pair import CLIPTokenizerEncoderPair
-from ...encoders.t5.encoder_pair import T5TokenizerEncoderPair
 from ...models.transformers.transformer_motif import MOTIF_6B_CONFIG, MotifTransformer, convert_motif_transformer_state
 from ...models.vae.vae_sd35 import VAEDecoder
 from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, ParallelFactor, VAEParallelConfig
@@ -28,10 +26,10 @@ from ...utils import cache, tensor
 from ...utils.padding import PaddingConfig
 from ...utils.substate import substate
 from ...utils.tracing import Tracer
+from ..events import PipelineEvent, SectionEnd, SectionStart, null_callback
+from .text_encoder import TextEncoder
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
-
     from PIL import Image
 
 
@@ -195,7 +193,6 @@ class MotifPipeline:
         with self.encoder_reshape(self.encoder_device):
             logger.info("creating TT-NN CLIP text encoder...")
             self._text_encoder = TextEncoder(
-                device=self.encoder_device,
                 ccl_manager=self._ccl_managers[0],
                 parallel_config=encoder_parallel_config,
                 enable_t5=enable_t5_text_encoder,
@@ -380,24 +377,35 @@ class MotifPipeline:
         assert num_images_per_prompt == 1, "generating multiple images is not supported"
         assert prompt_count == 1, "generating multiple images is not supported"
 
+        if profiler is not None:
+
+            def on_event(event: PipelineEvent) -> None:
+                if isinstance(event, SectionStart):
+                    profiler.start(event.name, profiler_iteration)
+                elif isinstance(event, SectionEnd):
+                    profiler.end(event.name, profiler_iteration)
+
+        else:
+            on_event = null_callback
+
         with profiler("total", profiler_iteration) if profiler else nullcontext():
             cfg_enabled = cfg_scale > 1
             logger.info("encoding prompts...")
 
             with profiler("encoder", profiler_iteration) if profiler else nullcontext():
                 with self.encoder_reshape(self.encoder_device):
-                    prompt_embeds1, pooled_prompt_embeds1, prompt_embeds2, pooled_prompt_embeds2 = self._encode_prompts(
-                        prompt_1=prompt_1,
-                        prompt_2=prompt_2,
-                        prompt_3=prompt_3,
-                        negative_prompt_1=negative_prompt_1,
-                        negative_prompt_2=negative_prompt_2,
-                        negative_prompt_3=negative_prompt_3,
+                    (
+                        prompt_embeds1,
+                        pooled_prompt_embeds1,
+                        prompt_embeds2,
+                        pooled_prompt_embeds2,
+                    ) = self._text_encoder.encode_cfg(
+                        (prompt_1, prompt_2, prompt_3),
+                        (negative_prompt_1, negative_prompt_2, negative_prompt_3),
                         num_images_per_prompt=num_images_per_prompt,
                         cfg_enabled=cfg_enabled,
                         traced=encoder_traced,
-                        profiler=profiler,
-                        profiler_iteration=profiler_iteration,
+                        on_event=on_event,
                     )
 
             logger.info("preparing timesteps...")
@@ -627,149 +635,6 @@ class MotifPipeline:
             )
 
         return latents_out
-
-    def _encode_prompts(
-        self,
-        *,
-        prompt_1: list[str],
-        prompt_2: list[str],
-        prompt_3: list[str],
-        negative_prompt_1: list[str | None],
-        negative_prompt_2: list[str | None],
-        negative_prompt_3: list[str | None],
-        num_images_per_prompt: int,
-        cfg_enabled: bool,
-        traced: bool = False,
-        profiler: BenchmarkProfiler = None,
-        profiler_iteration: int = 0,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        no_negative_prompt = [x is None for x in negative_prompt_1]
-        negative_prompt_1 = [x if x is not None else "" for x in negative_prompt_1]
-        negative_prompt_2 = [x if x is not None else "" for x in negative_prompt_2]
-        negative_prompt_3 = [x if x is not None else "" for x in negative_prompt_3]
-
-        with profiler("text_encoding", profiler_iteration) if profiler else nullcontext():
-            pos_prompt_embeds, pos_pooled_prompt_embeds = self._text_encoder.encode(
-                prompt_1,
-                prompt_2,
-                prompt_3,
-                num_images_per_prompt=num_images_per_prompt,
-                traced=traced,
-                profiler=profiler,
-                profiler_iteration=profiler_iteration,
-            )
-
-            neg_prompt_embeds, neg_pooled_prompt_embeds = self._text_encoder.encode(
-                negative_prompt_1,
-                negative_prompt_2,
-                negative_prompt_3,
-                num_images_per_prompt=num_images_per_prompt,
-                traced=traced,
-                profiler=profiler,
-                profiler_iteration=profiler_iteration,
-            )
-
-        if not cfg_enabled:
-            return pos_prompt_embeds, pos_pooled_prompt_embeds, pos_prompt_embeds, pos_pooled_prompt_embeds
-
-        zeroed_prompt_embeds = neg_prompt_embeds.clone()
-        zeroed_pooled_prompt_embeds = neg_pooled_prompt_embeds.clone()
-
-        for i, no_neg in enumerate(no_negative_prompt):
-            if no_neg:
-                zeroed_prompt_embeds[i] = 0
-                zeroed_pooled_prompt_embeds[i] = 0
-
-        prompt_embeds = torch.cat([neg_prompt_embeds, pos_prompt_embeds], dim=0)
-        prompt_embeds_alt = torch.cat([zeroed_prompt_embeds, pos_prompt_embeds], dim=0)
-
-        pooled_prompt_embeds = torch.cat([neg_pooled_prompt_embeds, pos_pooled_prompt_embeds], dim=0)
-        pooled_prompt_embeds_alt = torch.cat([zeroed_pooled_prompt_embeds, pos_pooled_prompt_embeds], dim=0)
-
-        return prompt_embeds, pooled_prompt_embeds, prompt_embeds_alt, pooled_prompt_embeds_alt
-
-
-class TextEncoder:
-    def __init__(
-        self,
-        *,
-        device: ttnn.MeshDevice,
-        ccl_manager: CCLManager,
-        parallel_config: EncoderParallelConfig,
-        enable_t5: bool,
-        use_torch_clip_encoder: bool,
-        use_torch_t5_encoder: bool,
-    ) -> None:
-        self._device = device
-        self._ccl_manager = ccl_manager
-        self._parallel_config = parallel_config
-
-        self._clip_l = CLIPTokenizerEncoderPair(
-            "openai/clip-vit-large-patch14",
-            skip_norm=False,
-            true_clip_skip=0,
-            zero_masking=True,
-            sequence_length=None,
-            device=device,
-            ccl_manager=ccl_manager,
-            parallel_config=parallel_config,
-            use_torch=use_torch_clip_encoder,
-        )
-
-        self._clip_g = CLIPTokenizerEncoderPair(
-            "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
-            skip_norm=False,
-            true_clip_skip=0,
-            zero_masking=True,
-            sequence_length=None,
-            device=device,
-            ccl_manager=ccl_manager,
-            parallel_config=parallel_config,
-            use_torch=use_torch_clip_encoder,
-        )
-
-        self._t5 = T5TokenizerEncoderPair(
-            "google/flan-t5-xxl",
-            zero_masking=True,
-            sequence_length=256,
-            empty_sequence_length=None,
-            embedding_dim=4096,
-            device=device,
-            ccl_manager=ccl_manager,
-            parallel_config=parallel_config,
-            use_torch=use_torch_t5_encoder,
-            enabled=enable_t5,
-            use_attention_mask=True,
-        )
-
-    def encode(
-        self,
-        prompts_1: Iterable[str],
-        prompts_2: Iterable[str],
-        prompts_3: Iterable[str],
-        *,
-        num_images_per_prompt: int,
-        traced: bool = False,
-        profiler: BenchmarkProfiler = None,
-        profiler_iteration: int = 0,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        with profiler("clip_encoding", profiler_iteration) if profiler else nullcontext():
-            clip_l, pooled_clip_l = self._clip_l.encode(
-                prompts=prompts_1, num_images_per_prompt=num_images_per_prompt, enable_tracing=traced
-            )
-            clip_g, pooled_clip_g = self._clip_g.encode(
-                prompts=prompts_2, num_images_per_prompt=num_images_per_prompt, enable_tracing=traced
-            )
-        with profiler("t5_encoding", profiler_iteration) if profiler else nullcontext():
-            t5 = self._t5.encode(prompts=prompts_3, num_images_per_prompt=num_images_per_prompt, enable_tracing=traced)
-
-        clip = torch.cat([clip_l, clip_g], dim=-1)
-        clip = torch.nn.functional.pad(clip, (0, t5.shape[-1] - clip.shape[-1]))
-
-        embeds = torch.cat([clip, t5], dim=-2)
-        pooled_embeds = torch.cat([pooled_clip_l, pooled_clip_g], dim=-1)
-
-        return embeds, pooled_embeds
 
 
 def _schedule(*, step_count: int, linear_quadratic_emulating_steps: int) -> tuple[list[float], list[float]]:
