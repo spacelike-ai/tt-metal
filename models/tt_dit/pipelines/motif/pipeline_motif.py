@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -16,7 +15,6 @@ from diffusers.image_processor import VaeImageProcessor
 from loguru import logger
 
 import ttnn
-from models.perf.benchmarking_utils import BenchmarkProfiler
 
 from ...models.transformers.transformer_motif import MOTIF_6B_CONFIG, MotifTransformer, convert_motif_transformer_state
 from ...models.vae.vae_sd35 import VAEDecoder
@@ -28,7 +26,7 @@ from ...utils.padding import PaddingConfig
 from ...utils.substate import substate
 from ...utils.tracing import Tracer
 from ..cfg import CFGCombiner
-from ..events import PipelineEvent, SectionEnd, SectionStart, null_callback
+from ..events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
 from ..mesh import create_submeshes, reshape_device
 from .text_encoder import TextEncoder
 
@@ -296,8 +294,7 @@ class MotifPipeline:
         traced: bool = True,
         vae_traced: bool | None = None,
         encoder_traced: bool | None = None,
-        profiler: BenchmarkProfiler | None = None,
-        profiler_iteration: int = 0,
+        on_event: PipelineEventCallback | None = None,
     ) -> list[Image.Image]:
         return self.__call__(
             prompt_1=[prompt],
@@ -312,8 +309,7 @@ class MotifPipeline:
             traced=traced,
             vae_traced=vae_traced,
             encoder_traced=encoder_traced,
-            profiler=profiler,
-            profiler_iteration=profiler_iteration,
+            on_event=on_event,
         )
 
     def __call__(
@@ -334,12 +330,12 @@ class MotifPipeline:
         traced: bool = False,
         vae_traced: bool | None = None,
         encoder_traced: bool | None = None,
-        profiler: BenchmarkProfiler = None,
-        profiler_iteration: int = 0,
+        on_event: PipelineEventCallback | None = None,
     ) -> list[Image.Image]:
         vae_traced = vae_traced if vae_traced is not None else traced
         encoder_traced = encoder_traced if encoder_traced is not None else traced
         prompt_count = len(prompt_1)
+        on_event = on_event if on_event is not None else null_callback
 
         sp_axis = self._parallel_config.sequence_parallel.mesh_axis
         cfg_factor = self._parallel_config.cfg_parallel.factor
@@ -347,173 +343,167 @@ class MotifPipeline:
         assert num_images_per_prompt == 1, "generating multiple images is not supported"
         assert prompt_count == 1, "generating multiple images is not supported"
 
-        if profiler is not None:
+        on_event(SectionStart("total"))
+        cfg_enabled = cfg_scale > 1
+        logger.info("encoding prompts...")
 
-            def on_event(event: PipelineEvent) -> None:
-                if isinstance(event, SectionStart):
-                    profiler.start(event.name, profiler_iteration)
-                elif isinstance(event, SectionEnd):
-                    profiler.end(event.name, profiler_iteration)
-
-        else:
-            on_event = null_callback
-
-        with profiler("total", profiler_iteration) if profiler else nullcontext():
-            cfg_enabled = cfg_scale > 1
-            logger.info("encoding prompts...")
-
-            with profiler("encoder", profiler_iteration) if profiler else nullcontext():
-                with self._reshape_encoder_device():
-                    (
-                        prompt_embeds1,
-                        pooled_prompt_embeds1,
-                        prompt_embeds2,
-                        pooled_prompt_embeds2,
-                    ) = self._text_encoder.encode_cfg(
-                        (prompt_1, prompt_2, prompt_3),
-                        (negative_prompt_1, negative_prompt_2, negative_prompt_3),
-                        num_images_per_prompt=num_images_per_prompt,
-                        cfg_enabled=cfg_enabled,
-                        traced=encoder_traced,
-                        on_event=on_event,
-                    )
-
-            logger.info("preparing timesteps...")
-            sigmas, alphas = _schedule(
-                step_count=num_inference_steps,
-                linear_quadratic_emulating_steps=linear_quadratic_emulating_steps,
+        on_event(SectionStart("encoder"))
+        with self._reshape_encoder_device():
+            (
+                prompt_embeds1,
+                pooled_prompt_embeds1,
+                prompt_embeds2,
+                pooled_prompt_embeds2,
+            ) = self._text_encoder.encode_cfg(
+                (prompt_1, prompt_2, prompt_3),
+                (negative_prompt_1, negative_prompt_2, negative_prompt_3),
+                num_images_per_prompt=num_images_per_prompt,
+                cfg_enabled=cfg_enabled,
+                traced=encoder_traced,
+                on_event=on_event,
             )
-            for solver in self._solvers:
-                solver.set_schedule(sigmas=sigmas, alphas=alphas)
-            timesteps = [s * 1000 for s in sigmas[:-1]]
+        on_event(SectionEnd("encoder"))
 
-            logger.info("preparing latents...")
+        logger.info("preparing timesteps...")
+        sigmas, alphas = _schedule(
+            step_count=num_inference_steps,
+            linear_quadratic_emulating_steps=linear_quadratic_emulating_steps,
+        )
+        for solver in self._solvers:
+            solver.set_schedule(sigmas=sigmas, alphas=alphas)
+        timesteps = [s * 1000 for s in sigmas[:-1]]
 
-            if seed is not None:
-                torch.manual_seed(seed)
+        logger.info("preparing latents...")
 
-            shape = [
-                prompt_count * num_images_per_prompt,
-                self._num_channels_latents,
-                self._height // self._vae_scale_factor,
-                self._width // self._vae_scale_factor,
-            ]
-            # We let randn generate a permuted latent tensor in float32, so that the generated noise
-            # matches the reference implementation.
-            latents = self.transformers[0].patchify(
-                torch.randn(shape, dtype=torch.float32).to(dtype=torch.bfloat16).permute(0, 2, 3, 1)
+        if seed is not None:
+            torch.manual_seed(seed)
+
+        shape = [
+            prompt_count * num_images_per_prompt,
+            self._num_channels_latents,
+            self._height // self._vae_scale_factor,
+            self._width // self._vae_scale_factor,
+        ]
+        # We let randn generate a permuted latent tensor in float32, so that the generated noise
+        # matches the reference implementation.
+        latents = self.transformers[0].patchify(
+            torch.randn(shape, dtype=torch.float32).to(dtype=torch.bfloat16).permute(0, 2, 3, 1)
+        )
+
+        tt_prompt_embeds_list = []
+        tt_prompt_embeds1_list = []
+        tt_prompt_embeds2_list = []
+        tt_pooled_prompt_embeds_list = []
+        tt_pooled_prompt_embeds1_list = []
+        tt_pooled_prompt_embeds2_list = []
+        tt_latents_step_list = []
+        for i, submesh_device in enumerate(self._submesh_devices):
+            # Allocate tensors on the host to ensure that they do not get overwritten by trace
+            # execution.
+            tt_prompt_embeds1 = tensor.from_torch(
+                prompt_embeds1[i : i + 1] if cfg_factor == 2 else prompt_embeds1,
+                device=submesh_device,
+                on_host=traced,
+            )
+            tt_prompt_embeds2 = tensor.from_torch(
+                prompt_embeds2[i : i + 1] if cfg_factor == 2 else prompt_embeds2,
+                device=submesh_device,
+                on_host=traced,
+            )
+            tt_pooled_prompt_embeds1 = tensor.from_torch(
+                pooled_prompt_embeds1[i : i + 1] if cfg_factor == 2 else pooled_prompt_embeds1,
+                device=submesh_device,
+                on_host=traced,
+            )
+            tt_pooled_prompt_embeds2 = tensor.from_torch(
+                pooled_prompt_embeds2[i : i + 1] if cfg_factor == 2 else pooled_prompt_embeds2,
+                device=submesh_device,
+                on_host=traced,
             )
 
-            tt_prompt_embeds_list = []
-            tt_prompt_embeds1_list = []
-            tt_prompt_embeds2_list = []
-            tt_pooled_prompt_embeds_list = []
-            tt_pooled_prompt_embeds1_list = []
-            tt_pooled_prompt_embeds2_list = []
-            tt_latents_step_list = []
-            for i, submesh_device in enumerate(self._submesh_devices):
-                # Allocate tensors on the host to ensure that they do not get overwritten by trace
-                # execution.
-                tt_prompt_embeds1 = tensor.from_torch(
-                    prompt_embeds1[i : i + 1] if cfg_factor == 2 else prompt_embeds1,
+            tt_initial_latents = tensor.from_torch(latents, device=submesh_device, mesh_axes=[None, sp_axis, None])
+
+            tt_prompt_embeds1_list.append(tt_prompt_embeds1)
+            tt_prompt_embeds2_list.append(tt_prompt_embeds2)
+            tt_pooled_prompt_embeds1_list.append(tt_pooled_prompt_embeds1)
+            tt_pooled_prompt_embeds2_list.append(tt_pooled_prompt_embeds2)
+            tt_latents_step_list.append(tt_initial_latents)
+            del tt_initial_latents
+
+        logger.info("denoising...")
+
+        on_event(SectionStart("denoising"))
+        for i, t in enumerate(tqdm.tqdm(timesteps)):
+            on_event(SectionStart(f"denoising_step_{i}"))
+            tt_timestep_list = []
+            for submesh_nr, submesh_device in enumerate(self._submesh_devices):
+                # Allocation on device is fine, because timesteps are not used after
+                # trace execution, and can be overwritten during trace execution.
+                tt_timestep = ttnn.full(
+                    [1, 1],
+                    fill_value=t,
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=ttnn.float32,
                     device=submesh_device,
-                    on_host=traced,
                 )
-                tt_prompt_embeds2 = tensor.from_torch(
-                    prompt_embeds2[i : i + 1] if cfg_factor == 2 else prompt_embeds2,
-                    device=submesh_device,
-                    on_host=traced,
-                )
-                tt_pooled_prompt_embeds1 = tensor.from_torch(
-                    pooled_prompt_embeds1[i : i + 1] if cfg_factor == 2 else pooled_prompt_embeds1,
-                    device=submesh_device,
-                    on_host=traced,
-                )
-                tt_pooled_prompt_embeds2 = tensor.from_torch(
-                    pooled_prompt_embeds2[i : i + 1] if cfg_factor == 2 else pooled_prompt_embeds2,
-                    device=submesh_device,
-                    on_host=traced,
-                )
+                tt_timestep_list.append(tt_timestep)
 
-                tt_initial_latents = tensor.from_torch(latents, device=submesh_device, mesh_axes=[None, sp_axis, None])
+            if t >= 1000 * negative_strategy_switch_time:
+                tt_prompt_embeds_list = tt_prompt_embeds1_list
+                tt_pooled_prompt_embeds_list = tt_pooled_prompt_embeds1_list
+            else:
+                tt_prompt_embeds_list = tt_prompt_embeds2_list
+                tt_pooled_prompt_embeds_list = tt_pooled_prompt_embeds2_list
 
-                tt_prompt_embeds1_list.append(tt_prompt_embeds1)
-                tt_prompt_embeds2_list.append(tt_prompt_embeds2)
-                tt_pooled_prompt_embeds1_list.append(tt_pooled_prompt_embeds1)
-                tt_pooled_prompt_embeds2_list.append(tt_pooled_prompt_embeds2)
-                tt_latents_step_list.append(tt_initial_latents)
-                del tt_initial_latents
+            tt_latents_step_list = self._step(
+                timestep=tt_timestep_list,
+                latents=tt_latents_step_list,
+                cfg_enabled=cfg_enabled,
+                prompt_embeds=tt_prompt_embeds_list,
+                pooled_prompt_embeds=tt_pooled_prompt_embeds_list,
+                cfg_scale=cfg_scale,
+                step_index=i,
+                traced=traced,
+            )
+            on_event(SectionEnd(f"denoising_step_{i}"))
+        on_event(SectionEnd("denoising"))
 
-            logger.info("denoising...")
+        logger.info("decoding image...")
 
-            with profiler("denoising", profiler_iteration) if profiler else nullcontext():
-                for i, t in enumerate(tqdm.tqdm(timesteps)):
-                    with profiler(f"denoising_step_{i}", profiler_iteration) if profiler else nullcontext():
-                        tt_timestep_list = []
-                        for submesh_nr, submesh_device in enumerate(self._submesh_devices):
-                            # Allocation on device is fine, because timesteps are not used after
-                            # trace execution, and can be overwritten during trace execution.
-                            tt_timestep = ttnn.full(
-                                [1, 1],
-                                fill_value=t,
-                                layout=ttnn.TILE_LAYOUT,
-                                dtype=ttnn.float32,
-                                device=submesh_device,
-                            )
-                            tt_timestep_list.append(tt_timestep)
+        on_event(SectionStart("vae"))
+        # Sync because we don't pass a persistent buffer or a barrier semaphore.
+        ttnn.synchronize_device(self.vae_device)
 
-                        if t >= 1000 * negative_strategy_switch_time:
-                            tt_prompt_embeds_list = tt_prompt_embeds1_list
-                            tt_pooled_prompt_embeds_list = tt_pooled_prompt_embeds1_list
-                        else:
-                            tt_prompt_embeds_list = tt_prompt_embeds2_list
-                            tt_pooled_prompt_embeds_list = tt_pooled_prompt_embeds2_list
+        tt_latents = self._ccl_managers[self.vae_submesh_idx].all_gather_persistent_buffer(
+            tt_latents_step_list[self.vae_submesh_idx],
+            dim=1,
+            mesh_axis=sp_axis,
+            use_hyperparams=True,
+        )
 
-                        tt_latents_step_list = self._step(
-                            timestep=tt_timestep_list,
-                            latents=tt_latents_step_list,
-                            cfg_enabled=cfg_enabled,
-                            prompt_embeds=tt_prompt_embeds_list,
-                            pooled_prompt_embeds=tt_pooled_prompt_embeds_list,
-                            cfg_scale=cfg_scale,
-                            step_index=i,
-                            traced=traced,
-                        )
+        torch_latents = ttnn.to_torch(ttnn.get_device_tensors(tt_latents)[0])
+        # Motif does not apply VAE shift. TODO: Check if this is done on purpose.
+        torch_latents = torch_latents / self._latents_scaling  # + self._latents_shift
 
-            logger.info("decoding image...")
+        torch_latents = self.transformers[0].unpatchify(
+            torch_latents,
+            height=self._height // self._vae_scale_factor,
+            width=self._width // self._vae_scale_factor,
+        )
 
-            with profiler("vae", profiler_iteration) if profiler else nullcontext():
-                # Sync because we don't pass a persistent buffer or a barrier semaphore.
-                ttnn.synchronize_device(self.vae_device)
+        with self._reshape_encoder_device():
+            tt_latents = tensor.from_torch(torch_latents, device=self.vae_device)
+            vae_decode = self._vae_decoder_tracer if vae_traced else self._vae_decoder.forward
+            tt_decoded_output = vae_decode(tt_latents)
+            decoded_output = ttnn.to_torch(ttnn.get_device_tensors(tt_decoded_output)[0]).permute(0, 3, 1, 2)
 
-                tt_latents = self._ccl_managers[self.vae_submesh_idx].all_gather_persistent_buffer(
-                    tt_latents_step_list[self.vae_submesh_idx],
-                    dim=1,
-                    mesh_axis=sp_axis,
-                    use_hyperparams=True,
-                )
+        image = self._image_processor.postprocess(decoded_output, output_type="pt")
+        assert isinstance(image, torch.Tensor)
 
-                torch_latents = ttnn.to_torch(ttnn.get_device_tensors(tt_latents)[0])
-                # Motif does not apply VAE shift. TODO: Check if this is done on purpose.
-                torch_latents = torch_latents / self._latents_scaling  # + self._latents_shift
+        output = self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
+        on_event(SectionEnd("vae"))
 
-                torch_latents = self.transformers[0].unpatchify(
-                    torch_latents,
-                    height=self._height // self._vae_scale_factor,
-                    width=self._width // self._vae_scale_factor,
-                )
-
-                with self._reshape_encoder_device():
-                    tt_latents = tensor.from_torch(torch_latents, device=self.vae_device)
-                    vae_decode = self._vae_decoder_tracer if vae_traced else self._vae_decoder.forward
-                    tt_decoded_output = vae_decode(tt_latents)
-                    decoded_output = ttnn.to_torch(ttnn.get_device_tensors(tt_decoded_output)[0]).permute(0, 3, 1, 2)
-
-                image = self._image_processor.postprocess(decoded_output, output_type="pt")
-                assert isinstance(image, torch.Tensor)
-
-                output = self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
-
+        on_event(SectionEnd("total"))
         return output
 
     def _step_inner(

@@ -11,6 +11,7 @@ import ttnn
 from models.common.utility_functions import is_blackhole
 from models.perf.benchmarking_utils import BenchmarkData, BenchmarkProfiler
 
+from ....pipelines.events import profiler_event_callback
 from ....pipelines.motif.pipeline_motif import MotifPipeline
 
 
@@ -136,8 +137,7 @@ def test_motif_pipeline_performance(
                     prompt=prompts[prompt_idx],
                     num_inference_steps=num_inference_steps,
                     seed=0,
-                    profiler=benchmark_profiler,
-                    profiler_iteration=i,
+                    on_event=profiler_event_callback(benchmark_profiler, i),
                 )
             images[0].save(f"motif_{image_w}_{image_h}_perf_run{i}.png")
 

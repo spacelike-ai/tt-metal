@@ -11,6 +11,7 @@ from loguru import logger
 import ttnn
 from models.perf.benchmarking_utils import BenchmarkProfiler
 
+from ....pipelines.events import profiler_event_callback
 from ....pipelines.motif.pipeline_motif import MotifPipeline
 
 
@@ -138,8 +139,7 @@ def test_motif_pipeline(
                 traced=traced,
                 vae_traced=False,
                 encoder_traced=False,
-                profiler=benchmark_profiler,
-                profiler_iteration=0,
+                on_event=profiler_event_callback(benchmark_profiler, 0),
             )
 
         output_filename = f"{filename_prefix}_{number}.png"
