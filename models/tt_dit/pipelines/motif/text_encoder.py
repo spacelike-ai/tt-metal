@@ -13,6 +13,8 @@ from ...encoders.t5.encoder_pair import T5TokenizerEncoderPair
 from ...parallel.config import EncoderParallelConfig
 from ...parallel.manager import CCLManager
 from ..events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
+import transformers
+
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -33,6 +35,10 @@ class TextEncoder:
         self._device = device
         self._ccl_manager = ccl_manager
         self._parallel_config = parallel_config
+
+        # suppress noisy "load report warning"
+        verbosity = transformers.logging.get_verbosity()
+        transformers.logging.set_verbosity_error()
 
         self._clip_l = CLIPTokenizerEncoderPair(
             "openai/clip-vit-large-patch14",
@@ -71,6 +77,8 @@ class TextEncoder:
             enabled=enable_t5,
             use_attention_mask=True,
         )
+
+        transformers.logging.set_verbosity(verbosity)
 
     @torch.no_grad()
     def encode(
