@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import huggingface_hub
@@ -37,54 +38,66 @@ if TYPE_CHECKING:
     from PIL import Image
 
 
+_DEFAULT_PARALLELISM_BY_MESH_SHAPE: dict[tuple[int, int], dict] = {
+    (2, 4): {
+        "cfg": (2, 0),
+        "sp": (1, 0),
+        "tp": (4, 1),
+        "encoder_tp": (4, 1),
+        "vae_tp": (4, 1),
+        "num_links": 1,
+    },
+    (4, 8): {
+        "cfg": (2, 1),
+        "sp": (4, 0),
+        "tp": (4, 1),
+        "encoder_tp": (4, 1),
+        "vae_tp": (4, 1),
+        "num_links": 4,
+    },
+}
+
+
+@dataclass(frozen=True, kw_only=True)
+class MotifPipelineConfig:
+    topology: ttnn.Topology
+    num_links: int
+
+    dit_parallel_config: DiTParallelConfig
+    encoder_parallel_config: EncoderParallelConfig
+    vae_parallel_config: VAEParallelConfig
+
+    enable_t5_text_encoder: bool = True
+    use_torch_t5_text_encoder: bool = False
+    use_torch_clip_text_encoder: bool = False
+    use_torch_vae: bool = False
+
+    height: int = 1024
+    width: int = 1024
+    checkpoint_name: str = "Motif-Technologies/Motif-Image-6B-Preview"
+
+
 class MotifPipeline:
     def __init__(
         self,
         *,
-        mesh_device: ttnn.MeshDevice,
-        enable_t5_text_encoder: bool = True,
-        use_torch_t5_text_encoder: bool = False,
-        use_torch_clip_text_encoder: bool = False,
-        parallel_config: DiTParallelConfig,
-        encoder_parallel_config: EncoderParallelConfig | None = None,
-        vae_parallel_config: VAEParallelConfig | None = None,
-        topology: ttnn.Topology,
-        num_links: int,
-        height: int = 1024,
-        width: int = 1024,
-        checkpoint_name: str = "Motif-Technologies/Motif-Image-6B-Preview",
+        device: ttnn.MeshDevice,
+        config: MotifPipelineConfig,
     ) -> None:
-        self._mesh_device = mesh_device
-        self._parallel_config = parallel_config
-        self._height = height
-        self._width = width
+        self._config = config
+        self._mesh_device = device
+        self._parallel_config = config.dit_parallel_config
+        self._encoder_parallel_config = config.encoder_parallel_config
+        self._vae_parallel_config = config.vae_parallel_config
+        self._height = config.height
+        self._width = config.width
 
-        # setup encoder and vae parallel configs.
-        self._encoder_parallel_config = encoder_parallel_config
-        if self._encoder_parallel_config is None:
-            self._encoder_parallel_config = EncoderParallelConfig(
-                tensor_parallel=(
-                    parallel_config.tensor_parallel
-                    if parallel_config.tensor_parallel.mesh_axis == 4
-                    else parallel_config.sequence_parallel
-                )
-            )
-        self._vae_parallel_config = vae_parallel_config
-        if self._vae_parallel_config is None:
-            self._vae_parallel_config = VAEParallelConfig(
-                tensor_parallel=(
-                    parallel_config.tensor_parallel
-                    if parallel_config.tensor_parallel.mesh_axis == 4
-                    else parallel_config.sequence_parallel
-                )
-            )
-
-        logger.info(f"Parallel config: {parallel_config}")
-        logger.info(f"Original mesh shape: {mesh_device.shape}")
-        self._submesh_devices = create_submeshes(self._mesh_device, parallel_config)
+        logger.info(f"Parallel config: {config.dit_parallel_config}")
+        logger.info(f"Original mesh shape: {device.shape}")
+        self._submesh_devices = create_submeshes(self._mesh_device, config.dit_parallel_config)
         logger.info(f"Created submeshes with shape {self._submesh_devices[0].shape}")
         self._ccl_managers = [
-            CCLManager(submesh_device, num_links=num_links, topology=topology)
+            CCLManager(submesh_device, num_links=config.num_links, topology=config.topology)
             for submesh_device in self._submesh_devices
         ]
 
@@ -105,7 +118,7 @@ class MotifPipeline:
 
         logger.info("loading models...")
         checkpoint_path = huggingface_hub.hf_hub_download(
-            repo_id=checkpoint_name,
+            repo_id=config.checkpoint_name,
             filename="motif_image_preview.bin",
             subfolder="checkpoints",
             revision="update_new_ckpt",
@@ -131,11 +144,11 @@ class MotifPipeline:
         transformer_state_dict = substate(state_dict, "dit")
         convert_motif_transformer_state(transformer_state_dict, num_layers=num_layers)
 
-        if num_heads % parallel_config.tensor_parallel.factor != 0:
+        if num_heads % config.dit_parallel_config.tensor_parallel.factor != 0:
             padding_config = PaddingConfig.from_tensor_parallel_factor(
                 num_heads,
                 head_dim,
-                parallel_config.tensor_parallel.factor,
+                config.dit_parallel_config.tensor_parallel.factor,
             )
         else:
             padding_config = None
@@ -144,11 +157,11 @@ class MotifPipeline:
         for i, submesh_device in enumerate(self._submesh_devices):
             tt_transformer = MotifTransformer(
                 config=MOTIF_6B_CONFIG,
-                latents_height=height // self._vae_scale_factor,
-                latents_width=width // self._vae_scale_factor,
+                latents_height=config.height // self._vae_scale_factor,
+                latents_width=config.width // self._vae_scale_factor,
                 mesh_device=submesh_device,
                 ccl_manager=self._ccl_managers[i],
-                parallel_config=parallel_config,
+                parallel_config=config.dit_parallel_config,
                 padding_config=padding_config,
             )
 
@@ -178,10 +191,10 @@ class MotifPipeline:
             logger.info("creating TT-NN CLIP text encoder...")
             self._text_encoder = TextEncoder(
                 ccl_manager=self._ccl_managers[0],
-                parallel_config=encoder_parallel_config,
-                enable_t5=enable_t5_text_encoder,
-                use_torch_clip_encoder=use_torch_clip_text_encoder,
-                use_torch_t5_encoder=use_torch_t5_text_encoder,
+                parallel_config=config.encoder_parallel_config,
+                enable_t5=config.enable_t5_text_encoder,
+                use_torch_clip_encoder=config.use_torch_clip_text_encoder,
+                use_torch_t5_encoder=config.use_torch_t5_text_encoder,
             )
 
             ttnn.synchronize_device(self.encoder_device)
@@ -203,84 +216,66 @@ class MotifPipeline:
 
     @staticmethod
     def create_pipeline(
-        mesh_device,
-        dit_cfg=None,
-        dit_sp=None,
-        dit_tp=None,
-        encoder_tp=None,
-        vae_tp=None,
-        enable_t5_text_encoder=True,
-        use_torch_t5_text_encoder=False,
-        use_torch_clip_text_encoder=False,
-        num_links=None,
-        topology=ttnn.Topology.Linear,
-        width=1024,
-        height=1024,
-        checkpoint_name="Motif-Technologies/Motif-Image-6B-Preview",
-        model_checkpoint_path=None,
-    ):
+        mesh_device: ttnn.MeshDevice,
+        dit_cfg: tuple[int, int] | None = None,
+        dit_sp: tuple[int, int] | None = None,
+        dit_tp: tuple[int, int] | None = None,
+        encoder_tp: tuple[int, int] | None = None,
+        vae_tp: tuple[int, int] | None = None,
+        enable_t5_text_encoder: bool = True,
+        use_torch_t5_text_encoder: bool = False,
+        use_torch_clip_text_encoder: bool = False,
+        use_torch_vae: bool = False,
+        num_links: int | None = None,
+        topology: ttnn.Topology = ttnn.Topology.Linear,
+        width: int = 1024,
+        height: int = 1024,
+        checkpoint_name: str = "Motif-Technologies/Motif-Image-6B-Preview",
+        model_checkpoint_path: str | None = None,
+    ) -> MotifPipeline:
+        """Factory that picks parallelism defaults based on the mesh shape."""
         if model_checkpoint_path is not None:
             checkpoint_name = model_checkpoint_path
-            logger.warning(f"DEPRECATED: model_checkpoint_path parameter is deprecated. Use checkpoint_name instead.")
-        default_config = {
-            (2, 4): {
-                "cfg_config": (2, 0),
-                "sp": (1, 0),
-                "tp": (4, 1),
-                "encoder_tp": (4, 1),
-                "vae_tp": (4, 1),
-                "num_links": 1,
-            },
-            (4, 8): {
-                "cfg_config": (2, 1),
-                "sp": (4, 0),
-                "tp": (4, 1),
-                "encoder_tp": (4, 1),
-                "vae_tp": (4, 1),
-                "num_links": 4,
-            },
-        }
-        cfg_factor, cfg_axis = dit_cfg or default_config[tuple(mesh_device.shape)]["cfg_config"]
-        sp_factor, sp_axis = dit_sp or default_config[tuple(mesh_device.shape)]["sp"]
-        tp_factor, tp_axis = dit_tp or default_config[tuple(mesh_device.shape)]["tp"]
-        encoder_tp_factor, encoder_tp_axis = encoder_tp or default_config[tuple(mesh_device.shape)]["encoder_tp"]
-        vae_tp_factor, vae_tp_axis = vae_tp or default_config[tuple(mesh_device.shape)]["vae_tp"]
-        num_links = num_links or default_config[tuple(mesh_device.shape)]["num_links"]
+            logger.warning("DEPRECATED: model_checkpoint_path is deprecated. Use checkpoint_name instead.")
 
-        dit_parallel_config = DiTParallelConfig(
-            cfg_parallel=ParallelFactor(factor=cfg_factor, mesh_axis=cfg_axis),
-            tensor_parallel=ParallelFactor(factor=tp_factor, mesh_axis=tp_axis),
-            sequence_parallel=ParallelFactor(factor=sp_factor, mesh_axis=sp_axis),
-        )
-        encoder_parallel_config = EncoderParallelConfig(
-            tensor_parallel=ParallelFactor(factor=encoder_tp_factor, mesh_axis=encoder_tp_axis)
-        )
-        vae_parallel_config = VAEParallelConfig(
-            tensor_parallel=ParallelFactor(factor=vae_tp_factor, mesh_axis=vae_tp_axis)
-        )
+        preset = _DEFAULT_PARALLELISM_BY_MESH_SHAPE.get(tuple(mesh_device.shape), {})
+        cfg_factor, cfg_axis = dit_cfg or preset["cfg"]
+        sp_factor, sp_axis = dit_sp or preset["sp"]
+        tp_factor, tp_axis = dit_tp or preset["tp"]
+        encoder_tp_factor, encoder_tp_axis = encoder_tp or preset["encoder_tp"]
+        vae_tp_factor, vae_tp_axis = vae_tp or preset["vae_tp"]
+        num_links = num_links or preset["num_links"]
 
-        logger.info(f"Mesh device shape: {mesh_device.shape}")
-        logger.info(f"Parallel config: {dit_parallel_config}")
-        logger.info(f"Encoder parallel config: {encoder_parallel_config}")
-        logger.info(f"VAE parallel config: {vae_parallel_config}")
-        logger.info(f"T5 enabled: {enable_t5_text_encoder}")
-
-        pipeline = MotifPipeline(
-            mesh_device=mesh_device,
+        config = MotifPipelineConfig(
+            topology=topology,
+            num_links=num_links,
+            dit_parallel_config=DiTParallelConfig(
+                cfg_parallel=ParallelFactor(factor=cfg_factor, mesh_axis=cfg_axis),
+                tensor_parallel=ParallelFactor(factor=tp_factor, mesh_axis=tp_axis),
+                sequence_parallel=ParallelFactor(factor=sp_factor, mesh_axis=sp_axis),
+            ),
+            encoder_parallel_config=EncoderParallelConfig(
+                tensor_parallel=ParallelFactor(factor=encoder_tp_factor, mesh_axis=encoder_tp_axis)
+            ),
+            vae_parallel_config=VAEParallelConfig(
+                tensor_parallel=ParallelFactor(factor=vae_tp_factor, mesh_axis=vae_tp_axis)
+            ),
             enable_t5_text_encoder=enable_t5_text_encoder,
             use_torch_t5_text_encoder=use_torch_t5_text_encoder,
             use_torch_clip_text_encoder=use_torch_clip_text_encoder,
-            parallel_config=dit_parallel_config,
-            encoder_parallel_config=encoder_parallel_config,
-            vae_parallel_config=vae_parallel_config,
-            topology=topology,
-            num_links=num_links,
-            width=width,
+            use_torch_vae=use_torch_vae,
             height=height,
+            width=width,
             checkpoint_name=checkpoint_name,
         )
 
-        return pipeline
+        logger.info(f"Mesh device shape: {mesh_device.shape}")
+        logger.info(f"Parallel config: {config.dit_parallel_config}")
+        logger.info(f"Encoder parallel config: {config.encoder_parallel_config}")
+        logger.info(f"VAE parallel config: {config.vae_parallel_config}")
+        logger.info(f"T5 enabled: {enable_t5_text_encoder}")
+
+        return MotifPipeline(device=mesh_device, config=config)
 
     def _allocate_persistent_buffers(self) -> None:
         """Allocate persistent buffers by running a pipeline pass without tracing.
