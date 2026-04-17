@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import huggingface_hub
@@ -28,9 +28,12 @@ from ...utils.substate import substate
 from ...utils.tracing import Tracer
 from ..cfg import CFGCombiner
 from ..events import PipelineEvent, SectionEnd, SectionStart, null_callback
+from ..mesh import create_submeshes, reshape_device
 from .text_encoder import TextEncoder
 
 if TYPE_CHECKING:
+    from contextlib import AbstractContextManager
+
     from PIL import Image
 
 
@@ -76,16 +79,10 @@ class MotifPipeline:
                 )
             )
 
-        # Create submeshes based on CFG parallel configuration
-        submesh_shape = list(mesh_device.shape)
-        submesh_shape[parallel_config.sequence_parallel.mesh_axis] = parallel_config.sequence_parallel.factor
-        submesh_shape[parallel_config.tensor_parallel.mesh_axis] = parallel_config.tensor_parallel.factor
         logger.info(f"Parallel config: {parallel_config}")
         logger.info(f"Original mesh shape: {mesh_device.shape}")
-        logger.info(f"Creating submeshes with shape {submesh_shape}")
-        self._submesh_devices = self._mesh_device.create_submeshes(ttnn.MeshShape(*submesh_shape))[
-            0 : parallel_config.cfg_parallel.factor
-        ]
+        self._submesh_devices = create_submeshes(self._mesh_device, parallel_config)
+        logger.info(f"Created submeshes with shape {self._submesh_devices[0].shape}")
         self._ccl_managers = [
             CCLManager(submesh_device, num_links=num_links, topology=topology)
             for submesh_device in self._submesh_devices
@@ -177,7 +174,7 @@ class MotifPipeline:
 
         self._image_processor = VaeImageProcessor(vae_scale_factor=self._vae_scale_factor)
 
-        with self.encoder_reshape(self.encoder_device):
+        with self._reshape_encoder_device():
             logger.info("creating TT-NN CLIP text encoder...")
             self._text_encoder = TextEncoder(
                 ccl_manager=self._ccl_managers[0],
@@ -201,17 +198,8 @@ class MotifPipeline:
 
         self._allocate_persistent_buffers()
 
-    @contextmanager
-    def encoder_reshape(self, device: ttnn.MeshDevice):
-        original_mesh_shape = ttnn.MeshShape(tuple(device.shape))
-        assert (
-            original_mesh_shape.mesh_size() == self.encoder_mesh_shape.mesh_size()
-        ), f"Device cannot be reshaped device shape: {device.shape} encoder mesh shape: {self.encoder_mesh_shape}"
-        if original_mesh_shape != self.encoder_mesh_shape:
-            device.reshape(self.encoder_mesh_shape)
-        yield
-        if original_mesh_shape != device.shape:
-            device.reshape(original_mesh_shape)
+    def _reshape_encoder_device(self) -> AbstractContextManager[None]:
+        return reshape_device(self.encoder_device, self.encoder_mesh_shape)
 
     @staticmethod
     def create_pipeline(
@@ -380,7 +368,7 @@ class MotifPipeline:
             logger.info("encoding prompts...")
 
             with profiler("encoder", profiler_iteration) if profiler else nullcontext():
-                with self.encoder_reshape(self.encoder_device):
+                with self._reshape_encoder_device():
                     (
                         prompt_embeds1,
                         pooled_prompt_embeds1,
@@ -520,7 +508,7 @@ class MotifPipeline:
                     width=self._width // self._vae_scale_factor,
                 )
 
-                with self.encoder_reshape(self.encoder_device):
+                with self._reshape_encoder_device():
                     tt_latents = tensor.from_torch(torch_latents, device=self.vae_device)
                     vae_decode = self._vae_decoder_tracer if vae_traced else self._vae_decoder.forward
                     tt_decoded_output = vae_decode(tt_latents)
