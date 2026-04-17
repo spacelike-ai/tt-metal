@@ -6,6 +6,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import torch
+from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
+
 import ttnn
 
 from ...layers.conv2d import Conv2d
@@ -14,11 +17,16 @@ from ...layers.module import Module, ModuleList
 from ...layers.normalization import GroupNorm
 from ...parallel.config import VAEParallelConfig, vae_all_gather
 from ...parallel.manager import CCLManager
+from ...utils import tensor
+from ...utils.tracing import Tracer
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from diffusers.models.autoencoders import vae as diffusers_vae
+
+    from ...parallel.config import VAEParallelConfig
+    from ...parallel.manager import CCLManager
 
 
 class ResnetBlock(Module):
@@ -494,3 +502,50 @@ class VAEDecoder(Module):
         x = vae_all_gather(self._ccl_manager, x, cluster_axis=self._tp_axis)
         x = self.conv_out(x)
         return x
+
+
+class VAEDecoderAdapter:
+    """Torch-in, torch-out VAE decoder that supports both the PyTorch and TT-NN implementations.
+
+    Applies the latent scaling and shift inversion before decoding, and adds tracing support.
+    """
+
+    def __init__(
+        self,
+        *,
+        checkpoint_name: str,
+        parallel_config: VAEParallelConfig,
+        ccl_manager: CCLManager,
+        use_torch: bool,
+        skip_shift: bool = False,
+    ) -> None:
+        torch_vae = AutoencoderKL.from_pretrained(checkpoint_name, subfolder="vae")
+        assert isinstance(torch_vae, AutoencoderKL)
+
+        self.device = ccl_manager.mesh_device
+        self.scaling_factor = torch_vae.config["scaling_factor"]
+        self.shift_factor = 0.0 if skip_shift else torch_vae.config["shift_factor"]
+
+        if use_torch:
+            self._vae = torch_vae
+        else:
+            vae = VAEDecoder.from_torch(
+                torch_vae.decoder,
+                mesh_device=self.device,
+                parallel_config=parallel_config,
+                ccl_manager=ccl_manager,
+            )
+            self._vae = Tracer(vae.forward, device=self.device, prep_run=False)
+
+    @torch.no_grad()
+    def decode(self, latents: torch.Tensor, *, traced: bool) -> torch.Tensor:
+        if isinstance(self._vae, AutoencoderKL):
+            latents = latents.permute(0, 3, 1, 2).float()
+            latents = latents / self.scaling_factor + self.shift_factor
+            return self._vae.decode(latents).sample
+
+        tt_latents = tensor.from_torch(latents, device=self.device)
+        tt_latents = tt_latents / self.scaling_factor + self.shift_factor
+
+        tt_out = self._vae(tt_latents, traced=traced)
+        return ttnn.to_torch(ttnn.get_device_tensors(tt_out)[0]).permute(0, 3, 1, 2)

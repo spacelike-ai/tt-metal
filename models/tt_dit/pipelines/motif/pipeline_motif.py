@@ -9,14 +9,13 @@ from typing import TYPE_CHECKING
 
 import torch
 import tqdm
-from diffusers import AutoencoderKL
 from diffusers.image_processor import VaeImageProcessor
 from loguru import logger
 
 import ttnn
 
 from ...models.transformers.transformer_motif import MotifCheckpoint, MotifTransformer
-from ...models.vae.vae_sd35 import VAEDecoder
+from ...models.vae.vae_sd35 import VAEDecoderAdapter
 from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, ParallelFactor, VAEParallelConfig
 from ...parallel.manager import CCLManager
 from ...solvers import EulerSolver
@@ -112,11 +111,6 @@ class MotifPipeline:
         self.vae_submesh_idx = 0  # Use submesh 0 for VAE
 
         logger.info("loading models...")
-        # vae_checkpoint = "stabilityai/stable-diffusion-3-medium-diffusers"
-        vae_checkpoint = "stabilityai/stable-diffusion-3.5-large"
-        self._torch_vae = AutoencoderKL.from_pretrained(vae_checkpoint, subfolder="vae")
-        assert isinstance(self._torch_vae, AutoencoderKL)
-
         self._num_channels_latents = 16
         self._prompt_embedding_dim = MotifTransformer.ENCODED_TEXT_DIM
         self._patch_size = 2
@@ -140,9 +134,6 @@ class MotifPipeline:
         ]
         self._solvers = [EulerSolver() for _ in self._submesh_devices]
 
-        self._latents_scaling = self._torch_vae.config.scaling_factor
-        self._latents_shift = self._torch_vae.config.shift_factor
-
         self._image_processor = VaeImageProcessor(vae_scale_factor=self._vae_scale_factor)
 
         with self._reshape_encoder_device():
@@ -158,13 +149,13 @@ class MotifPipeline:
             ttnn.synchronize_device(self.encoder_device)
 
             logger.info("creating TT-NN VAE decoder...")
-            self._vae_decoder = VAEDecoder.from_torch(
-                torch_ref=self._torch_vae.decoder,
-                mesh_device=self.vae_device,
+            self._vae = VAEDecoderAdapter(
+                checkpoint_name="stabilityai/stable-diffusion-3.5-large",
                 parallel_config=self._vae_parallel_config,
                 ccl_manager=self._ccl_managers[self.vae_submesh_idx],
+                use_torch=config.use_torch_vae,
+                skip_shift=True,  # Motif intentionally omits the VAE shift.
             )
-            self._vae_decoder_tracer = Tracer(self._vae_decoder.forward, device=self.vae_device, prep_run=False)
             ttnn.synchronize_device(self.encoder_device)
 
         self._allocate_persistent_buffers()
@@ -442,9 +433,6 @@ class MotifPipeline:
         )
 
         torch_latents = ttnn.to_torch(ttnn.get_device_tensors(tt_latents)[0])
-        # Motif does not apply VAE shift. TODO: Check if this is done on purpose.
-        torch_latents = torch_latents / self._latents_scaling  # + self._latents_shift
-
         torch_latents = self.transformers[0].unpatchify(
             torch_latents,
             height=self._height // self._vae_scale_factor,
@@ -452,10 +440,7 @@ class MotifPipeline:
         )
 
         with self._reshape_encoder_device():
-            tt_latents = tensor.from_torch(torch_latents, device=self.vae_device)
-            vae_decode = self._vae_decoder_tracer if vae_traced else self._vae_decoder.forward
-            tt_decoded_output = vae_decode(tt_latents)
-            decoded_output = ttnn.to_torch(ttnn.get_device_tensors(tt_decoded_output)[0]).permute(0, 3, 1, 2)
+            decoded_output = self._vae.decode(torch_latents, traced=vae_traced)
 
         image = self._image_processor.postprocess(decoded_output, output_type="pt")
         assert isinstance(image, torch.Tensor)
