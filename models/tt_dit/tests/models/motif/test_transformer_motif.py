@@ -9,7 +9,11 @@ from loguru import logger
 
 import ttnn
 
-from ....models.transformers.transformer_motif import MotifTransformer, convert_motif_transformer_state
+from ....models.transformers.transformer_motif import (
+    MotifTransformer,
+    MotifTransformerConfig,
+    convert_motif_transformer_state,
+)
 from ....parallel.config import DiTParallelConfig, ParallelFactor
 from ....parallel.manager import CCLManager
 from ....reference.motif import configuration_motifimage, modeling_dit
@@ -126,16 +130,20 @@ def test_transformer_motif(
     latents_height = height // vae_scale_factor
     latents_width = width // vae_scale_factor
 
-    tt_model = MotifTransformer(
+    config = MotifTransformerConfig(
         patch_size=patch_size,
         num_layers=num_layers,
-        attention_head_dim=head_dim,
-        num_attention_heads=num_heads,
+        num_heads=num_heads,
+        head_dim=head_dim,
         pooled_projection_dim=pooled_text_dim,
         pos_embed_max_size=pos_emb_size,
         modulation_dim=modulation_dim,
         time_embed_dim=time_embed_dim,
         register_token_num=register_token_num,
+    )
+
+    tt_model = MotifTransformer(
+        config=config,
         latents_height=latents_height,
         latents_width=latents_width,
         mesh_device=submesh_device,

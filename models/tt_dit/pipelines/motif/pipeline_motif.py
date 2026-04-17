@@ -19,7 +19,7 @@ from models.perf.benchmarking_utils import BenchmarkProfiler
 
 from ...encoders.clip.encoder_pair import CLIPTokenizerEncoderPair
 from ...encoders.t5.encoder_pair import T5TokenizerEncoderPair
-from ...models.transformers.transformer_motif import MotifTransformer, convert_motif_transformer_state
+from ...models.transformers.transformer_motif import MOTIF_6B_CONFIG, MotifTransformer, convert_motif_transformer_state
 from ...models.vae.vae_sd35 import VAEDecoder
 from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, ParallelFactor, VAEParallelConfig
 from ...parallel.manager import CCLManager
@@ -161,15 +161,7 @@ class MotifPipeline:
         self.transformers = []
         for i, submesh_device in enumerate(self._submesh_devices):
             tt_transformer = MotifTransformer(
-                patch_size=self._patch_size,
-                num_layers=num_layers,
-                attention_head_dim=head_dim,
-                num_attention_heads=num_heads,
-                pooled_projection_dim=2048,
-                pos_embed_max_size=64,
-                modulation_dim=4096,
-                time_embed_dim=4096,
-                register_token_num=4,
+                config=MOTIF_6B_CONFIG,
                 latents_height=height // self._vae_scale_factor,
                 latents_width=width // self._vae_scale_factor,
                 mesh_device=submesh_device,

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
@@ -24,6 +25,32 @@ if TYPE_CHECKING:
     from ...parallel.config import DiTParallelConfig
     from ...parallel.manager import CCLManager
     from ...utils.padding import PaddingConfig
+
+
+@dataclass(frozen=True, kw_only=True)
+class MotifTransformerConfig:
+    num_layers: int
+    num_heads: int
+    head_dim: int
+    pooled_projection_dim: int
+    modulation_dim: int
+    time_embed_dim: int
+    register_token_num: int
+    pos_embed_max_size: int
+    patch_size: int
+
+
+MOTIF_6B_CONFIG = MotifTransformerConfig(
+    num_layers=30,
+    num_heads=30,
+    head_dim=64,
+    pooled_projection_dim=2048,
+    modulation_dim=4096,
+    time_embed_dim=4096,
+    register_token_num=4,
+    pos_embed_max_size=64,
+    patch_size=2,
+)
 
 
 class TimeTextProjection(Module):
@@ -109,15 +136,7 @@ class MotifTransformer(Module):
     def __init__(
         self,
         *,
-        patch_size: int,
-        num_layers: int,
-        attention_head_dim: int,
-        num_attention_heads: int,
-        pooled_projection_dim: int,
-        pos_embed_max_size: int,
-        modulation_dim: int,
-        time_embed_dim: int,
-        register_token_num: int,
+        config: MotifTransformerConfig,
         latents_height: int,
         latents_width: int,
         mesh_device: ttnn.MeshDevice,
@@ -129,25 +148,22 @@ class MotifTransformer(Module):
 
         in_channels = self.LATENT_CHANNELS
         out_channels = self.LATENT_CHANNELS
-        inner_dim = num_attention_heads * attention_head_dim
+        inner_dim = config.num_heads * config.head_dim
 
-        self.patch_size = patch_size
-        self.num_layers = num_layers
-        self.out_channels = out_channels
+        self.config = config
         self.latents_height = latents_height
         self.latents_width = latents_width
         self.mesh_device = mesh_device
         self.parallel_config = parallel_config
-        self.register_token_num = register_token_num
         self.ccl_manager = ccl_manager
 
         sp_axis = parallel_config.sequence_parallel.mesh_axis
         sp_factor = parallel_config.sequence_parallel.factor
         tp_axis = parallel_config.tensor_parallel.mesh_axis
 
-        raw_spatial_sequence_length = (latents_height // patch_size) * (latents_width // patch_size)
+        raw_spatial_sequence_length = (latents_height // config.patch_size) * (latents_width // config.patch_size)
 
-        self.spatial_sequence_length = raw_spatial_sequence_length + register_token_num
+        self.spatial_sequence_length = raw_spatial_sequence_length + config.register_token_num
         self.spatial_sequence_padding = Attention.spatial_sequence_padding_length(
             length=self.spatial_sequence_length, sp_factor=sp_factor, k_chunk_size=self.get_k_chunk_size(sp_factor)
         )
@@ -156,20 +172,20 @@ class MotifTransformer(Module):
         self.pos_embed = PatchEmbed(
             in_channels=in_channels,
             embed_dim=inner_dim,
-            pos_embed_max_size=pos_embed_max_size,
-            patch_size=patch_size,
+            pos_embed_max_size=config.pos_embed_max_size,
+            patch_size=config.patch_size,
             width=latents_width,
             height=latents_height,
-            sequence_padding=(register_token_num, self.spatial_sequence_padding),
+            sequence_padding=(config.register_token_num, self.spatial_sequence_padding),
             mesh_device=mesh_device,
             tp_mesh_axis=tp_axis,
             sp_mesh_axis=sp_axis,
         )
 
         self.time_text_embed = TimeTextProjection(
-            embedding_dim=modulation_dim,
-            time_embed_dim=time_embed_dim,
-            pooled_projection_dim=pooled_projection_dim,
+            embedding_dim=config.modulation_dim,
+            time_embed_dim=config.time_embed_dim,
+            pooled_projection_dim=config.pooled_projection_dim,
             mesh_device=mesh_device,
         )
 
@@ -183,10 +199,10 @@ class MotifTransformer(Module):
         self.transformer_blocks = ModuleList(
             TransformerBlock(
                 dim=inner_dim,
-                num_heads=num_attention_heads,
-                head_dim=attention_head_dim,
-                modulation_dim=modulation_dim,
-                context_pre_only=i == num_layers - 1,
+                num_heads=config.num_heads,
+                head_dim=config.head_dim,
+                modulation_dim=config.modulation_dim,
+                context_pre_only=i == config.num_layers - 1,
                 context_head_scaling=True,
                 add_attention_to_output=False,
                 ff_activation_fn="silu",
@@ -197,18 +213,18 @@ class MotifTransformer(Module):
                 attention_k_chunk_size=self.get_k_chunk_size(sp_factor),
                 attention_q_chunk_size=self.Q_CHUNK_SIZE,
             )
-            for i in range(num_layers)
+            for i in range(config.num_layers)
         )
 
         self.time_embed_out = Linear(
-            modulation_dim,
+            config.modulation_dim,
             2 * inner_dim,
             mesh_device=mesh_device,
         )
 
         self.proj_out = Linear(
             inner_dim,
-            patch_size * patch_size * out_channels,
+            config.patch_size * config.patch_size * out_channels,
             mesh_device=mesh_device,
         )
 
@@ -226,7 +242,7 @@ class MotifTransformer(Module):
         )
 
         self.t_token_proj = ColParallelLinear(
-            modulation_dim,
+            config.modulation_dim,
             inner_dim,
             mesh_device=mesh_device,
             mesh_axis=parallel_config.tensor_parallel.mesh_axis,
@@ -319,10 +335,10 @@ class MotifTransformer(Module):
         tokens = state.pop("register_tokens", None)
         if tokens is not None:
             _, token_num, _ = tokens.shape
-            assert token_num == self.register_token_num
+            assert token_num == self.config.register_token_num
 
             mask = torch.zeros_like(tokens)
-            padding = self.padded_spatial_sequence_length - self.register_token_num
+            padding = self.padded_spatial_sequence_length - self.config.register_token_num
 
             state["register_tokens"] = torch.nn.functional.pad(tokens, (0, 0, 0, padding))
             state["register_tokens_mask"] = torch.nn.functional.pad(mask, (0, 0, 0, padding), value=1)
@@ -330,20 +346,20 @@ class MotifTransformer(Module):
     def patchify(self, latents: torch.Tensor) -> torch.Tensor:
         # N, H, W, C -> N, (H / P) * (W / P), P * P * C
         batch_size, height, width, channels = latents.shape
-        patch = self.patch_size
+        patch = self.config.patch_size
 
         latents = latents.reshape([batch_size, height // patch, patch, width // patch, patch, channels])
         spatial = latents.transpose(2, 3).flatten(3, 5).flatten(1, 2)
 
-        return torch.nn.functional.pad(spatial, [0, 0, self.register_token_num, self.spatial_sequence_padding])
+        return torch.nn.functional.pad(spatial, [0, 0, self.config.register_token_num, self.spatial_sequence_padding])
 
     def unpatchify(self, spatial: torch.Tensor, *, height: int, width: int) -> torch.Tensor:
         # N, (H / P) * (W / P), P * P * C -> N, H, W, C
         batch_size, _, _ = spatial.shape
-        patch = self.patch_size
+        patch = self.config.patch_size
         sequence_length = (height // patch) * (width // patch)
 
-        spatial = spatial[:, self.register_token_num : self.register_token_num + sequence_length, :]
+        spatial = spatial[:, self.config.register_token_num : self.config.register_token_num + sequence_length, :]
 
         spatial = spatial.reshape([batch_size, height // patch, width // patch, patch, patch, -1])
         return spatial.transpose(2, 3).flatten(3, 4).flatten(1, 2)
