@@ -8,6 +8,7 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import huggingface_hub
 import torch
 
 import ttnn
@@ -18,13 +19,14 @@ from ...layers.embeddings import PatchEmbed
 from ...layers.feedforward import FeedForward
 from ...layers.linear import ColParallelLinear, Linear
 from ...layers.module import Module, ModuleList, Parameter
-from ...utils.substate import rename_substate
+from ...utils import cache
+from ...utils.padding import PaddingConfig
+from ...utils.substate import rename_substate, substate
 from ...utils.tensor import bf16_tensor
 
 if TYPE_CHECKING:
     from ...parallel.config import DiTParallelConfig
     from ...parallel.manager import CCLManager
-    from ...utils.padding import PaddingConfig
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -142,13 +144,19 @@ class MotifTransformer(Module):
         mesh_device: ttnn.MeshDevice,
         ccl_manager: CCLManager,
         parallel_config: DiTParallelConfig,
-        padding_config: PaddingConfig | None,
     ) -> None:
         super().__init__()
 
         in_channels = self.LATENT_CHANNELS
         out_channels = self.LATENT_CHANNELS
         inner_dim = config.num_heads * config.head_dim
+
+        tp_factor = parallel_config.tensor_parallel.factor
+        padding_config = (
+            None
+            if config.num_heads % tp_factor == 0
+            else PaddingConfig.from_tensor_parallel_factor(config.num_heads, config.head_dim, tp_factor)
+        )
 
         self.config = config
         self.latents_height = latents_height
@@ -514,3 +522,56 @@ def convert_motif_transformer_state(state: dict[str, torch.Tensor], *, num_layer
             prefix=f"transformer_blocks.{i}.",
             is_last_block=i == num_layers - 1,
         )
+
+
+class MotifCheckpoint:
+    """A Motif checkpoint: fetches weights and builds loaded transformers."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self._state = None
+
+    def build(
+        self,
+        *,
+        latents_height: int,
+        latents_width: int,
+        ccl_manager: CCLManager,
+        parallel_config: DiTParallelConfig,
+    ) -> MotifTransformer:
+        """Construct a ``MotifTransformer`` for this checkpoint and load its weights."""
+        device = ccl_manager.mesh_device
+
+        model = MotifTransformer(
+            config=MOTIF_6B_CONFIG,
+            latents_height=latents_height,
+            latents_width=latents_width,
+            mesh_device=device,
+            ccl_manager=ccl_manager,
+            parallel_config=parallel_config,
+        )
+        cache.load_model(
+            model,
+            get_torch_state_dict=self._load_state_dict,
+            model_name=self._name,
+            subfolder="transformer",
+            parallel_config=parallel_config,
+            mesh_shape=tuple(device.shape),
+        )
+        return model
+
+    def _load_state_dict(self) -> dict[str, torch.Tensor]:
+        if self._state is not None:
+            return self._state
+
+        path = huggingface_hub.hf_hub_download(
+            repo_id=self._name,
+            filename="motif_image_preview.bin",
+            subfolder="checkpoints",
+            revision="update_new_ckpt",
+        )
+        state = substate(torch.load(path, map_location="cpu", mmap=True), "dit")
+        convert_motif_transformer_state(state, num_layers=MOTIF_6B_CONFIG.num_layers)
+
+        self._state = state
+        return state

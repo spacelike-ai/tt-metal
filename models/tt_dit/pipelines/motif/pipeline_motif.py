@@ -7,7 +7,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import huggingface_hub
 import torch
 import tqdm
 from diffusers import AutoencoderKL
@@ -16,14 +15,12 @@ from loguru import logger
 
 import ttnn
 
-from ...models.transformers.transformer_motif import MOTIF_6B_CONFIG, MotifTransformer, convert_motif_transformer_state
+from ...models.transformers.transformer_motif import MotifCheckpoint, MotifTransformer
 from ...models.vae.vae_sd35 import VAEDecoder
 from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, ParallelFactor, VAEParallelConfig
 from ...parallel.manager import CCLManager
 from ...solvers import EulerSolver
-from ...utils import cache, tensor
-from ...utils.padding import PaddingConfig
-from ...utils.substate import substate
+from ...utils import tensor
 from ...utils.tracing import Tracer
 from ..cfg import CFGCombiner
 from ..events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
@@ -115,63 +112,26 @@ class MotifPipeline:
         self.vae_submesh_idx = 0  # Use submesh 0 for VAE
 
         logger.info("loading models...")
-        checkpoint_path = huggingface_hub.hf_hub_download(
-            repo_id=config.checkpoint_name,
-            filename="motif_image_preview.bin",
-            subfolder="checkpoints",
-            revision="update_new_ckpt",
-        )
-
         # vae_checkpoint = "stabilityai/stable-diffusion-3-medium-diffusers"
         vae_checkpoint = "stabilityai/stable-diffusion-3.5-large"
         self._torch_vae = AutoencoderKL.from_pretrained(vae_checkpoint, subfolder="vae")
         assert isinstance(self._torch_vae, AutoencoderKL)
 
-        state_dict = torch.load(checkpoint_path, map_location=torch.device("cpu"), mmap=True)
-
-        logger.info("creating TT-NN transformer...")
-
-        num_heads = 30
-        head_dim = 64
-        num_layers = 30
         self._num_channels_latents = 16
         self._prompt_embedding_dim = MotifTransformer.ENCODED_TEXT_DIM
         self._patch_size = 2
         self._vae_scale_factor = 8
 
-        transformer_state_dict = substate(state_dict, "dit")
-        convert_motif_transformer_state(transformer_state_dict, num_layers=num_layers)
-
-        if num_heads % config.dit_parallel_config.tensor_parallel.factor != 0:
-            padding_config = PaddingConfig.from_tensor_parallel_factor(
-                num_heads,
-                head_dim,
-                config.dit_parallel_config.tensor_parallel.factor,
-            )
-        else:
-            padding_config = None
-
+        logger.info("creating TT-NN transformer...")
+        checkpoint = MotifCheckpoint(config.checkpoint_name)
         self.transformers = []
         for i, submesh_device in enumerate(self._submesh_devices):
-            tt_transformer = MotifTransformer(
-                config=MOTIF_6B_CONFIG,
+            tt_transformer = checkpoint.build(
                 latents_height=config.height // self._vae_scale_factor,
                 latents_width=config.width // self._vae_scale_factor,
-                mesh_device=submesh_device,
                 ccl_manager=self._ccl_managers[i],
                 parallel_config=config.dit_parallel_config,
-                padding_config=padding_config,
             )
-
-            cache.load_model(
-                tt_model=tt_transformer,
-                get_torch_state_dict=lambda: transformer_state_dict,
-                model_name="motif-image-6b",
-                subfolder="transformer",
-                parallel_config=self._parallel_config,
-                mesh_shape=tuple(submesh_device.shape),
-            )
-
             self.transformers.append(tt_transformer)
             ttnn.synchronize_device(submesh_device)
 
