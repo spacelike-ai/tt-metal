@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from PIL import Image
 
 _VAE_SCALE_FACTOR = 8
-_NUM_CHANNELS_LATENTS = 16
+_LATENT_CHANNELS = 16
 
 _DEFAULT_PARALLELISM_BY_MESH_SHAPE: dict[tuple[int, int], dict] = {
     (2, 4): {"cfg": (2, 0), "sp": (1, 0), "tp": (4, 1), "encoder_tp": (4, 1), "vae_tp": (4, 1), "num_links": 1},
@@ -72,8 +72,8 @@ class MotifPipeline:
         self._submesh_devices = create_submeshes(device, config.dit_parallel_config)
         logger.info(f"Created submeshes with shape {self._submesh_devices[0].shape}")
 
-        self._step_inner_tracers = [
-            Tracer(self._step_inner, device=device, prep_run=False) for device in self._submesh_devices
+        self._prediction_tracers = [
+            Tracer(self._prediction, device=device, prep_run=False) for device in self._submesh_devices
         ]
 
         self._ccl_managers = [
@@ -116,7 +116,8 @@ class MotifPipeline:
                 ccl_manager=self._ccl_managers[0],
             )
 
-        self._synchronize_devices()
+        for d in self._submesh_devices:
+            ttnn.synchronize_device(d)
 
         logger.info("pipeline allocation run...")
         self.run_single_prompt("", num_inference_steps=2, traced=False)
@@ -250,10 +251,10 @@ class MotifPipeline:
         on_event(SectionStart("encoder"))
         with self._reshape_encoder_device():
             (
-                prompt_embeds1,
-                pooled_prompt_embeds1,
-                prompt_embeds2,
-                pooled_prompt_embeds2,
+                torch_early_context,
+                torch_early_pooled,
+                torch_late_context,
+                torch_late_pooled,
             ) = self._text_encoder.encode_cfg(
                 (prompt_1, prompt_2, prompt_3),
                 (negative_prompt_1, negative_prompt_2, negative_prompt_3),
@@ -271,116 +272,109 @@ class MotifPipeline:
         )
         for solver in self._solvers:
             solver.set_schedule(sigmas=sigmas, alphas=alphas)
-        timesteps = [s * 1000 for s in sigmas[:-1]]
 
-        logger.info("preparing latents...")
-
-        if seed is not None:
-            torch.manual_seed(seed)
-
-        shape = [
-            prompt_count * num_images_per_prompt,
-            _NUM_CHANNELS_LATENTS,
-            self._height // _VAE_SCALE_FACTOR,
-            self._width // _VAE_SCALE_FACTOR,
-        ]
-        # We let randn generate a permuted latent tensor in float32, so that the generated noise
-        # matches the reference implementation.
-        latents = self._transformers[0].patchify(
-            torch.randn(shape, dtype=torch.float32).to(dtype=torch.bfloat16).permute(0, 2, 3, 1)
-        )
-
-        # TODO
-        tt_prompt_embeds1_list = []
-        tt_prompt_embeds2_list = []
-        tt_pooled_prompt_embeds1_list = []
-        tt_pooled_prompt_embeds2_list = []
-        tt_latents_step_list = []
-        for i, submesh_device in enumerate(self._submesh_devices):
-            # Allocate tensors on the host to ensure that they do not get overwritten by trace
-            # execution.
-            tt_prompt_embeds1 = tensor.from_torch(
-                prompt_embeds1[i : i + 1] if self._cfg_parallel else prompt_embeds1,
-                device=submesh_device,
-                on_host=traced,
-            )
-            tt_prompt_embeds2 = tensor.from_torch(
-                prompt_embeds2[i : i + 1] if self._cfg_parallel else prompt_embeds2,
-                device=submesh_device,
-                on_host=traced,
-            )
-            tt_pooled_prompt_embeds1 = tensor.from_torch(
-                pooled_prompt_embeds1[i : i + 1] if self._cfg_parallel else pooled_prompt_embeds1,
-                device=submesh_device,
-                on_host=traced,
-            )
-            tt_pooled_prompt_embeds2 = tensor.from_torch(
-                pooled_prompt_embeds2[i : i + 1] if self._cfg_parallel else pooled_prompt_embeds2,
-                device=submesh_device,
-                on_host=traced,
-            )
-
-            tt_initial_latents = tensor.from_torch(
-                latents, device=submesh_device, mesh_axes=[None, self._sp_axis, None]
-            )
-
-            tt_prompt_embeds1_list.append(tt_prompt_embeds1)
-            tt_prompt_embeds2_list.append(tt_prompt_embeds2)
-            tt_pooled_prompt_embeds1_list.append(tt_pooled_prompt_embeds1)
-            tt_pooled_prompt_embeds2_list.append(tt_pooled_prompt_embeds2)
-            tt_latents_step_list.append(tt_initial_latents)
-            del tt_initial_latents
+        logger.info("preparing inputs...")
+        latents = self._random_latents(batch_size=prompt_count * num_images_per_prompt, seed=seed)
+        early_context = self._distribute_cfg(torch_early_context, on_host=traced)
+        early_pooled = self._distribute_cfg(torch_early_pooled, on_host=traced)
+        late_context = self._distribute_cfg(torch_late_context, on_host=traced)
+        late_pooled = self._distribute_cfg(torch_late_pooled, on_host=traced)
 
         logger.info("denoising...")
         on_event(SectionStart("denoising"))
 
-        for i, t in enumerate(tqdm.tqdm(timesteps)):
+        for i, t in enumerate(tqdm.tqdm(sigmas[:-1])):
             on_event(SectionStart(f"denoising_step_{i}"))
-            tt_timestep_list = []
-            for submesh_device in self._submesh_devices:
-                # Allocation on device is fine, because timesteps are not used after
-                # trace execution, and can be overwritten during trace execution.
-                tt_timestep = ttnn.full(
+
+            early = t >= negative_strategy_switch_time
+
+            velocity_pred = []
+
+            for device_idx, device in enumerate(self._submesh_devices):
+                timestep = ttnn.full(
                     [1, 1],
-                    fill_value=t,
+                    fill_value=t * 1000,
                     layout=ttnn.TILE_LAYOUT,
                     dtype=ttnn.float32,
-                    device=submesh_device,
+                    device=device,
                 )
-                tt_timestep_list.append(tt_timestep)
 
-            if t >= 1000 * negative_strategy_switch_time:
-                tt_prompt_embeds_list = tt_prompt_embeds1_list
-                tt_pooled_prompt_embeds_list = tt_pooled_prompt_embeds1_list
-            else:
-                tt_prompt_embeds_list = tt_prompt_embeds2_list
-                tt_pooled_prompt_embeds_list = tt_pooled_prompt_embeds2_list
+                latents[device_idx], v = self._prediction_tracers[device_idx](
+                    cfg_enabled=cfg_enabled,
+                    latents=latents[device_idx],
+                    prompt=early_context[device_idx] if early else late_context[device_idx],
+                    pooled=early_pooled[device_idx] if early else late_pooled[device_idx],
+                    timestep=timestep,
+                    submesh_idx=device_idx,
+                    traced=traced,
+                )
+                velocity_pred.append(v)
 
-            tt_latents_step_list = self._step(
-                timestep=tt_timestep_list,
-                latents=tt_latents_step_list,
-                cfg_enabled=cfg_enabled,
-                prompt_embeds=tt_prompt_embeds_list,
-                pooled_prompt_embeds=tt_pooled_prompt_embeds_list,
-                cfg_scale=cfg_scale,
-                step_index=i,
-                traced=traced,
-            )
+                if cfg_enabled:
+                    velocity_pred[device_idx] = self._combiner.combine(velocity_pred[device_idx], cfg_scale)
+
+            for device_idx, device in enumerate(self._submesh_devices):
+                ttnn.synchronize_device(device)  # Helps with accurate time profiling.
+                latents[device_idx] = self._solvers[device_idx].step(
+                    step=i, latent=latents[device_idx], velocity_pred=velocity_pred[device_idx]
+                )
+
             on_event(SectionEnd(f"denoising_step_{i}"))
 
         on_event(SectionEnd("denoising"))
 
         logger.info("decoding image...")
         on_event(SectionStart("vae"))
+        images = self._decode_latents(latents[0], traced=vae_traced)
+        on_event(SectionEnd("vae"))
 
+        on_event(SectionEnd("total"))
+        return images
+
+    def _prediction(
+        self,
+        *,
+        cfg_enabled: bool,
+        latents: ttnn.Tensor,
+        prompt: ttnn.Tensor,
+        pooled: ttnn.Tensor,
+        timestep: ttnn.Tensor,
+        submesh_idx: int,
+    ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
+        model_input = ttnn.concat([latents, latents]) if cfg_enabled and not self._cfg_parallel else latents
+
+        velocity_pred = self._transformers[submesh_idx].forward(
+            spatial=model_input,
+            prompt=prompt,
+            pooled=pooled,
+            timestep=timestep,
+        )
+
+        # Make latents an output, because inputs are copied to the trace region before executing a
+        # trace and might be overwritten during execution.
+        return latents, velocity_pred
+
+    def _random_latents(self, batch_size: int, seed: int | None) -> list[ttnn.Tensor]:
+        if seed is not None:
+            torch.manual_seed(seed)
+
+        shape = [batch_size, _LATENT_CHANNELS, self._height // _VAE_SCALE_FACTOR, self._width // _VAE_SCALE_FACTOR]
+
+        # We let randn generate a permuted latent tensor in float32, so that the generated noise
+        # matches the reference implementation.
+        latents = torch.randn(shape, dtype=torch.float32).to(dtype=torch.bfloat16).permute(0, 2, 3, 1)
+        latents = self._transformers[0].patchify(latents)
+
+        return [
+            tensor.from_torch(latents, device=d, mesh_axes=[None, self._sp_axis, None]) for d in self._submesh_devices
+        ]
+
+    def _decode_latents(self, tt_latents: ttnn.Tensor, *, traced: bool) -> list[Image.Image]:
         # Sync because we don't pass a persistent buffer or a barrier semaphore.
         ttnn.synchronize_device(self._submesh_devices[0])
 
         tt_latents = self._ccl_managers[0].all_gather_persistent_buffer(
-            tt_latents_step_list[0],
-            dim=1,
-            mesh_axis=self._sp_axis,
-            use_hyperparams=True,
+            tt_latents, dim=1, mesh_axis=self._sp_axis, use_hyperparams=True
         )
 
         torch_latents = ttnn.to_torch(ttnn.get_device_tensors(tt_latents)[0])
@@ -391,86 +385,29 @@ class MotifPipeline:
         )
 
         with self._reshape_encoder_device():
-            decoded_output = self._vae.decode(torch_latents, traced=vae_traced)
+            decoded_output = self._vae.decode(torch_latents, traced=traced)
 
         image = self._image_processor.postprocess(decoded_output, output_type="pt")
         assert isinstance(image, torch.Tensor)
 
-        on_event(SectionEnd("vae"))
+        return self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
 
-        output = self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
-
-        on_event(SectionEnd("total"))
-        return output
-
-    def _step_inner(
-        self,
-        *,
-        cfg_enabled: bool,
-        latent: ttnn.Tensor,
-        prompt: ttnn.Tensor,
-        pooled: ttnn.Tensor,
-        timestep: ttnn.Tensor,
-        submesh_id: int,
-    ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
-        latent_input = ttnn.concat([latent, latent]) if cfg_enabled and not self._cfg_parallel else latent
-
-        noise_pred = self._transformers[submesh_id].forward(
-            spatial=latent_input,
-            prompt=prompt,
-            pooled=pooled,
-            timestep=timestep,
-        )
-
-        # Make latents an output, because inputs are copied to the trace region before executing a
-        # trace and might be overwritten during execution.
-        return latent, noise_pred
-
-    def _step(
-        self,
-        *,
-        cfg_enabled: bool,
-        cfg_scale: float,
-        latents: list[ttnn.Tensor],
-        timestep: list[ttnn.Tensor],
-        pooled_prompt_embeds: list[ttnn.Tensor],
-        prompt_embeds: list[ttnn.Tensor],
-        step_index: int,
-        traced: bool,
-    ) -> list[ttnn.Tensor]:
-        latents_out = []
-        noise_pred_list = []
-
-        for submesh_id in range(len(self._submesh_devices)):
-            inner = self._step_inner_tracers[submesh_id] if traced else self._step_inner
-
-            latent, noise_pred = inner(
-                cfg_enabled=cfg_enabled,
-                latent=latents[submesh_id],
-                prompt=prompt_embeds[submesh_id],
-                pooled=pooled_prompt_embeds[submesh_id],
-                timestep=timestep[submesh_id],
-                submesh_id=submesh_id,
-            )
-
-            latents_out.append(latent)
-            noise_pred_list.append(noise_pred)
-
-        if cfg_enabled:
-            for submesh_id in range(len(self._submesh_devices)):
-                noise_pred_list[submesh_id] = self._combiner.combine(noise_pred_list[submesh_id], cfg_scale)
-
-        for submesh_id, submesh_device in enumerate(self._submesh_devices):
-            ttnn.synchronize_device(submesh_device)  # Helps with accurate time profiling.
-            latents_out[submesh_id] = self._solvers[submesh_id].step(
-                step=step_index, latent=latents_out[submesh_id], velocity_pred=noise_pred_list[submesh_id]
-            )
-
-        return latents_out
-
-    def _synchronize_devices(self) -> None:
-        for device in self._submesh_devices:
-            ttnn.synchronize_device(device)
+    def _distribute_cfg(
+        self, x: torch.Tensor, *, on_host: bool
+    ) -> tuple[ttnn.Tensor] | tuple[ttnn.Tensor, ttnn.Tensor]:
+        """Return one tensor per submesh from a conditioning batch."""
+        match self._submesh_devices:
+            case (device,):
+                return (tensor.from_torch(x, device=device, on_host=on_host),)
+            case (device1, device2):
+                half = x.shape[0] // 2
+                return (
+                    tensor.from_torch(x[:half], device=device1, on_host=on_host),
+                    tensor.from_torch(x[half:], device=device2, on_host=on_host),
+                )
+            case _:
+                msg = "unsupported number of submeshes"
+                raise ValueError(msg)
 
 
 def _schedule(*, step_count: int, linear_quadratic_emulating_steps: int) -> tuple[list[float], list[float]]:
