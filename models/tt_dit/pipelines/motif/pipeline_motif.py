@@ -71,6 +71,7 @@ class MotifPipelineConfig:
 
     height: int = 1024
     width: int = 1024
+    cfg_enabled: bool
     checkpoint_name: str = "Motif-Technologies/Motif-Image-6B-Preview"
 
 
@@ -81,6 +82,7 @@ class MotifPipeline(PipelineAPIMixin):
         self._encoder_tp = config.encoder_parallel_config.tensor_parallel
         self._height = config.height
         self._width = config.width
+        self._cfg_enabled = config.cfg_enabled
 
         logger.info(f"Parallel config: {config.dit_parallel_config}")
         logger.info(f"Original mesh shape: {device.shape}")
@@ -135,7 +137,7 @@ class MotifPipeline(PipelineAPIMixin):
             ttnn.synchronize_device(d)
 
         logger.info("pipeline allocation run...")
-        self.run_single_prompt("", num_inference_steps=2, traced=False)
+        self(prompts=[""], num_inference_steps=2, traced=False, cfg_scale=2 if config.cfg_enabled else 1)
 
     def _reshape_encoder_device(self) -> AbstractContextManager[None]:
         device = self._submesh_devices[0]
@@ -164,6 +166,7 @@ class MotifPipeline(PipelineAPIMixin):
         topology: ttnn.Topology = ttnn.Topology.Linear,
         width: int = 1024,
         height: int = 1024,
+        cfg_enabled: bool = True,
         checkpoint_name: str = "Motif-Technologies/Motif-Image-6B-Preview",
         model_checkpoint_path: str | None = None,
     ) -> MotifPipeline:
@@ -190,6 +193,7 @@ class MotifPipeline(PipelineAPIMixin):
             use_torch_vae=use_torch_vae,
             height=height,
             width=width,
+            cfg_enabled=cfg_enabled,
             checkpoint_name=checkpoint_name,
         )
 
@@ -222,7 +226,9 @@ class MotifPipeline(PipelineAPIMixin):
         on_event: PipelineEventCallback | None = None,
     ) -> list[Image.Image]:
         prompt_count = len(prompts)
-        cfg_enabled = cfg_scale > 1
+
+        if self._cfg_enabled != (cfg_scale > 1):
+            logger.warning(f"cfg_scale={cfg_scale} does not match cfg_enabled={self._cfg_enabled}")
 
         vae_traced = vae_traced if vae_traced is not None else traced
         encoder_traced = encoder_traced if encoder_traced is not None else traced
@@ -246,7 +252,7 @@ class MotifPipeline(PipelineAPIMixin):
                 (prompts, prompts_2 or prompts, prompts_3 or prompts),
                 (negative_prompts, negative_prompts_2 or negative_prompts, negative_prompts_3 or negative_prompts),
                 num_images_per_prompt=num_images_per_prompt,
-                cfg_enabled=cfg_enabled,
+                cfg_enabled=self._cfg_enabled,
                 traced=encoder_traced,
                 on_event=on_event,
             )
@@ -287,7 +293,6 @@ class MotifPipeline(PipelineAPIMixin):
                 )
 
                 latents[device_idx], v = self._prediction_tracers[device_idx](
-                    cfg_enabled=cfg_enabled,
                     latents=latents[device_idx],
                     prompt=early_context[device_idx] if early else late_context[device_idx],
                     pooled=early_pooled[device_idx] if early else late_pooled[device_idx],
@@ -297,7 +302,7 @@ class MotifPipeline(PipelineAPIMixin):
                 )
                 velocity_pred.append(v)
 
-                if cfg_enabled:
+                if self._cfg_enabled:
                     velocity_pred[device_idx] = self._combiner.combine(velocity_pred[device_idx], cfg_scale)
 
             for device_idx, device in enumerate(self._submesh_devices):
@@ -321,14 +326,13 @@ class MotifPipeline(PipelineAPIMixin):
     def _prediction(
         self,
         *,
-        cfg_enabled: bool,
         latents: ttnn.Tensor,
         prompt: ttnn.Tensor,
         pooled: ttnn.Tensor,
         timestep: ttnn.Tensor,
         submesh_idx: int,
     ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
-        model_input = ttnn.concat([latents, latents]) if cfg_enabled and not self._cfg_parallel else latents
+        model_input = ttnn.concat([latents, latents]) if self._cfg_enabled and not self._cfg_parallel else latents
 
         velocity_pred = self._transformers[submesh_idx].forward(
             spatial=model_input,
