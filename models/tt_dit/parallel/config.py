@@ -2,6 +2,8 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 from typing import NamedTuple
 
 import ttnn
@@ -17,13 +19,29 @@ class DiTParallelConfig(NamedTuple):
     tensor_parallel: ParallelFactor
     sequence_parallel: ParallelFactor
 
+    @classmethod
+    def from_tuples(cls, *, cfg: tuple[int, int], sp: tuple[int, int], tp: tuple[int, int]) -> DiTParallelConfig:
+        return cls(
+            cfg_parallel=ParallelFactor(*cfg),
+            sequence_parallel=ParallelFactor(*sp),
+            tensor_parallel=ParallelFactor(*tp),
+        )
+
 
 class EncoderParallelConfig(NamedTuple):
     tensor_parallel: ParallelFactor
 
+    @classmethod
+    def from_tuple(cls, tp: tuple[int, int]) -> EncoderParallelConfig:
+        return cls(tensor_parallel=ParallelFactor(*tp))
+
 
 class VAEParallelConfig(NamedTuple):
     tensor_parallel: ParallelFactor
+
+    @classmethod
+    def from_tuple(cls, tp: tuple[int, int]) -> VAEParallelConfig:
+        return cls(tensor_parallel=ParallelFactor(*tp))
 
 
 class VaeHWParallelConfig(NamedTuple):

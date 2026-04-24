@@ -16,7 +16,7 @@ import ttnn
 
 from ...models.transformers.transformer_motif import MotifCheckpoint
 from ...models.vae.vae_sd35 import VAEDecoderAdapter
-from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, ParallelFactor, VAEParallelConfig
+from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
 from ...parallel.manager import CCLManager
 from ...solvers import EulerSolver
 from ...utils import tensor
@@ -24,6 +24,7 @@ from ...utils.tracing import Tracer
 from ..cfg import CFGCombiner
 from ..events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
 from ..mesh import create_submeshes, reshape_device
+from ..pipeline_api import PipelineAPIMixin
 from .text_encoder import TextEncoder
 
 if TYPE_CHECKING:
@@ -59,7 +60,7 @@ class MotifPipelineConfig:
     checkpoint_name: str = "Motif-Technologies/Motif-Image-6B-Preview"
 
 
-class MotifPipeline:
+class MotifPipeline(PipelineAPIMixin):
     def __init__(self, *, device: ttnn.MeshDevice, config: MotifPipelineConfig) -> None:
         self._cfg_parallel = config.dit_parallel_config.cfg_parallel.factor == 2
         self._sp_axis = config.dit_parallel_config.sequence_parallel.mesh_axis
@@ -132,8 +133,9 @@ class MotifPipeline:
 
         return reshape_device(self._submesh_devices[0], ttnn.MeshShape(*shape))
 
-    @staticmethod
+    @classmethod
     def create_pipeline(
+        cls,
         mesh_device: ttnn.MeshDevice,
         dit_cfg: tuple[int, int] | None = None,
         dit_sp: tuple[int, int] | None = None,
@@ -161,15 +163,13 @@ class MotifPipeline:
         config = MotifPipelineConfig(
             topology=topology,
             num_links=num_links or preset["num_links"],
-            dit_parallel_config=DiTParallelConfig(
-                cfg_parallel=ParallelFactor(*(dit_cfg or preset["cfg"])),
-                tensor_parallel=ParallelFactor(*(dit_tp or preset["tp"])),
-                sequence_parallel=ParallelFactor(*(dit_sp or preset["sp"])),
+            dit_parallel_config=DiTParallelConfig.from_tuples(
+                cfg=dit_cfg or preset["cfg"],
+                sp=dit_sp or preset["sp"],
+                tp=dit_tp or preset["tp"],
             ),
-            encoder_parallel_config=EncoderParallelConfig(
-                tensor_parallel=ParallelFactor(*(encoder_tp or preset["encoder_tp"]))
-            ),
-            vae_parallel_config=VAEParallelConfig(tensor_parallel=ParallelFactor(*(vae_tp or preset["vae_tp"]))),
+            encoder_parallel_config=EncoderParallelConfig.from_tuple(encoder_tp or preset["encoder_tp"]),
+            vae_parallel_config=VAEParallelConfig.from_tuple(vae_tp or preset["vae_tp"]),
             enable_t5_text_encoder=enable_t5_text_encoder,
             use_torch_t5_text_encoder=use_torch_t5_text_encoder,
             use_torch_clip_text_encoder=use_torch_clip_text_encoder,
@@ -185,62 +185,36 @@ class MotifPipeline:
         logger.info(f"VAE parallel config: {config.vae_parallel_config}")
         logger.info(f"T5 enabled: {enable_t5_text_encoder}")
 
-        return MotifPipeline(device=mesh_device, config=config)
+        return cls(device=mesh_device, config=config)
 
-    def run_single_prompt(
-        self,
-        prompt: str,
-        negative_prompt: str | None = None,
-        num_inference_steps: int = 40,
-        cfg_scale: float = 5.0,
-        seed: int | None = None,
-        traced: bool = True,
-        vae_traced: bool | None = None,
-        encoder_traced: bool | None = None,
-        on_event: PipelineEventCallback | None = None,
-    ) -> list[Image.Image]:
-        return self.__call__(
-            prompt_1=[prompt],
-            prompt_2=[prompt],
-            prompt_3=[prompt],
-            negative_prompt_1=[negative_prompt],
-            negative_prompt_2=[negative_prompt],
-            negative_prompt_3=[negative_prompt],
-            num_inference_steps=num_inference_steps,
-            cfg_scale=cfg_scale,
-            seed=seed,
-            traced=traced,
-            vae_traced=vae_traced,
-            encoder_traced=encoder_traced,
-            on_event=on_event,
-        )
 
     def __call__(
         self,
         *,
+        prompts: list[str],
+        prompts_2: list[str] | None = None,
+        prompts_3: list[str] | None = None,
+        negative_prompts: list[str | None] | None = None,
+        negative_prompts_2: list[str | None] | None = None,
+        negative_prompts_3: list[str | None] | None = None,
+        num_inference_steps: int = 40,
+        seed: int | None = None,
         num_images_per_prompt: int = 1,
-        cfg_scale: float,
-        prompt_1: list[str],
-        prompt_2: list[str],
-        prompt_3: list[str],
-        negative_prompt_1: list[str | None],
-        negative_prompt_2: list[str | None],
-        negative_prompt_3: list[str | None],
+        cfg_scale: float = 5.0,
         linear_quadratic_emulating_steps: int = 100,
         negative_strategy_switch_time: float = 0.85,
-        num_inference_steps: int,
-        seed: int | None = None,
         traced: bool = False,
         vae_traced: bool | None = None,
         encoder_traced: bool | None = None,
         on_event: PipelineEventCallback | None = None,
     ) -> list[Image.Image]:
+        prompt_count = len(prompts)
+        cfg_enabled = cfg_scale > 1
+
         vae_traced = vae_traced if vae_traced is not None else traced
         encoder_traced = encoder_traced if encoder_traced is not None else traced
         on_event = on_event if on_event is not None else null_callback
-
-        prompt_count = len(prompt_1)
-        cfg_enabled = cfg_scale > 1
+        negative_prompts = negative_prompts or [None] * prompt_count
 
         assert num_images_per_prompt == 1, "generating multiple images is not supported"
         assert prompt_count == 1, "generating multiple images is not supported"
@@ -256,8 +230,8 @@ class MotifPipeline:
                 torch_late_context,
                 torch_late_pooled,
             ) = self._text_encoder.encode_cfg(
-                (prompt_1, prompt_2, prompt_3),
-                (negative_prompt_1, negative_prompt_2, negative_prompt_3),
+                (prompts, prompts_2 or prompts, prompts_3 or prompts),
+                (negative_prompts, negative_prompts_2 or negative_prompts, negative_prompts_3 or negative_prompts),
                 num_images_per_prompt=num_images_per_prompt,
                 cfg_enabled=cfg_enabled,
                 traced=encoder_traced,
