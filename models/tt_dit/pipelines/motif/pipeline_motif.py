@@ -28,6 +28,7 @@ from ..pipeline_api import PipelineAPIMixin
 from .text_encoder import TextEncoder
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from contextlib import AbstractContextManager
 
     from PIL import Image
@@ -64,15 +65,16 @@ class MotifPipelineConfig:
     encoder_parallel_config: EncoderParallelConfig
     vae_parallel_config: VAEParallelConfig
 
-    enable_t5_text_encoder: bool = True
-    use_torch_t5_text_encoder: bool = False
-    use_torch_clip_text_encoder: bool = False
-    use_torch_vae: bool = False
+    enable_t5_text_encoder: bool
+    use_torch_t5_text_encoder: bool
+    use_torch_clip_text_encoder: bool
+    use_torch_vae: bool
 
-    height: int = 1024
-    width: int = 1024
+    height: int
+    width: int
     cfg_enabled: bool
-    checkpoint_name: str = "Motif-Technologies/Motif-Image-6B-Preview"
+
+    checkpoint_name: str
 
 
 class MotifPipeline(PipelineAPIMixin):
@@ -89,13 +91,10 @@ class MotifPipeline(PipelineAPIMixin):
         self._submesh_devices = create_submeshes(device, config.dit_parallel_config)
         logger.info(f"Created submeshes with shape {self._submesh_devices[0].shape}")
 
-        self._prediction_tracers = [
-            Tracer(self._prediction, device=device, prep_run=False) for device in self._submesh_devices
-        ]
+        self._prediction_tracers = [Tracer(self._prediction, device=d, prep_run=False) for d in self._submesh_devices]
 
         self._ccl_managers = [
-            CCLManager(submesh_device, num_links=config.num_links, topology=config.topology)
-            for submesh_device in self._submesh_devices
+            CCLManager(d, num_links=config.num_links, topology=config.topology) for d in self._submesh_devices
         ]
 
         self._combiner = CFGCombiner(self._submesh_devices)
@@ -208,12 +207,12 @@ class MotifPipeline(PipelineAPIMixin):
     def __call__(
         self,
         *,
-        prompts: list[str],
-        prompts_2: list[str] | None = None,
-        prompts_3: list[str] | None = None,
-        negative_prompts: list[str | None] | None = None,
-        negative_prompts_2: list[str | None] | None = None,
-        negative_prompts_3: list[str | None] | None = None,
+        prompts: Sequence[str],
+        prompts_2: Sequence[str] | None = None,
+        prompts_3: Sequence[str] | None = None,
+        negative_prompts: Sequence[str | None] | None = None,
+        negative_prompts_2: Sequence[str | None] | None = None,
+        negative_prompts_3: Sequence[str | None] | None = None,
         num_inference_steps: int = 40,
         seed: int | None = None,
         num_images_per_prompt: int = 1,
@@ -227,8 +226,9 @@ class MotifPipeline(PipelineAPIMixin):
     ) -> list[Image.Image]:
         prompt_count = len(prompts)
 
-        if self._cfg_enabled != (cfg_scale > 1):
-            logger.warning(f"cfg_scale={cfg_scale} does not match cfg_enabled={self._cfg_enabled}")
+        if cfg_scale > 1 and not self._cfg_enabled:
+            msg = "cfg_scale > 1 requires CFG to be enabled"
+            raise ValueError(msg)
 
         vae_traced = vae_traced if vae_traced is not None else traced
         encoder_traced = encoder_traced if encoder_traced is not None else traced
