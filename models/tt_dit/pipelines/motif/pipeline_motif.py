@@ -35,9 +35,23 @@ if TYPE_CHECKING:
 _VAE_SCALE_FACTOR = 8
 _LATENT_CHANNELS = 16
 
-_DEFAULT_PARALLELISM_BY_MESH_SHAPE: dict[tuple[int, int], dict] = {
-    (2, 4): {"cfg": (2, 0), "sp": (1, 0), "tp": (4, 1), "encoder_tp": (4, 1), "vae_tp": (4, 1), "num_links": 1},
-    (4, 8): {"cfg": (2, 1), "sp": (4, 0), "tp": (4, 1), "encoder_tp": (4, 1), "vae_tp": (4, 1), "num_links": 4},
+_PRESETS: dict[tuple[int, int], dict] = {
+    (2, 4): {
+        "cfg": (2, 0),
+        "sp": (1, 0),
+        "tp": (4, 1),
+        "encoder_tp": (4, 1),
+        "vae_tp": (4, 1),
+        "num_links": 1,
+    },
+    (4, 8): {
+        "cfg": (2, 1),
+        "sp": (4, 0),
+        "tp": (4, 1),
+        "encoder_tp": (4, 1),
+        "vae_tp": (4, 1),
+        "num_links": 4,
+    },
 }
 
 
@@ -158,7 +172,7 @@ class MotifPipeline(PipelineAPIMixin):
             checkpoint_name = model_checkpoint_path
             logger.warning("DEPRECATED: model_checkpoint_path is deprecated. Use checkpoint_name instead.")
 
-        preset = _DEFAULT_PARALLELISM_BY_MESH_SHAPE.get(tuple(mesh_device.shape), {})
+        preset = _PRESETS.get(tuple(mesh_device.shape), {})
 
         config = MotifPipelineConfig(
             topology=topology,
@@ -186,7 +200,6 @@ class MotifPipeline(PipelineAPIMixin):
         logger.info(f"T5 enabled: {enable_t5_text_encoder}")
 
         return cls(device=mesh_device, config=config)
-
 
     def __call__(
         self,
