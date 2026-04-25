@@ -5,28 +5,49 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+
+import torch
+from diffusers.schedulers.scheduling_utils import SchedulerMixin
 
 import ttnn
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
-
 
 class Solver(ABC):
-    def __init__(self) -> None:
+    def __init__(self, scheduler: SchedulerMixin) -> None:
+        if not isinstance(scheduler, SchedulerMixin):
+            msg = f"scheduler must be a diffusers SchedulerMixin, got {type(scheduler).__name__}"
+            raise ValueError(msg)
+        self._scheduler = scheduler
         self._sigmas = None
         self._alphas = None
+        self._timesteps = None
 
-    def set_schedule(self, sigmas: Sequence[float], alphas: Sequence[float]) -> None:
-        """Set the noise and signal schedules.
+    @property
+    def scheduler(self) -> SchedulerMixin:
+        return self._scheduler
 
-        Args:
-            sigmas: Full noise schedule (length = number of steps + 1).
-            alphas: Full signal schedule (length = number of steps + 1).
-        """
-        self._sigmas = sigmas
-        self._alphas = alphas
+    @property
+    def sigmas(self) -> list[float] | None:
+        """Returns the active sigma schedule, or None when no schedule has been provided."""
+        return self._sigmas
+
+    @property
+    def alphas(self) -> list[float] | None:
+        """Returns the active alpha schedule, or None when no schedule has been provided."""
+        return self._alphas
+
+    @property
+    def timesteps(self) -> torch.Tensor | None:
+        """Returns the active timesteps, or None when no timesteps have been provided."""
+        return self._timesteps
+
+    def set_schedule(self, num_inference_steps: int | None = None, *, device: object = None, **kwargs: object) -> None:
+        """Forward to ``scheduler.set_timesteps`` and cache sigmas/alphas for device stepping."""
+        self._scheduler.set_timesteps(num_inference_steps, device=device, **kwargs)
+        sigmas = self._scheduler.sigmas
+        self._sigmas = sigmas.tolist()
+        self._alphas = (1.0 - sigmas).tolist()
+        self._timesteps = self._scheduler.timesteps
 
     @abstractmethod
     def step(self, *, step: int, latent: ttnn.Tensor, velocity_pred: ttnn.Tensor) -> ttnn.Tensor:
@@ -42,7 +63,6 @@ class Solver(ABC):
         """
 
     def _assert_schedule(self) -> None:
-        """Assert that the noise and signal schedules have been set."""
         if self._sigmas is None or self._alphas is None:
             msg = "schedule must be set before stepping"
             raise ValueError(msg)

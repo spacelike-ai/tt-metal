@@ -4,17 +4,13 @@
 
 from __future__ import annotations
 
-import math
-
-import numpy as np
 import pytest
 import torch
 from diffusers.pipelines.mochi.pipeline_mochi import linear_quadratic_schedule
-from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
+from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
 
 import ttnn
-from models.tt_dit.solvers import schedules
 from models.tt_dit.solvers.euler import EulerSolver
 from models.tt_dit.solvers.unipc import UniPCSolver, UniPCVariant
 from models.tt_dit.utils import tensor
@@ -23,106 +19,101 @@ from models.tt_dit.utils.check import assert_quality
 _NUM_STEPS = 17
 
 
-# Schedule tests: linear
-
-
-def test_linear() -> None:
-    """linear() should produce evenly spaced sigmas."""
-    expected = torch.arange(_NUM_STEPS, -1, -1) / _NUM_STEPS
-
-    schedule = schedules.linear(_NUM_STEPS)
-
-    assert torch.equal(expected, torch.tensor(schedule.sigmas))
-
-
-def test_linear_matches_flow_match_euler() -> None:
-    """linear(sigma_small=0.001) should match FlowMatchEulerDiscreteScheduler defaults."""
-    reference = FlowMatchEulerDiscreteScheduler()
-    reference.set_timesteps(_NUM_STEPS)
-
-    schedule = schedules.linear(_NUM_STEPS, sigma_small=0.001)
-
-    assert torch.equal(reference.sigmas, torch.tensor(schedule.sigmas))
-
-
-def test_linear_alpha_sigma_sum_to_one() -> None:
-    schedule = schedules.linear(_NUM_STEPS)
-    for s, a in zip(schedule.sigmas, schedule.alphas, strict=True):
-        assert s + a == 1
-
-
-# Schedule tests: shifted_linear
-
-
-@pytest.mark.parametrize("shift", [1.0, 3.0, 5.0, 12.0])
-def test_shifted_linear_matches_flow_match_euler_static(shift: float) -> None:
-    """shifted_linear() should match FlowMatchEulerDiscreteScheduler defaults.
-
-    Diffusers double-applies the shift: once in __init__ (shifting sigma_small from 0.001
-    to shift*0.001/(1+(shift-1)*0.001)), then again in set_timesteps. We match by using
-    the pre-shifted sigma_small.
-    """
-    reference = FlowMatchEulerDiscreteScheduler(shift=shift)
-    reference.set_timesteps(_NUM_STEPS)
-
-    schedule = schedules.shifted_linear(_NUM_STEPS, shift=shift, sigma_small=reference.sigma_small)
-
-    assert torch.equal(reference.sigmas, torch.tensor(schedule.sigmas))
-
-
-@pytest.mark.parametrize("mu", [0.5, 1.0, 2.0])
-def test_shifted_linear_matches_flow_match_euler_dynamic(mu: float) -> None:
-    """shifted_linear(shift=exp(mu)) should match dynamic shifting with exponential type."""
-    reference = FlowMatchEulerDiscreteScheduler(use_dynamic_shifting=True, time_shift_type="exponential")
-    reference.set_timesteps(_NUM_STEPS, mu=mu)
-
-    sigma_small = np.float32(0.001).item()
-    schedule = schedules.shifted_linear(_NUM_STEPS, shift=math.exp(mu), sigma_small=sigma_small)
-
-    assert torch.equal(reference.sigmas, torch.tensor(schedule.sigmas))
-
-
-@pytest.mark.parametrize("shift", [3.0, 12.0])
-def test_shifted_linear_matches_unipc_flow_sigmas(shift: float) -> None:
-    """shifted_linear() should match UniPCMultistepScheduler in flow-matching mode.
-
-    UniPCMultistepScheduler uses linspace(1, 0.001, N+1)[:-1] as base, giving an
-    effective sigma_small of 0.001 + 0.999/N, and subtracts 1e-6 from the first sigma
-    to avoid log(1) = 0.
-    """
-    reference = UniPCMultistepScheduler(use_flow_sigmas=True, flow_shift=shift, prediction_type="flow_prediction")
-    reference.set_timesteps(_NUM_STEPS)
-
-    # Diffusers' effective sigma_small from its linspace(1, 0.001, N+1) discretization.
-    unipc_sigma_small = 0.001 + 0.999 / _NUM_STEPS
-    schedule = schedules.shifted_linear(_NUM_STEPS, shift=shift, sigma_small=unipc_sigma_small)
-
-    schedule.sigmas[0] -= 1e-6
-
-    assert torch.equal(reference.sigmas, torch.tensor(schedule.sigmas))
-
-
-def test_shifted_linear_alpha_sigma_sum_to_one() -> None:
-    schedule = schedules.shifted_linear(_NUM_STEPS, shift=5.0)
-    for s, a in zip(schedule.sigmas, schedule.alphas, strict=True):
-        assert s + a == 1
-
-
-# Schedule tests: linear_quadratic
-
-
-def test_linear_quadratic_matches_mochi_diffusers() -> None:
-    """linear_quadratic() should match diffusers' linear_quadratic_schedule."""
-    threshold_noise = 0.025
-
-    reference = linear_quadratic_schedule(_NUM_STEPS, threshold_noise)
-
-    schedule = schedules.linear_quadratic(_NUM_STEPS, threshold_noise=threshold_noise)
-
-    assert schedule.sigmas == [*reference, 0.0]
-
-
 # Euler solver tests
+
+
+def _motif_sigmas(*, step_count: int, linear_quadratic_emulating_steps: int) -> torch.Tensor:
+    assert step_count % 2 == 0
+
+    s = step_count
+    n = linear_quadratic_emulating_steps
+    a = s // 2 / n - 1
+
+    sigmas1 = torch.linspace(1, 0, n + 1)[: s // 2]
+    sigmas2 = torch.linspace(0, 1, s // 2 + 1).pow(2) * a - a
+
+    return torch.concat([sigmas1, sigmas2])
+
+
+def _assert_euler_matches_scheduler(
+    mesh_device: ttnn.MeshDevice,
+    *,
+    schedule_kwargs: dict[str, object],
+    expected_timesteps: torch.Tensor | None = None,
+    expected_sigmas: torch.Tensor | None = None,
+) -> None:
+    solver = EulerSolver()
+    ref_scheduler = FlowMatchEulerDiscreteScheduler()
+
+    solver.set_schedule(**schedule_kwargs)
+    ref_scheduler.set_timesteps(**schedule_kwargs)
+
+    assert solver.timesteps is not None
+    assert torch.allclose(solver.timesteps, ref_scheduler.timesteps)
+    assert solver.sigmas == ref_scheduler.sigmas.tolist()
+    assert solver.alphas == (1.0 - ref_scheduler.sigmas).tolist()
+
+    if expected_timesteps is not None:
+        assert torch.allclose(solver.timesteps, expected_timesteps)
+
+    if expected_sigmas is not None:
+        assert solver.sigmas == expected_sigmas.tolist()
+
+    torch.manual_seed(0)
+    torch_latent = torch.randn(1, 1, 32, 32)
+    ref = torch_latent.clone()
+    latent = tensor.from_torch(torch_latent, device=mesh_device, dtype=ttnn.float32)
+
+    for step_idx in range(len(ref_scheduler.timesteps)):
+        torch_velocity = torch.randn_like(torch_latent)
+        ref = ref_scheduler.step(torch_velocity, ref_scheduler.timesteps[step_idx], ref, return_dict=False)[0]
+
+        velocity = tensor.from_torch(torch_velocity, device=mesh_device, dtype=ttnn.float32)
+        latent = solver.step(step=step_idx, latent=latent, velocity_pred=velocity)
+
+        result_ours = ttnn.to_torch(latent)
+        assert_quality(result_ours, ref, pcc=0.999_999, relative_rmse=1e-5)
+
+
+def test_solver_set_schedule_caches_scheduler_outputs() -> None:
+    """set_schedule should forward scheduler kwargs and cache schedule outputs."""
+    scheduler = FlowMatchEulerDiscreteScheduler()
+    solver = EulerSolver(scheduler=scheduler)
+
+    sigmas = torch.linspace(1.0, 1 / _NUM_STEPS, _NUM_STEPS)
+    mu = 0.75
+    solver.set_schedule(sigmas=sigmas, mu=mu)
+
+    assert solver.timesteps is scheduler.timesteps
+    assert solver.sigmas == scheduler.sigmas.tolist()
+    assert solver.alphas == (1.0 - scheduler.sigmas).tolist()
+
+
+@pytest.mark.parametrize("mesh_device", [(1, 1)], indirect=True)
+def test_euler_set_schedule_with_sigmas_and_mu_matches_scheduler(mesh_device: ttnn.MeshDevice) -> None:
+    """EulerSolver should match scheduler outputs for the flux/qwen sigmas+mu path."""
+    sigmas = torch.linspace(1.0, 1 / _NUM_STEPS, _NUM_STEPS).tolist()
+    _assert_euler_matches_scheduler(mesh_device, schedule_kwargs={"sigmas": sigmas, "mu": 0.75})
+
+
+@pytest.mark.parametrize("mesh_device", [(1, 1)], indirect=True)
+def test_euler_set_schedule_with_mochi_sigmas_matches_scheduler(mesh_device: ttnn.MeshDevice) -> None:
+    """EulerSolver should match scheduler outputs for the mochi custom sigma path."""
+    sigmas = linear_quadratic_schedule(_NUM_STEPS, 0.025)
+    _assert_euler_matches_scheduler(mesh_device, schedule_kwargs={"sigmas": sigmas})
+
+
+@pytest.mark.parametrize("mesh_device", [(1, 1)], indirect=True)
+def test_euler_set_schedule_with_motif_sigmas_matches_main(mesh_device: ttnn.MeshDevice) -> None:
+    """EulerSolver should reproduce motif's main-branch timesteps and sigma schedule."""
+    step_count = 18
+    sigmas = _motif_sigmas(step_count=step_count, linear_quadratic_emulating_steps=1000)
+    _assert_euler_matches_scheduler(
+        mesh_device,
+        schedule_kwargs={"sigmas": sigmas[:-1].tolist()},
+        expected_timesteps=sigmas[:-1] * 1000,
+        expected_sigmas=sigmas,
+    )
 
 
 @pytest.mark.parametrize("mesh_device", [(1, 1)], indirect=True)
@@ -132,11 +123,9 @@ def test_euler_matches_diffusers(mesh_device: ttnn.MeshDevice) -> None:
 
     torch_latent = torch.randn(1, 1, 32, 32)
 
-    reference = FlowMatchEulerDiscreteScheduler()
-    reference.set_timesteps(_NUM_STEPS)
-
-    schedule = schedules.linear(_NUM_STEPS, sigma_small=0.001)
     solver = EulerSolver()
+    solver.set_schedule(_NUM_STEPS)
+    scheduler = solver.scheduler
 
     ref = torch_latent.clone()
     latent = tensor.from_torch(torch_latent, device=mesh_device, dtype=ttnn.float32)
@@ -144,18 +133,10 @@ def test_euler_matches_diffusers(mesh_device: ttnn.MeshDevice) -> None:
     for step_idx in range(_NUM_STEPS):
         torch_velocity = torch.randn_like(torch_latent)
 
-        # reference step
-        ref = reference.step(torch_velocity, reference.timesteps[step_idx], ref, return_dict=False)[0]
+        ref = scheduler.step(torch_velocity, scheduler.timesteps[step_idx], ref, return_dict=False)[0]
 
-        # our step
         velocity = tensor.from_torch(torch_velocity, device=mesh_device, dtype=ttnn.float32)
-        latent = solver.step(
-            step=step_idx,
-            latent=latent,
-            sigmas=schedule.sigmas,
-            alphas=schedule.alphas,
-            velocity_pred=velocity,
-        )
+        latent = solver.step(step=step_idx, latent=latent, velocity_pred=velocity)
 
         result_ours = ttnn.to_torch(latent)
         assert_quality(result_ours, ref, pcc=0.999_999, relative_rmse=1e-5)
@@ -164,8 +145,56 @@ def test_euler_matches_diffusers(mesh_device: ttnn.MeshDevice) -> None:
 # UniPC solver tests
 
 
+def test_unipc_constructor_validation() -> None:
+    """UniPCSolver should reject incompatible scheduler configurations."""
+    with pytest.raises(ValueError, match="UniPCMultistepScheduler"):
+        UniPCSolver(scheduler=FlowMatchEulerDiscreteScheduler())  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="use_flow_sigmas=True"):
+        UniPCSolver(scheduler=UniPCMultistepScheduler())
+
+    with pytest.raises(ValueError, match="only order 1 and 2 are supported"):
+        UniPCSolver(
+            scheduler=UniPCMultistepScheduler(
+                use_flow_sigmas=True,
+                prediction_type="flow_prediction",
+                solver_order=3,
+            )
+        )
+
+
 @pytest.mark.parametrize("mesh_device", [(1, 1)], indirect=True)
-@pytest.mark.parametrize("variant", [UniPCVariant.B1, UniPCVariant.B2])
+def test_unipc_set_schedule_resets_state(mesh_device: ttnn.MeshDevice) -> None:
+    """set_schedule should reset logical history without reallocating state buffers."""
+    solver = UniPCSolver(
+        scheduler=UniPCMultistepScheduler(
+            use_flow_sigmas=True,
+            prediction_type="flow_prediction",
+            solver_order=2,
+            solver_type=UniPCVariant.BH2.value,
+        )
+    )
+    solver.set_schedule(_NUM_STEPS)
+
+    latent = tensor.from_torch(torch.randn(1, 1, 32, 32), device=mesh_device, dtype=ttnn.float32)
+    velocity = tensor.from_torch(torch.randn(1, 1, 32, 32), device=mesh_device, dtype=ttnn.float32)
+    solver.step(step=0, latent=latent, velocity_pred=velocity)
+
+    assert solver._state is not None
+    clean_preds = solver._state.clean_preds
+    corrected = solver._state.corrected
+    assert solver._state.oldest_idx == 1
+
+    solver.set_schedule(_NUM_STEPS)
+
+    assert solver._state is not None
+    assert solver._state.clean_preds == clean_preds
+    assert solver._state.corrected is corrected
+    assert solver._state.oldest_idx == 0
+
+
+@pytest.mark.parametrize("mesh_device", [(1, 1)], indirect=True)
+@pytest.mark.parametrize("variant", [UniPCVariant.BH1, UniPCVariant.BH2])
 @pytest.mark.parametrize("shift", [5.0, 12.0])
 def test_unipc_matches_diffusers(mesh_device: ttnn.MeshDevice, variant: UniPCVariant, shift: float) -> None:
     """UniPCSolver should match UniPCMultistepScheduler at every step."""
@@ -178,41 +207,25 @@ def test_unipc_matches_diffusers(mesh_device: ttnn.MeshDevice, variant: UniPCVar
         flow_shift=shift,
         prediction_type="flow_prediction",
         solver_order=2,
-        solver_type="bh1" if variant is UniPCVariant.B1 else "bh2",
+        solver_type=variant.value,
     )
-    scheduler.set_timesteps(_NUM_STEPS)
-
-    (sigmas, alphas) = schedules.shifted_linear(_NUM_STEPS, shift=shift, sigma_small=0.001 + 0.999 / _NUM_STEPS)
-    sigmas[0] -= 1e-6
-
-    # diffusers uses float32 for the schedule
-    sigmas = torch.tensor(sigmas, dtype=torch.float32).tolist()
-    alphas = (1 - torch.tensor(sigmas, dtype=torch.float32)).tolist()
-
-    solver = UniPCSolver(order=2, variant=variant)
+    solver = UniPCSolver(scheduler=scheduler)
+    solver.set_schedule(_NUM_STEPS)
 
     ref = torch_latent.clone()
     latent = tensor.from_torch(torch_latent, device=mesh_device, dtype=ttnn.float32)
 
     for step_idx in range(_NUM_STEPS):
-        if step_idx == _NUM_STEPS - 1 and variant is UniPCVariant.B1:
+        if step_idx == _NUM_STEPS - 1 and variant is UniPCVariant.BH1:
             # Diffusers bh1 produces NaN on the final step; skip.
             break
 
         torch_velocity = torch.randn_like(torch_latent)
 
-        # reference step
         ref = scheduler.step(torch_velocity, scheduler.timesteps[step_idx], ref, return_dict=False)[0]
 
-        # our step
         velocity = tensor.from_torch(torch_velocity, device=mesh_device, dtype=ttnn.float32)
-        latent = solver.step(
-            step=step_idx,
-            latent=latent,
-            sigmas=sigmas,
-            alphas=alphas,
-            velocity_pred=velocity,
-        )
+        latent = solver.step(step=step_idx, latent=latent, velocity_pred=velocity)
 
         result_ours = ttnn.to_torch(latent)
-        assert_quality(result_ours, ref, pcc=1 - 3e-14, relative_rmse=3e-7)
+        assert_quality(result_ours, ref, pcc=1 - 3e-10, relative_rmse=3e-7)

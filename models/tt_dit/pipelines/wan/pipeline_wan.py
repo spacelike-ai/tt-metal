@@ -228,7 +228,7 @@ class WanPipeline(PipelineAPIMixin):
             Number of links to use for CCL operations.
         checkpoint_name (`str`, *optional*, defaults to `"Wan-AI/Wan2.2-T2V-A14B-Diffusers"`):
             HuggingFace Hub repo ID to load model weights from.
-        scheduler (`FlowMatchEulerDiscreteScheduler`, *optional*):
+        scheduler (`UniPCMultistepScheduler`, *optional*):
             Scheduler to use for denoising. Defaults to `UniPCMultistepScheduler` loaded from the checkpoint.
         boundary_ratio (`float`, *optional*, defaults to `0.875`):
             Ratio of total timesteps used as the boundary for switching between the two transformers in two-stage
@@ -282,6 +282,7 @@ class WanPipeline(PipelineAPIMixin):
         *,
         device: ttnn.MeshDevice,
         config: WanPipelineConfig,
+        run_warmup: bool = True,
     ) -> None:
         self.checkpoint_name = config.checkpoint_name
         self.model_type = config.model_type
@@ -357,6 +358,10 @@ class WanPipeline(PipelineAPIMixin):
 
         self._solver = UniPCSolver(order=2, variant=UniPCVariant.B2)
 
+        # persistent latent buffers to enable safe tracing.
+        self.latent_buffer = None
+        self.condition_buffer = None
+
         if self.dynamic_load:
             # setup models that cannot be loaded together with the corresponding model.
             # The module loading utility will take care of the necessary unloading.
@@ -383,13 +388,14 @@ class WanPipeline(PipelineAPIMixin):
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
 
         # TODO: Reset buffers for change in resolution. Also reinitialize trace
-        logger.info("Pipeline allocation run...")
-        self(
-            prompts=["warmup"],
-            num_inference_steps=2,
-            guidance_scale=2 if config.cfg_enabled else 1,
-            guidance_scale_2=2 if config.cfg_enabled else 1,
-        )
+        if run_warmup:
+            logger.info("Pipeline allocation run...")
+            self(
+                prompts=["warmup"],
+                num_inference_steps=2,
+                guidance_scale=2 if config.cfg_enabled else 1,
+                guidance_scale_2=2 if config.cfg_enabled else 1,
+            )
 
     def prepare_text_conditioning(self, tt_model, prompt_embeds, buffer, traced=False):
         prompt_1BLP = tt_model.prepare_text_conditioning(prompt_embeds)
@@ -435,7 +441,6 @@ class WanPipeline(PipelineAPIMixin):
             timestep = t.expand(latents_batch_size)
 
         permuted_model_input = self.get_model_input(permuted_latent_tt, cond_latents)
-        permuted_model_input = ttnn.typecast(permuted_model_input, ttnn.bfloat16)
 
         assert timestep.ndim == 1, "Wan2.2-T2V/I2V requires a 1D timestep tensor"
         timestep = float32_tensor(
@@ -462,8 +467,10 @@ class WanPipeline(PipelineAPIMixin):
         )
 
     def get_model_input(self, latents: ttnn.Tensor, cond_latents: ttnn.Tensor | None) -> ttnn.Tensor:
-        """Adapter function to enable I2V. For base T2V, just return the latents."""
+        """Adapter function to enable I2V. For base T2V, just return the latents (cast to bf16)."""
         del cond_latents
+        if latents.dtype == ttnn.float32:
+            latents = ttnn.typecast(latents, ttnn.bfloat16)
         return latents
 
     def prepare_latents(
@@ -505,7 +512,7 @@ class WanPipeline(PipelineAPIMixin):
         guidance_scale_2: float | None = 3.0,
         num_videos_per_prompt: int | None = 1,
         seed: int = 0,
-        output_type: str | None = "np",
+        output_type: str | None = "uint8",
         traced: bool = False,
         on_event: PipelineEventCallback | None = None,
     ):
@@ -628,8 +635,20 @@ class WanPipeline(PipelineAPIMixin):
                     # First iteration, preprocess spatial input and prepare rope features
                     permuted_latent, latents_sequence_length = ts.model.preprocess_spatial_input_host(latents)
 
+                    sp_axis = ts.model.parallel_config.sequence_parallel.mesh_axis
+
                     if cond_latents is not None:
                         cond_latents, _ = ts.model.preprocess_spatial_input_host(cond_latents)
+                        cond_latents_tt = tensor.from_torch(
+                            cond_latents,
+                            device=self.mesh_device,
+                            mesh_axes=[None, None, sp_axis, None],
+                            dtype=ttnn.bfloat16,
+                        )
+                        if self.condition_buffer is None:
+                            self.condition_buffer = cond_latents_tt
+                        else:
+                            ttnn.copy(cond_latents_tt, self.condition_buffer)
 
                     rope_cos_1HND, rope_sin_1HND, trans_mat = ts.model.get_rope_features(latents)
                     rope_args = {
@@ -638,7 +657,6 @@ class WanPipeline(PipelineAPIMixin):
                         "trans_mat": trans_mat,
                     }
 
-                    sp_axis = ts.model.parallel_config.sequence_parallel.mesh_axis
                     permuted_latent_tt = tensor.from_torch(
                         permuted_latent,
                         device=self.mesh_device,
@@ -646,13 +664,19 @@ class WanPipeline(PipelineAPIMixin):
                         dtype=ttnn.float32,
                     )
 
+                # setup/update latent buffer
+                if self.latent_buffer is None:
+                    self.latent_buffer = permuted_latent_tt
+                else:
+                    ttnn.copy(permuted_latent_tt, self.latent_buffer)
+
                 permuted_latent_tt = self._step(
                     step=i,
                     t=t,
                     ts=ts,
-                    permuted_latent_tt=permuted_latent_tt,
+                    permuted_latent_tt=self.latent_buffer,
                     mask=mask,
-                    cond_latents=cond_latents,
+                    cond_latents=self.condition_buffer,
                     rope_args=rope_args,
                     latents_sequence_length=latents_sequence_length,
                     latents_batch_size=latents.shape[0],

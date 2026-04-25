@@ -6,31 +6,34 @@
 
 from __future__ import annotations
 
+import os
 from typing import List, NamedTuple, Optional, Union
 
-import PIL
 import torch
+from PIL import Image
 
 import ttnn
 
 from ...models.vae.vae_wan2_1 import WanEncoder
+from ...utils import cache
 from ...utils.conv3d import conv_pad_height, conv_pad_in_channels
-from ...utils.tensor import bf16_tensor_2dshard, fast_device_to_host
+from ...utils.tensor import bf16_tensor_2dshard, fast_device_to_host, unflatten
 from .pipeline_wan import WanPipeline, WanPipelineConfig
 
 _DEFAULT_I2V_CHECKPOINT = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
 
 
 class ImagePrompt(NamedTuple):
-    image: PIL.Image.Image
+    image: Image.Image
     frame_pos: int
 
 
 class WanPipelineI2V(WanPipeline):
     def __init__(self, *, device: ttnn.MeshDevice, config: WanPipelineConfig) -> None:
-        super().__init__(device=device, config=config)
+        # initialize without warmup; we warm up below with a sample image_prompt.
+        super().__init__(device=device, config=config, run_warmup=False)
 
-        self.tt_encoder = WanEncoder(
+        self.tt_vae_encoder = WanEncoder(
             base_dim=self._vae.config.base_dim,
             in_channels=self._vae.config.in_channels,
             z_dim=self._vae.config.z_dim,
@@ -44,7 +47,23 @@ class WanPipelineI2V(WanPipeline):
             parallel_config=self.vae_parallel_config,
         )
 
-        self.tt_encoder.load_state_dict(self._vae.torch_state_dict())
+        cache.load_model(
+            self.tt_vae_encoder,
+            model_name=os.path.basename(self.checkpoint_name),
+            subfolder="vae_encoder",
+            parallel_config=self.vae_parallel_config,
+            mesh_shape=tuple(self.mesh_device.shape),
+            get_torch_state_dict=lambda: self._vae.torch_state_dict(),
+        )
+
+        # warmup buffers with a sample image_prompt sized to the target resolution.
+        self(
+            prompts=["warmup"],
+            image_prompt=Image.new("RGB", (self._width, self._height)),
+            num_inference_steps=2,
+            guidance_scale=2 if config.cfg_enabled else 1,
+            guidance_scale_2=2 if config.cfg_enabled else 1,
+        )
 
     @classmethod
     def create_pipeline(
@@ -74,20 +93,19 @@ class WanPipelineI2V(WanPipeline):
         """
         Adapter function to enable I2V. For base T2V, just return the latents.
         """
-        # Reshape to make the channel last
-        U, B, NPad, T_size = latents.shape
-        # break out the channels for processing
-        latents = latents.reshape(U, B, NPad, T_size // self._vae.config.z_dim, -1)
-        cond_latents = cond_latents.reshape(U, B, NPad, T_size // self._vae.config.z_dim, -1)
-
-        # concatenate the latents and cond_latents
-        model_input = torch.cat([latents, cond_latents], dim=-1).reshape(U, B, NPad, -1)
-        return model_input
+        latents = super().get_model_input(latents, None)
+        z_dim = self._vae.config.z_dim
+        t_size = latents.shape[-1]
+        model_input = ttnn.concat(
+            [unflatten(latents, -1, (t_size // z_dim, -1)), unflatten(cond_latents, -1, (t_size // z_dim, -1))],
+            dim=-1,
+        )
+        return ttnn.reshape(model_input, (*tuple(latents.shape)[:-1], -1))
 
     def prepare_latents(
         self,
         batch_size: int,
-        image_prompt: Union[ImagePrompt, PIL.Image.Image, List[ImagePrompt]],
+        image_prompt: Union[ImagePrompt, Image.Image, List[ImagePrompt]],
         num_channels_latents: int = 16,
         height: int = 480,
         width: int = 832,
@@ -99,7 +117,7 @@ class WanPipelineI2V(WanPipeline):
 
         if isinstance(image_prompt, ImagePrompt):
             image_prompt = [image_prompt]
-        elif isinstance(image_prompt, PIL.Image.Image):
+        elif isinstance(image_prompt, Image.Image):
             image_prompt = [ImagePrompt(image=image_prompt, frame_pos=0)]
 
         latents, _ = super().prepare_latents(
@@ -153,7 +171,7 @@ class WanPipelineI2V(WanPipeline):
             },
         )
 
-        encoded_video_BCTHW, new_logical_h = self.tt_encoder(tt_video_condition_BTHWC, logical_h)
+        encoded_video_BCTHW, new_logical_h = self.tt_vae_encoder(tt_video_condition_BTHWC, logical_h)
 
         # convert to torch
         concat_dims = [None, None]

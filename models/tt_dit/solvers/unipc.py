@@ -9,9 +9,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from diffusers.schedulers import UniPCMultistepScheduler
+
 import ttnn
 
-from ..utils import tensor
 from .base import Solver
 
 if TYPE_CHECKING:
@@ -22,29 +23,47 @@ if TYPE_CHECKING:
 class _State:
     clean_preds: tuple[ttnn.Tensor, ...]
     corrected: ttnn.Tensor
+    oldest_idx: int = 0
 
 
 class UniPCVariant(Enum):
-    B1 = "b1"  # B(h) = h
-    B2 = "b2"  # B(h) = 1 - e^(-h)
+    BH1 = "bh1"  # B(h) = h
+    BH2 = "bh2"  # B(h) = 1 - e^(-h)
 
     def b(self, h: float) -> float:
-        if self is UniPCVariant.B1:
+        if self is UniPCVariant.BH1:
             return h
         return -math.expm1(-h)
 
 
 class UniPCSolver(Solver):
-    def __init__(self, *, order: int, variant: UniPCVariant) -> None:
-        super().__init__()
+    def __init__(self, scheduler: UniPCMultistepScheduler | None = None) -> None:
+        """Wrap a diffusers scheduler for on-device UniPC stepping."""
+        if scheduler is None:
+            scheduler = UniPCMultistepScheduler(use_flow_sigmas=True, prediction_type="flow_prediction")
 
-        if order not in (1, 2):
-            msg = "only order 1 and 2 are supported"
+        if not isinstance(scheduler, UniPCMultistepScheduler):
+            msg = f"scheduler must be a UniPCMultistepScheduler, got {type(scheduler).__name__}"
             raise ValueError(msg)
 
+        if not scheduler.config.use_flow_sigmas:
+            msg = "Only UniPCMultistepScheduler configured with use_flow_sigmas=True is supported"
+            raise ValueError(msg)
+
+        order = scheduler.config.solver_order
+        if order not in (1, 2):
+            msg = f"only order 1 and 2 are supported, got {order}"
+            raise ValueError(msg)
+
+        super().__init__(scheduler)
         self.order = order
-        self.variant = variant
+        self.variant = UniPCVariant(scheduler.config.solver_type)
         self._state = None
+
+    def set_schedule(self, num_inference_steps: int | None = None, *, device: object = None, **kwargs: object) -> None:
+        super().set_schedule(num_inference_steps, device=device, **kwargs)
+        if self._state is not None:
+            self._state = _State(self._state.clean_preds, self._state.corrected, 0)
 
     def step(self, *, step: int, latent: ttnn.Tensor, velocity_pred: ttnn.Tensor) -> ttnn.Tensor:
         self._assert_schedule()
@@ -52,27 +71,27 @@ class UniPCSolver(Solver):
         clean_pred = latent - self._sigmas[step] * velocity_pred
 
         state = self._state or _State(
-            tuple(tensor.empty_like(latent) for _ in range(self.order)),
-            tensor.empty_like(latent),
+            tuple(ttnn.empty_like(latent) for _ in range(self.order)),
+            ttnn.empty_like(latent),
         )
+        clean_preds = _ordered_clean_preds(state.clean_preds, state.oldest_idx)
 
         if step != 0:
             corrected = self._correct(
                 order=_taper(self.order, step - 1, len(self._sigmas) - 1),
                 latent=state.corrected,
                 step=step - 1,
-                clean_preds=(*state.clean_preds, clean_pred),
+                clean_preds=(*clean_preds, clean_pred),
             )
         else:
             corrected = latent
 
-        del latent
-
         ttnn.copy(corrected, state.corrected)
         del corrected
 
-        ttnn.copy(clean_pred, state.clean_preds[0])
-        clean_preds = (*state.clean_preds[1:], state.clean_preds[0])
+        ttnn.copy(clean_pred, state.clean_preds[state.oldest_idx])
+        oldest_idx = (state.oldest_idx + 1) % self.order
+        clean_preds = _ordered_clean_preds(state.clean_preds, oldest_idx)
         del clean_pred
 
         predicted = self._predict(
@@ -82,7 +101,7 @@ class UniPCSolver(Solver):
             clean_preds=clean_preds,
         )
 
-        self._state = _State(clean_preds, state.corrected)
+        self._state = _State(state.clean_preds, state.corrected, oldest_idx)
         return predicted
 
     def _predict(
@@ -154,6 +173,10 @@ class UniPCSolver(Solver):
 
 def _taper(order: int, step: int, num_steps: int) -> int:
     return min(order, step + 1, num_steps - step)
+
+
+def _ordered_clean_preds(clean_preds: tuple[ttnn.Tensor, ...], oldest_idx: int) -> tuple[ttnn.Tensor, ...]:
+    return clean_preds[oldest_idx:] + clean_preds[:oldest_idx]
 
 
 def _log(x: float, /) -> float:
