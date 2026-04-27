@@ -13,18 +13,18 @@ from diffusers.image_processor import VaeImageProcessor
 from loguru import logger
 
 import ttnn
+from models.tt_dit.models.transformers.transformer_motif import MotifCheckpoint
+from models.tt_dit.models.vae.vae_sd35 import VAEDecoderAdapter
+from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
+from models.tt_dit.parallel.manager import CCLManager
+from models.tt_dit.pipelines.cfg import CFGCombiner
+from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
+from models.tt_dit.pipelines.mesh import create_submeshes, distribute_cfg, reshape_device
+from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
+from models.tt_dit.solvers import EulerSolver
+from models.tt_dit.utils import tensor
+from models.tt_dit.utils.tracing import Tracer
 
-from ...models.transformers.transformer_motif import MotifCheckpoint
-from ...models.vae.vae_sd35 import VAEDecoderAdapter
-from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
-from ...parallel.manager import CCLManager
-from ...solvers import EulerSolver
-from ...utils import tensor
-from ...utils.tracing import Tracer
-from ..cfg import CFGCombiner
-from ..events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
-from ..mesh import create_submeshes, reshape_device
-from ..pipeline_api import PipelineAPIMixin
 from .text_encoder import TextEncoder
 
 if TYPE_CHECKING:
@@ -79,7 +79,7 @@ class MotifPipelineConfig:
 
 class MotifPipeline(PipelineAPIMixin):
     def __init__(self, *, device: ttnn.MeshDevice, config: MotifPipelineConfig) -> None:
-        self._cfg_parallel = config.dit_parallel_config.cfg_parallel.factor == 2
+        self._cfg_parallel = config.dit_parallel_config.cfg_parallel.factor != 1
         self._sp_axis = config.dit_parallel_config.sequence_parallel.mesh_axis
         self._encoder_tp = config.encoder_parallel_config.tensor_parallel
         self._height = config.height
@@ -88,16 +88,16 @@ class MotifPipeline(PipelineAPIMixin):
 
         logger.info(f"Parallel config: {config.dit_parallel_config}")
         logger.info(f"Original mesh shape: {device.shape}")
-        self._submesh_devices = create_submeshes(device, config.dit_parallel_config)
-        logger.info(f"Created submeshes with shape {self._submesh_devices[0].shape}")
+        self._devices = create_submeshes(device, config.dit_parallel_config)
+        logger.info(f"Created submeshes with shape {self._devices[0].shape}")
 
-        self._prediction_tracers = [Tracer(self._prediction, device=d, prep_run=False) for d in self._submesh_devices]
+        self._predict_tracers = [Tracer(self._predict, device=d, prep_run=False) for d in self._devices]
 
         self._ccl_managers = [
-            CCLManager(d, num_links=config.num_links, topology=config.topology) for d in self._submesh_devices
+            CCLManager(d, num_links=config.num_links, topology=config.topology) for d in self._devices
         ]
 
-        self._combiner = CFGCombiner(self._submesh_devices)
+        self._combiner = CFGCombiner(self._devices)
         self._solvers = (EulerSolver(), EulerSolver()) if self._cfg_parallel else (EulerSolver(),)
         self._image_processor = VaeImageProcessor(vae_scale_factor=_VAE_SCALE_FACTOR)
 
@@ -132,21 +132,21 @@ class MotifPipeline(PipelineAPIMixin):
                 ccl_manager=self._ccl_managers[0],
             )
 
-        for d in self._submesh_devices:
+        for d in self._devices:
             ttnn.synchronize_device(d)
 
         logger.info("pipeline allocation run...")
         self(prompts=[""], num_inference_steps=2, traced=False, cfg_scale=2 if config.cfg_enabled else 1)
 
     def _reshape_encoder_device(self) -> AbstractContextManager[None]:
-        device = self._submesh_devices[0]
+        device = self._devices[0]
         tp = self._encoder_tp
 
         shape = list(device.shape)
         shape[tp.mesh_axis] = tp.factor
         shape[1 - tp.mesh_axis] = device.shape.mesh_size() // tp.factor
 
-        return reshape_device(self._submesh_devices[0], ttnn.MeshShape(*shape))
+        return reshape_device(self._devices[0], ttnn.MeshShape(*shape))
 
     @classmethod
     def create_pipeline(
@@ -157,15 +157,15 @@ class MotifPipeline(PipelineAPIMixin):
         dit_tp: tuple[int, int] | None = None,
         encoder_tp: tuple[int, int] | None = None,
         vae_tp: tuple[int, int] | None = None,
-        enable_t5_text_encoder: bool = True,
-        use_torch_t5_text_encoder: bool = False,
-        use_torch_clip_text_encoder: bool = False,
-        use_torch_vae: bool = False,
+        enable_t5_text_encoder: bool = True,  # noqa: FBT001, FBT002
+        use_torch_t5_text_encoder: bool = False,  # noqa: FBT001, FBT002
+        use_torch_clip_text_encoder: bool = False,  # noqa: FBT001, FBT002
+        use_torch_vae: bool = False,  # noqa: FBT001, FBT002
         num_links: int | None = None,
         topology: ttnn.Topology = ttnn.Topology.Linear,
         width: int = 1024,
         height: int = 1024,
-        cfg_enabled: bool = True,
+        cfg_enabled: bool = True,  # noqa: FBT001, FBT002
         checkpoint_name: str = "Motif-Technologies/Motif-Image-6B-Preview",
         model_checkpoint_path: str | None = None,
     ) -> MotifPipeline:
@@ -268,50 +268,34 @@ class MotifPipeline(PipelineAPIMixin):
 
         logger.info("preparing inputs...")
         latents = self._random_latents(batch_size=prompt_count * num_images_per_prompt, seed=seed)
-        early_context = self._distribute_cfg(torch_early_context, on_host=traced)
-        early_pooled = self._distribute_cfg(torch_early_pooled, on_host=traced)
-        late_context = self._distribute_cfg(torch_late_context, on_host=traced)
-        late_pooled = self._distribute_cfg(torch_late_pooled, on_host=traced)
+        early_context = distribute_cfg(torch_early_context, devices=self._devices, on_host=traced)
+        early_pooled = distribute_cfg(torch_early_pooled, devices=self._devices, on_host=traced)
+        late_context = distribute_cfg(torch_late_context, devices=self._devices, on_host=traced)
+        late_pooled = distribute_cfg(torch_late_pooled, devices=self._devices, on_host=traced)
 
         logger.info("denoising...")
         on_event(SectionStart("denoising"))
 
-        for i, t in enumerate(tqdm.tqdm(sigmas[:-1])):
-            on_event(SectionStart(f"denoising_step_{i}"))
+        for step, t in enumerate(tqdm.tqdm(sigmas[:-1])):
+            on_event(SectionStart(f"denoising_step_{step}"))
 
             early = t >= negative_strategy_switch_time
 
-            velocity_pred = []
+            latents = self._step(
+                step=step,
+                t=t,
+                cfg_scale=cfg_scale,
+                latents=latents,
+                context=early_context if early else late_context,
+                pooled=early_pooled if early else late_pooled,
+                traced=traced,
+            )
 
-            for device_idx, device in enumerate(self._submesh_devices):
-                timestep = ttnn.full(
-                    [1, 1],
-                    fill_value=t * 1000,
-                    layout=ttnn.TILE_LAYOUT,
-                    dtype=ttnn.float32,
-                    device=device,
-                )
+            # Helps with accurate time profiling.
+            for device in self._devices:
+                ttnn.synchronize_device(device)
 
-                latents[device_idx], v = self._prediction_tracers[device_idx](
-                    latents=latents[device_idx],
-                    prompt=early_context[device_idx] if early else late_context[device_idx],
-                    pooled=early_pooled[device_idx] if early else late_pooled[device_idx],
-                    timestep=timestep,
-                    submesh_idx=device_idx,
-                    traced=traced,
-                )
-                velocity_pred.append(v)
-
-                if self._cfg_enabled:
-                    velocity_pred[device_idx] = self._combiner.combine(velocity_pred[device_idx], cfg_scale)
-
-            for device_idx, device in enumerate(self._submesh_devices):
-                ttnn.synchronize_device(device)  # Helps with accurate time profiling.
-                latents[device_idx] = self._solvers[device_idx].step(
-                    step=i, latent=latents[device_idx], velocity_pred=velocity_pred[device_idx]
-                )
-
-            on_event(SectionEnd(f"denoising_step_{i}"))
+            on_event(SectionEnd(f"denoising_step_{step}"))
 
         on_event(SectionEnd("denoising"))
 
@@ -323,27 +307,64 @@ class MotifPipeline(PipelineAPIMixin):
         on_event(SectionEnd("total"))
         return images
 
-    def _prediction(
+    def _step(
+        self,
+        *,
+        step: int,
+        t: float,
+        cfg_scale: float,
+        latents: Sequence[ttnn.Tensor],
+        context: Sequence[ttnn.Tensor],
+        pooled: Sequence[ttnn.Tensor],
+        traced: bool,
+    ) -> list[ttnn.Tensor]:
+        latents = list(latents)
+
+        for idx, device in enumerate(self._devices):
+            timestep = ttnn.full(
+                [1, 1],
+                fill_value=t * 1000,
+                layout=ttnn.TILE_LAYOUT,
+                dtype=ttnn.float32,
+                device=device,
+            )
+
+            x, v = self._predict_tracers[idx](
+                latents=latents[idx],
+                context=context[idx],
+                pooled=pooled[idx],
+                timestep=timestep,
+                submesh_idx=idx,
+                traced=traced,
+            )
+
+            if self._cfg_enabled:
+                v = self._combiner.combine(v, cfg_scale)
+
+            latents[idx] = self._solvers[idx].step(step=step, latent=x, velocity_pred=v)
+
+        return latents
+
+    def _predict(
         self,
         *,
         latents: ttnn.Tensor,
-        prompt: ttnn.Tensor,
+        context: ttnn.Tensor,
         pooled: ttnn.Tensor,
         timestep: ttnn.Tensor,
         submesh_idx: int,
     ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
-        model_input = ttnn.concat([latents, latents]) if self._cfg_enabled and not self._cfg_parallel else latents
+        duplicate_latents = self._cfg_enabled and not self._cfg_parallel
 
-        velocity_pred = self._transformers[submesh_idx].forward(
-            spatial=model_input,
-            prompt=prompt,
+        pred = self._transformers[submesh_idx].forward(
+            spatial=ttnn.concat([latents, latents]) if duplicate_latents else latents,
+            prompt=context,
             pooled=pooled,
             timestep=timestep,
         )
 
-        # Make latents an output, because inputs are copied to the trace region before executing a
-        # trace and might be overwritten during execution.
-        return latents, velocity_pred
+        # Make latents an output, because inputs may be overwritten during trace execution.
+        return latents, pred
 
     def _random_latents(self, batch_size: int, seed: int | None) -> list[ttnn.Tensor]:
         if seed is not None:
@@ -356,13 +377,11 @@ class MotifPipeline(PipelineAPIMixin):
         latents = torch.randn(shape, dtype=torch.float32).to(dtype=torch.bfloat16).permute(0, 2, 3, 1)
         latents = self._transformers[0].patchify(latents)
 
-        return [
-            tensor.from_torch(latents, device=d, mesh_axes=[None, self._sp_axis, None]) for d in self._submesh_devices
-        ]
+        return [tensor.from_torch(latents, device=d, mesh_axes=[None, self._sp_axis, None]) for d in self._devices]
 
     def _decode_latents(self, tt_latents: ttnn.Tensor, *, traced: bool) -> list[Image.Image]:
         # Sync because we don't pass a persistent buffer or a barrier semaphore.
-        ttnn.synchronize_device(self._submesh_devices[0])
+        ttnn.synchronize_device(self._devices[0])
 
         tt_latents = self._ccl_managers[0].all_gather_persistent_buffer(
             tt_latents, dim=1, mesh_axis=self._sp_axis, use_hyperparams=True
@@ -382,23 +401,6 @@ class MotifPipeline(PipelineAPIMixin):
         assert isinstance(image, torch.Tensor)
 
         return self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
-
-    def _distribute_cfg(
-        self, x: torch.Tensor, *, on_host: bool
-    ) -> tuple[ttnn.Tensor] | tuple[ttnn.Tensor, ttnn.Tensor]:
-        """Return one tensor per submesh from a conditioning batch."""
-        match self._submesh_devices:
-            case (device,):
-                return (tensor.from_torch(x, device=device, on_host=on_host),)
-            case (device1, device2):
-                half = x.shape[0] // 2
-                return (
-                    tensor.from_torch(x[:half], device=device1, on_host=on_host),
-                    tensor.from_torch(x[half:], device=device2, on_host=on_host),
-                )
-            case _:
-                msg = "unsupported number of submeshes"
-                raise ValueError(msg)
 
 
 def _schedule(*, step_count: int, linear_quadratic_emulating_steps: int) -> tuple[list[float], list[float]]:

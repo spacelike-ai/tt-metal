@@ -6,11 +6,14 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
+from models.tt_dit.utils import tensor
 
 import ttnn
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
+
+    import torch
 
     from ..parallel.config import DiTParallelConfig
 
@@ -61,3 +64,21 @@ def create_submeshes(
         raise ValueError(msg)
 
     return (devices[0],) if cp.factor == 1 else (devices[0], devices[1])
+
+
+def distribute_cfg(
+    x: torch.Tensor, /, *, devices: Sequence[ttnn.MeshDevice], on_host: bool
+) -> tuple[ttnn.Tensor] | tuple[ttnn.Tensor, ttnn.Tensor]:
+    """Return one tensor per submesh from a conditioning batch."""
+    match devices:
+        case [device]:
+            return (tensor.from_torch(x, device=device, on_host=on_host),)
+        case [device1, device2]:
+            half = x.shape[0] // 2
+            return (
+                tensor.from_torch(x[:half], device=device1, on_host=on_host),
+                tensor.from_torch(x[half:], device=device2, on_host=on_host),
+            )
+        case _:
+            msg = f"unsupported number of submeshes: expected 1 or 2, got {len(devices)}"
+            raise ValueError(msg)

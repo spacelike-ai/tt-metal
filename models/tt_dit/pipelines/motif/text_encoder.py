@@ -17,7 +17,7 @@ import transformers
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Sequence
 
 
 class TextEncoder:
@@ -83,7 +83,7 @@ class TextEncoder:
     @torch.no_grad()
     def encode(
         self,
-        prompts: tuple[Iterable[str], Iterable[str], Iterable[str]],
+        prompts: tuple[Sequence[str], Sequence[str], Sequence[str]],
         *,
         num_images_per_prompt: int,
         traced: bool,
@@ -112,8 +112,8 @@ class TextEncoder:
 
     def encode_cfg(
         self,
-        pos_prompts: tuple[list[str], list[str], list[str]],
-        neg_prompts: tuple[list[str | None], list[str | None], list[str | None]],
+        pos_prompts: tuple[Sequence[str], Sequence[str], Sequence[str]],
+        neg_prompts: tuple[Sequence[str | None], Sequence[str | None], Sequence[str | None]],
         *,
         num_images_per_prompt: int,
         cfg_enabled: bool,
