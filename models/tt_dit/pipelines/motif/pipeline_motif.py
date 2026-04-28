@@ -35,8 +35,9 @@ if TYPE_CHECKING:
 
 _VAE_SCALE_FACTOR = 8
 _LATENT_CHANNELS = 16
+_DEFAULT_CHECKPOINT = "Motif-Technologies/Motif-Image-6B-Preview"
 
-_PRESETS: dict[tuple[int, int], dict] = {
+_PRESETS: dict[tuple[int, ...], dict] = {
     (2, 4): {
         "cfg": (2, 0),
         "sp": (1, 0),
@@ -76,8 +77,66 @@ class MotifPipelineConfig:
 
     checkpoint_name: str
 
+    @classmethod
+    def default(
+        cls,
+        *,
+        mesh_shape: ttnn.MeshShape | None = None,
+        topology: ttnn.Topology = ttnn.Topology.Linear,
+        num_links: int | None = None,
+        dit_parallel_config: DiTParallelConfig | None = None,
+        encoder_parallel_config: EncoderParallelConfig | None = None,
+        vae_parallel_config: VAEParallelConfig | None = None,
+        enable_t5_text_encoder: bool = True,
+        use_torch_t5_text_encoder: bool = False,
+        use_torch_clip_text_encoder: bool = False,
+        use_torch_vae: bool = False,
+        height: int = 1024,
+        width: int = 1024,
+        cfg_enabled: bool = True,
+        checkpoint_name: str = _DEFAULT_CHECKPOINT,
+    ) -> MotifPipelineConfig:
+        """Build a fully populated config, picking parallelism defaults from ``mesh_shape``."""
+        preset = _PRESETS.get(tuple(mesh_shape), {}) if mesh_shape is not None else {}
+
+        return cls(
+            topology=topology,
+            num_links=num_links or preset["num_links"],
+            dit_parallel_config=dit_parallel_config
+            or DiTParallelConfig.from_tuples(cfg=preset["cfg"], sp=preset["sp"], tp=preset["tp"]),
+            encoder_parallel_config=encoder_parallel_config or EncoderParallelConfig.from_tuple(preset["encoder_tp"]),
+            vae_parallel_config=vae_parallel_config or VAEParallelConfig.from_tuple(preset["vae_tp"]),
+            enable_t5_text_encoder=enable_t5_text_encoder,
+            use_torch_t5_text_encoder=use_torch_t5_text_encoder,
+            use_torch_clip_text_encoder=use_torch_clip_text_encoder,
+            use_torch_vae=use_torch_vae,
+            height=height,
+            width=width,
+            cfg_enabled=cfg_enabled,
+            checkpoint_name=checkpoint_name,
+        )
+
 
 class MotifPipeline(PipelineAPIMixin):
+    @classmethod
+    def create_pipeline(
+        cls,
+        *,
+        mesh_device: ttnn.MeshDevice,
+        width: int = 1024,
+        height: int = 1024,
+        cfg_enabled: bool = True,
+        checkpoint_name: str = _DEFAULT_CHECKPOINT,
+    ) -> MotifPipeline:
+        config = MotifPipelineConfig.default(
+            mesh_shape=mesh_device.shape,
+            checkpoint_name=checkpoint_name,
+            width=width,
+            height=height,
+            cfg_enabled=cfg_enabled,
+        )
+        return cls(device=mesh_device, config=config)
+
     def __init__(self, *, device: ttnn.MeshDevice, config: MotifPipelineConfig) -> None:
         self._cfg_parallel = config.dit_parallel_config.cfg_parallel.factor != 1
         self._sp_axis = config.dit_parallel_config.sequence_parallel.mesh_axis
@@ -147,62 +206,6 @@ class MotifPipeline(PipelineAPIMixin):
         shape[1 - tp.mesh_axis] = device.shape.mesh_size() // tp.factor
 
         return reshape_device(self._devices[0], ttnn.MeshShape(*shape))
-
-    @classmethod
-    def create_pipeline(
-        cls,
-        mesh_device: ttnn.MeshDevice,
-        dit_cfg: tuple[int, int] | None = None,
-        dit_sp: tuple[int, int] | None = None,
-        dit_tp: tuple[int, int] | None = None,
-        encoder_tp: tuple[int, int] | None = None,
-        vae_tp: tuple[int, int] | None = None,
-        enable_t5_text_encoder: bool = True,  # noqa: FBT001, FBT002
-        use_torch_t5_text_encoder: bool = False,  # noqa: FBT001, FBT002
-        use_torch_clip_text_encoder: bool = False,  # noqa: FBT001, FBT002
-        use_torch_vae: bool = False,  # noqa: FBT001, FBT002
-        num_links: int | None = None,
-        topology: ttnn.Topology = ttnn.Topology.Linear,
-        width: int = 1024,
-        height: int = 1024,
-        cfg_enabled: bool = True,  # noqa: FBT001, FBT002
-        checkpoint_name: str = "Motif-Technologies/Motif-Image-6B-Preview",
-        model_checkpoint_path: str | None = None,
-    ) -> MotifPipeline:
-        """Factory that picks parallelism defaults based on the mesh shape."""
-        if model_checkpoint_path is not None:
-            checkpoint_name = model_checkpoint_path
-            logger.warning("DEPRECATED: model_checkpoint_path is deprecated. Use checkpoint_name instead.")
-
-        preset = _PRESETS.get(tuple(mesh_device.shape), {})
-
-        config = MotifPipelineConfig(
-            topology=topology,
-            num_links=num_links or preset["num_links"],
-            dit_parallel_config=DiTParallelConfig.from_tuples(
-                cfg=dit_cfg or preset["cfg"],
-                sp=dit_sp or preset["sp"],
-                tp=dit_tp or preset["tp"],
-            ),
-            encoder_parallel_config=EncoderParallelConfig.from_tuple(encoder_tp or preset["encoder_tp"]),
-            vae_parallel_config=VAEParallelConfig.from_tuple(vae_tp or preset["vae_tp"]),
-            enable_t5_text_encoder=enable_t5_text_encoder,
-            use_torch_t5_text_encoder=use_torch_t5_text_encoder,
-            use_torch_clip_text_encoder=use_torch_clip_text_encoder,
-            use_torch_vae=use_torch_vae,
-            height=height,
-            width=width,
-            cfg_enabled=cfg_enabled,
-            checkpoint_name=checkpoint_name,
-        )
-
-        logger.info(f"Mesh device shape: {mesh_device.shape}")
-        logger.info(f"Parallel config: {config.dit_parallel_config}")
-        logger.info(f"Encoder parallel config: {config.encoder_parallel_config}")
-        logger.info(f"VAE parallel config: {config.vae_parallel_config}")
-        logger.info(f"T5 enabled: {enable_t5_text_encoder}")
-
-        return cls(device=mesh_device, config=config)
 
     def __call__(
         self,
