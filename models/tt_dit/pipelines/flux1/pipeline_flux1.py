@@ -18,17 +18,17 @@ from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5Tokeniz
 import ttnn
 from models.common.utility_functions import is_blackhole
 from models.perf.benchmarking_utils import BenchmarkProfiler
-
-from ...encoders.clip.model_clip import CLIPConfig, CLIPEncoder
-from ...encoders.t5.model_t5 import T5Config, T5Encoder
-from ...models.transformers.transformer_flux1 import Flux1Transformer
-from ...models.vae.vae_sd35 import VAEDecoder
-from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, ParallelFactor, VAEParallelConfig
-from ...parallel.manager import CCLManager
-from ...solvers import EulerSolver, schedules
-from ...utils import cache, tensor
-from ...utils.padding import PaddingConfig
-from ...utils.tracing import Tracer
+from models.tt_dit.encoders.clip.model_clip import CLIPConfig, CLIPEncoder
+from models.tt_dit.encoders.t5.model_t5 import T5Config, T5Encoder
+from models.tt_dit.models.transformers.transformer_flux1 import Flux1Transformer
+from models.tt_dit.models.vae.vae_sd35 import VAEDecoder
+from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, ParallelFactor, VAEParallelConfig
+from models.tt_dit.parallel.manager import CCLManager
+from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
+from models.tt_dit.solvers import EulerSolver, schedules
+from models.tt_dit.utils import cache, tensor
+from models.tt_dit.utils.padding import PaddingConfig
+from models.tt_dit.utils.tracing import Tracer
 
 
 class Flux1Pipeline:
@@ -71,20 +71,16 @@ class Flux1Pipeline:
                 )
             )
 
-        # No CFG. Create submeshes based on SP and TP
-        submesh_shape = list(mesh_device.shape)
-        submesh_shape[parallel_config.sequence_parallel.mesh_axis] = parallel_config.sequence_parallel.factor
-        submesh_shape[parallel_config.tensor_parallel.mesh_axis] = parallel_config.tensor_parallel.factor
         logger.info(f"Parallel config: {parallel_config}")
         logger.info(f"Original mesh shape: {mesh_device.shape}")
-        logger.info(f"Creating submeshes with shape {submesh_shape}")
-        self._submesh_devices = self._mesh_device.create_submeshes(ttnn.MeshShape(*submesh_shape))[
-            0:1
-        ]  # Only create one submesh for now. This can be used to support batching in the future.
+        self._submesh_devices = create_submeshes(self._mesh_device, parallel_config)
+        logger.info(f"Created submeshes with shape {self._submesh_devices[0].shape}")
+
         self._ccl_managers = [
             CCLManager(submesh_device, num_links=num_links, topology=topology)
             for submesh_device in self._submesh_devices
         ]
+        self._cfg_combiner = CFGCombiner(self._submesh_devices)
 
         self.encoder_device = self._submesh_devices[0]
         self.original_submesh_shape = tuple(self.encoder_device.shape)
@@ -455,8 +451,10 @@ class Flux1Pipeline:
             ids = torch.cat((text_ids, image_ids), dim=0)
             rope_cos, rope_sin = self._pos_embed.forward(ids)
 
-            tt_prompt_embeds_list = []
-            tt_pooled_prompt_embeds_list = []
+            tt_prompt_embeds_list = distribute_cfg(prompt_embeds, devices=self._submesh_devices, on_host=False)
+            tt_pooled_prompt_embeds_list = distribute_cfg(
+                pooled_prompt_embeds, devices=self._submesh_devices, on_host=False
+            )
             tt_latents_step_list = []
             tt_guidance_list = []
             tt_spatial_rope_cos_list = []
@@ -464,19 +462,6 @@ class Flux1Pipeline:
             tt_prompt_rope_cos_list = []
             tt_prompt_rope_sin_list = []
             for i, submesh_device in enumerate(self._submesh_devices):
-                tt_prompt_embeds = tensor.from_torch(
-                    prompt_embeds[i : i + 1] if self._parallel_config.cfg_parallel.factor == 2 else prompt_embeds,
-                    device=submesh_device,
-                )
-
-                tt_pooled_prompt_embeds = tensor.from_torch(
-                    (
-                        pooled_prompt_embeds[i : i + 1]
-                        if self._parallel_config.cfg_parallel.factor == 2
-                        else pooled_prompt_embeds
-                    ),
-                    device=submesh_device,
-                )
                 tt_initial_latents = tensor.from_torch(latents, device=submesh_device, mesh_axes=[None, sp_axis, None])
                 tt_guidance = (
                     tensor.from_torch(guidance.unsqueeze(-1), device=submesh_device) if guidance is not None else None
@@ -490,8 +475,6 @@ class Flux1Pipeline:
                 tt_prompt_rope_cos = tensor.from_torch(rope_cos[:prompt_sequence_length], device=submesh_device)
                 tt_prompt_rope_sin = tensor.from_torch(rope_sin[:prompt_sequence_length], device=submesh_device)
 
-                tt_prompt_embeds_list.append(tt_prompt_embeds)
-                tt_pooled_prompt_embeds_list.append(tt_pooled_prompt_embeds)
                 tt_latents_step_list.append(tt_initial_latents)
                 del tt_initial_latents
                 tt_guidance_list.append(tt_guidance)
@@ -661,35 +644,8 @@ class Flux1Pipeline:
             noise_pred_list.append(noise_pred)
 
         if cfg_enabled:
-            if not self._parallel_config.cfg_parallel.factor > 1:
-                split_pos = noise_pred_list[0].shape[0] // 2
-                uncond = noise_pred_list[0][0:split_pos]
-                cond = noise_pred_list[0][split_pos:]
-                noise_pred_list[0] = uncond + cfg_scale * (cond - uncond)
-            else:
-                # uncond and cond are replicated, so it is fine to get a single tensor from each
-                uncond = ttnn.to_torch(ttnn.get_device_tensors(noise_pred_list[0])[0].cpu(blocking=True)).to(
-                    torch.float32
-                )
-                cond = ttnn.to_torch(ttnn.get_device_tensors(noise_pred_list[1])[0].cpu(blocking=True)).to(
-                    torch.float32
-                )
-
-                torch_noise_pred = uncond + cfg_scale * (cond - uncond)
-
-                shard_latents_dims = [None, None]
-                shard_latents_dims[self._parallel_config.sequence_parallel.mesh_axis] = 1  # height of latents
-                noise_pred_list[0] = tensor.from_torch(
-                    torch_noise_pred,
-                    device=self._submesh_devices[0],
-                    mesh_axes=[None, self._parallel_config.sequence_parallel.mesh_axis, None],
-                )
-
-                noise_pred_list[1] = tensor.from_torch(
-                    torch_noise_pred,
-                    device=self._submesh_devices[1],
-                    mesh_axes=[None, self._parallel_config.sequence_parallel.mesh_axis, None],
-                )
+            for i in range(len(noise_pred_list)):
+                noise_pred_list[i] = self._cfg_combiner.combine(noise_pred_list[i], cfg_scale)
 
         for submesh_id, submesh_device in enumerate(self._submesh_devices):
             ttnn.synchronize_device(submesh_device)  # Helps with accurate time profiling.

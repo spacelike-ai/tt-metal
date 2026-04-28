@@ -19,18 +19,19 @@ from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderMo
 import ttnn
 from models.perf.benchmarking_utils import BenchmarkProfiler
 
-from ...encoders.clip.model_clip import CLIPConfig, CLIPEncoder
-from ...encoders.t5.model_t5 import T5Config, T5Encoder
+from models.tt_dit.encoders.clip.model_clip import CLIPConfig, CLIPEncoder
+from models.tt_dit.encoders.t5.model_t5 import T5Config, T5Encoder
 
 # NOTE: SD35Transformer is the new tt-dit implementation
-from ...models.transformers.transformer_sd35 import SD35Transformer2DModel
-from ...models.vae.vae_sd35 import VAEDecoder
-from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, ParallelFactor, VAEParallelConfig
-from ...parallel.manager import CCLManager
-from ...solvers import EulerSolver, schedules
-from ...utils import cache, tensor
-from ...utils.padding import PaddingConfig
-from ...utils.tracing import Tracer
+from models.tt_dit.models.transformers.transformer_sd35 import SD35Transformer2DModel
+from models.tt_dit.models.vae.vae_sd35 import VAEDecoder
+from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, ParallelFactor, VAEParallelConfig
+from models.tt_dit.parallel.manager import CCLManager
+from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
+from models.tt_dit.solvers import EulerSolver, schedules
+from models.tt_dit.utils import cache, tensor
+from models.tt_dit.utils.padding import PaddingConfig
+from models.tt_dit.utils.tracing import Tracer
 
 TILE_SIZE = 32
 
@@ -53,34 +54,16 @@ class StableDiffusion3Pipeline:
 
         self.dit_parallel_config = parallel_config
 
-        # Create submeshes
-        submesh_shape = list(mesh_device.shape)
-        submesh_shape[parallel_config.cfg_parallel.mesh_axis] //= parallel_config.cfg_parallel.factor
         logger.info(f"Parallel config: {parallel_config}")
         logger.info(f"Original mesh shape: {mesh_device.shape}")
-        logger.info(f"Creating submeshes with shape {submesh_shape}")
-        self.submesh_devices = self._mesh_device.create_submeshes(ttnn.MeshShape(*submesh_shape))
+        self.submesh_devices = create_submeshes(self._mesh_device, parallel_config)
+        logger.info(f"Created submeshes with shape {self.submesh_devices[0].shape}")
 
         self.ccl_managers = [
             CCLManager(submesh_device, num_links=num_links, topology=ttnn.Topology.Linear)
             for submesh_device in self.submesh_devices
         ]
-
-        if parallel_config.cfg_parallel.factor != 1:
-            socket_connections = [
-                ttnn.SocketConnection(
-                    ttnn.MeshCoreCoord(coord, ttnn.CoreCoord(0, 0)),
-                    ttnn.MeshCoreCoord(coord, ttnn.CoreCoord(0, 0)),
-                )
-                for coord in ttnn.MeshCoordinateRange(ttnn.MeshShape(*submesh_shape))
-            ]
-            socket_config = ttnn.SocketConfig(socket_connections, ttnn.SocketMemoryConfig(ttnn.BufferType.L1, 4096))
-            self._tx_0to1, self._rx_0to1 = ttnn.create_socket_pair(
-                self.submesh_devices[0], self.submesh_devices[1], socket_config
-            )
-            self._tx_1to0, self._rx_1to0 = ttnn.create_socket_pair(
-                self.submesh_devices[1], self.submesh_devices[0], socket_config
-            )
+        self._cfg_combiner = CFGCombiner(self.submesh_devices)
 
         # Hacky submesh reshapes and assignment to parallelize encoders and VAE
         encoder_device = self.submesh_devices[0]
@@ -543,36 +526,19 @@ class StableDiffusion3Pipeline:
             latents = torch.randn(latents_shape, dtype=prompt_embeds.dtype)  # .permute([0, 2, 3, 1])
             latents = self.transformers[0].patchify(latents)
 
-            tt_prompt_embeds_list = []
-            tt_pooled_prompt_embeds_list = []
+            tt_prompt_embeds_list = distribute_cfg(
+                prompt_embeds.unsqueeze(1), devices=self.submesh_devices, on_host=False
+            )
+            tt_pooled_prompt_embeds_list = distribute_cfg(
+                pooled_prompt_embeds.unsqueeze(1).unsqueeze(1), devices=self.submesh_devices, on_host=False
+            )
             tt_latents_step_list = []
-            for i, submesh_device in enumerate(self.submesh_devices):
-                tt_prompt_embeds = tensor.from_torch(
-                    (
-                        prompt_embeds[i].unsqueeze(0).unsqueeze(0)
-                        if self.dit_parallel_config.cfg_parallel.factor == 2
-                        else prompt_embeds
-                    ),
-                    device=submesh_device,
-                )
-
-                tt_pooled_prompt_embeds = tensor.from_torch(
-                    (
-                        pooled_prompt_embeds[i].unsqueeze(0).unsqueeze(0).unsqueeze(0)
-                        if self.dit_parallel_config.cfg_parallel.factor == 2
-                        else pooled_prompt_embeds
-                    ),
-                    device=submesh_device,
-                )
-
+            for submesh_device in self.submesh_devices:
                 tt_initial_latents = tensor.from_torch(
                     latents,
                     device=submesh_device,
                     mesh_axes=[None, None, self.dit_parallel_config.sequence_parallel.mesh_axis, None],
                 )
-
-                tt_prompt_embeds_list.append(tt_prompt_embeds)
-                tt_pooled_prompt_embeds_list.append(tt_pooled_prompt_embeds)
                 tt_latents_step_list.append(tt_initial_latents)
                 del tt_initial_latents
 
@@ -701,25 +667,8 @@ class StableDiffusion3Pipeline:
             noise_pred_list.append(noise_pred)
 
         if do_classifier_free_guidance:
-            if not self.dit_parallel_config.cfg_parallel.factor > 1:
-                split_pos = noise_pred_list[0].shape[0] // 2
-                uncond = noise_pred_list[0][0:split_pos]
-                cond = noise_pred_list[0][split_pos:]
-                noise_pred_list[0] = uncond + guidance_scale * (cond - uncond)
-            else:
-                uncond0 = noise_pred_list[0]
-                cond1 = noise_pred_list[1]
-
-                uncond1 = ttnn.allocate_tensor_on_device(uncond0.spec, self.submesh_devices[1])
-                cond0 = ttnn.allocate_tensor_on_device(cond1.spec, self.submesh_devices[0])
-
-                ttnn.experimental.send_async(uncond0, self._tx_0to1)
-                ttnn.experimental.recv_async(uncond1, self._rx_0to1)
-                ttnn.experimental.send_async(cond1, self._tx_1to0)
-                ttnn.experimental.recv_async(cond0, self._rx_1to0)
-
-                noise_pred_list[0] = uncond0 + guidance_scale * (cond0 - uncond0)
-                noise_pred_list[1] = uncond1 + guidance_scale * (cond1 - uncond1)
+            for i in range(len(noise_pred_list)):
+                noise_pred_list[i] = self._cfg_combiner.combine(noise_pred_list[i], guidance_scale)
 
         for submesh_id in range(len(self.submesh_devices)):
             latents_out[submesh_id] = self._solvers[submesh_id].step(

@@ -17,21 +17,22 @@ from loguru import logger
 
 import ttnn
 
-from ...encoders.qwen25vl.encoder_pair import Qwen25VlTokenizerEncoderPair
-from ...models.transformers.transformer_qwenimage import QwenImageTransformer
-from ...models.vae.vae_qwenimage import QwenImageVaeDecoder
-from ...parallel.config import (
+from models.tt_dit.encoders.qwen25vl.encoder_pair import Qwen25VlTokenizerEncoderPair
+from models.tt_dit.models.transformers.transformer_qwenimage import QwenImageTransformer
+from models.tt_dit.models.vae.vae_qwenimage import QwenImageVaeDecoder
+from models.tt_dit.parallel.config import (
     DiTParallelConfig,
     EncoderParallelConfig,
     ParallelFactor,
     VaeHWParallelConfig,
     VAEParallelConfig,
 )
-from ...parallel.manager import CCLManager
-from ...solvers import EulerSolver, schedules
-from ...utils import cache, tensor
-from ...utils.padding import PaddingConfig
-from ...utils.tracing import Tracer
+from models.tt_dit.parallel.manager import CCLManager
+from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
+from models.tt_dit.solvers import EulerSolver, schedules
+from models.tt_dit.utils import cache, tensor
+from models.tt_dit.utils.padding import PaddingConfig
+from models.tt_dit.utils.tracing import Tracer
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -79,37 +80,16 @@ class QwenImagePipeline:
         self._is_fsdp = is_fsdp
         self._checkpoint_name = checkpoint_name
 
-        # Create submeshes based on CFG parallel configuration
-        submesh_shape = list(mesh_device.shape)
-        submesh_shape[parallel_config.sequence_parallel.mesh_axis] = parallel_config.sequence_parallel.factor
-        submesh_shape[parallel_config.tensor_parallel.mesh_axis] = parallel_config.tensor_parallel.factor
         logger.info(f"Parallel config: {parallel_config}")
         logger.info(f"Original mesh shape: {mesh_device.shape}")
-        logger.info(f"Creating submeshes with shape {submesh_shape}")
+        self._submesh_devices = create_submeshes(self._mesh_device, parallel_config)
+        logger.info(f"Created submeshes with shape {self._submesh_devices[0].shape}")
 
-        self._submesh_devices = self._mesh_device.create_submeshes(ttnn.MeshShape(*submesh_shape))[
-            0 : parallel_config.cfg_parallel.factor
-        ]
         self._ccl_managers = [
             CCLManager(submesh_device, num_links=num_links, topology=topology)
             for submesh_device in self._submesh_devices
         ]
-
-        if parallel_config.cfg_parallel.factor != 1:
-            socket_connections = [
-                ttnn.SocketConnection(
-                    ttnn.MeshCoreCoord(coord, ttnn.CoreCoord(0, 0)),
-                    ttnn.MeshCoreCoord(coord, ttnn.CoreCoord(0, 0)),
-                )
-                for coord in ttnn.MeshCoordinateRange(ttnn.MeshShape(*submesh_shape))
-            ]
-            socket_config = ttnn.SocketConfig(socket_connections, ttnn.SocketMemoryConfig(ttnn.BufferType.L1, 4096))
-            self._tx_0to1, self._rx_0to1 = ttnn.create_socket_pair(
-                self._submesh_devices[0], self._submesh_devices[1], socket_config
-            )
-            self._tx_1to0, self._rx_1to0 = ttnn.create_socket_pair(
-                self._submesh_devices[1], self._submesh_devices[0], socket_config
-            )
+        self._cfg_combiner = CFGCombiner(self._submesh_devices)
 
         self.encoder_submesh_idx = 0  # Use submesh 0 for encoder
         self.vae_submesh_idx = len(self._submesh_devices) - self.encoder_submesh_idx - 1  # Use other submesh for VAE. 0
@@ -491,7 +471,6 @@ class QwenImagePipeline:
         prompt_count = len(prompts)
 
         sp_axis = self._parallel_config.sequence_parallel.mesh_axis
-        cfg_factor = self._parallel_config.cfg_parallel.factor
 
         assert num_images_per_prompt == 1, "generating multiple images is not supported"
         assert prompt_count == 1, "generating multiple images is not supported"
@@ -558,7 +537,7 @@ class QwenImagePipeline:
             prompt_rope_cos = prompt_rope.real.repeat_interleave(2, dim=-1)
             prompt_rope_sin = prompt_rope.imag.repeat_interleave(2, dim=-1)
 
-            tt_prompt_embeds_list = []
+            tt_prompt_embeds_list = distribute_cfg(prompt_embeds, devices=self._submesh_devices, on_host=False)
             tt_latents_step_list = []
             tt_spatial_rope_cos_list = []
             tt_spatial_rope_sin_list = []
@@ -566,12 +545,6 @@ class QwenImagePipeline:
             tt_prompt_rope_sin_list = []
 
             for i, submesh_device in enumerate(self._submesh_devices):
-                tt_prompt_embeds_list.append(
-                    tensor.from_torch(
-                        prompt_embeds[i : i + 1] if cfg_factor == 2 else prompt_embeds,
-                        device=submesh_device,
-                    )
-                )
                 tt_latents_step_list.append(
                     tensor.from_torch(latents, device=submesh_device, mesh_axes=[None, sp_axis, None])
                 )
@@ -740,30 +713,9 @@ class QwenImagePipeline:
             latents_out.append(latent)
             noise_pred_list.append(noise_pred)
 
-        # CFG combine
-        # NOTE: With cfg_parallel.factor > 1, the .cpu(blocking=True) call is the sync point
-        # where the actual denoising compute happens. This is NOT wasted time - it's the
-        # actual forward pass execution. The 1.3s/step is the real denoising time.
         if cfg_enabled:
-            if self._parallel_config.cfg_parallel.factor == 1:
-                split_pos = noise_pred_list[0].shape[0] // 2
-                uncond = noise_pred_list[0][0:split_pos]
-                cond = noise_pred_list[0][split_pos:]
-                noise_pred_list[0] = uncond + cfg_scale * (cond - uncond)
-            else:
-                uncond0 = noise_pred_list[0]
-                cond1 = noise_pred_list[1]
-
-                uncond1 = ttnn.allocate_tensor_on_device(uncond0.spec, self._submesh_devices[1])
-                cond0 = ttnn.allocate_tensor_on_device(cond1.spec, self._submesh_devices[0])
-
-                ttnn.experimental.send_async(uncond0, self._tx_0to1)
-                ttnn.experimental.recv_async(uncond1, self._rx_0to1)
-                ttnn.experimental.send_async(cond1, self._tx_1to0)
-                ttnn.experimental.recv_async(cond0, self._rx_1to0)
-
-                noise_pred_list[0] = uncond0 + cfg_scale * (cond0 - uncond0)
-                noise_pred_list[1] = uncond1 + cfg_scale * (cond1 - uncond1)
+            for i in range(len(noise_pred_list)):
+                noise_pred_list[i] = self._cfg_combiner.combine(noise_pred_list[i], cfg_scale)
 
         for submesh_id, submesh_device in enumerate(self._submesh_devices):
             ttnn.synchronize_device(submesh_device)
