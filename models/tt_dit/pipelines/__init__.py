@@ -2,9 +2,8 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-from .cfg import CFGCombiner
+from .cfg import CFGCombiner, create_submeshes
 from .events import DenoiseStep, PipelineEventCallback, SectionEnd, SectionStart, null_callback
-from .mesh import create_submeshes, reshape_device
 
 __all__ = [
     "CFGCombiner",
@@ -14,5 +13,4 @@ __all__ = [
     "SectionStart",
     "create_submeshes",
     "null_callback",
-    "reshape_device",
 ]

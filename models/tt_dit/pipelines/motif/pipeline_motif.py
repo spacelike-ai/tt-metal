@@ -17,12 +17,12 @@ from models.tt_dit.models.transformers.transformer_motif import MotifCheckpoint
 from models.tt_dit.models.vae.vae_sd35 import VAEDecoderAdapter
 from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
-from models.tt_dit.pipelines.cfg import CFGCombiner
+from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
 from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
-from models.tt_dit.pipelines.mesh import create_submeshes, distribute_cfg, reshape_device
 from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
 from models.tt_dit.solvers import EulerSolver
 from models.tt_dit.utils import tensor
+from models.tt_dit.utils.mesh import reshape_device
 from models.tt_dit.utils.tracing import Tracer
 
 from .text_encoder import TextEncoder

@@ -5,10 +5,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import ttnn.experimental
 
 import ttnn
+from models.tt_dit.utils import tensor
+
+if TYPE_CHECKING:
+    import torch
+
+    from models.tt_dit.parallel.config import DiTParallelConfig
 
 
 class CFGCombiner:
@@ -98,3 +105,49 @@ def _create_sockets(device0: ttnn.MeshDevice, device1: ttnn.MeshDevice) -> tuple
     tx_1to0, rx_1to0 = ttnn.create_socket_pair(device1, device0, socket_config)
 
     return _SocketPair(tx_0to1, rx_0to1), _SocketPair(tx_1to0, rx_1to0)
+
+
+def create_submeshes(
+    device: ttnn.MeshDevice, parallel_config: DiTParallelConfig
+) -> tuple[ttnn.MeshDevice] | tuple[ttnn.MeshDevice, ttnn.MeshDevice]:
+    """Slice the mesh into cfg-parallel submeshes sized for tensor and sequence parallelism."""
+    tp = parallel_config.tensor_parallel
+    sp = parallel_config.sequence_parallel
+    cp = parallel_config.cfg_parallel
+
+    if cp.factor not in (1, 2):
+        msg = "cfg parallel factor must be 1 or 2"
+        raise ValueError(msg)
+
+    submesh_shape = [1] * device.shape.dims()
+    submesh_shape[sp.mesh_axis] *= sp.factor
+    submesh_shape[tp.mesh_axis] *= tp.factor
+
+    devices = device.create_submeshes(ttnn.MeshShape(*submesh_shape))
+    if len(devices) < cp.factor:
+        msg = f"not enough submeshes created: expected {cp.factor}, got {len(devices)}"
+        raise ValueError(msg)
+
+    return (devices[0],) if cp.factor == 1 else (devices[0], devices[1])
+
+
+def distribute_cfg(
+    x: torch.Tensor,
+    /,
+    *,
+    devices: tuple[ttnn.MeshDevice] | tuple[ttnn.MeshDevice, ttnn.MeshDevice],
+    on_host: bool,
+) -> tuple[ttnn.Tensor] | tuple[ttnn.Tensor, ttnn.Tensor]:
+    """Return one tensor per submesh from a conditioning batch."""
+    match devices:
+        case [device]:
+            return (tensor.from_torch(x, device=device, on_host=on_host),)
+        case [device1, device2]:
+            half = x.shape[0] // 2
+            return (
+                tensor.from_torch(x[:half], device=device1, on_host=on_host),
+                tensor.from_torch(x[half:], device=device2, on_host=on_host),
+            )
+        case _:
+            msg = f"unsupported number of submeshes: expected 1 or 2, got {len(devices)}"
+            raise ValueError(msg)
