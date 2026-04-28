@@ -6,16 +6,16 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
-from models.tt_dit.utils import tensor
 
 import ttnn
+from models.tt_dit.utils import tensor
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
     import torch
 
-    from ..parallel.config import DiTParallelConfig
+    from models.tt_dit.parallel.config import DiTParallelConfig
 
 
 @contextmanager
