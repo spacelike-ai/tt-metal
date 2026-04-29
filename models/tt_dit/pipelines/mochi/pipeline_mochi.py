@@ -134,12 +134,21 @@ class MochiPipelineConfig:
         if vae_parallel_config is None:
             vae_sp_axis = preset["vae_sp_axis"]
             vae_tp_axis = preset["vae_tp_axis"]
-            w_factor = 1 if vae_mesh_shape[vae_sp_axis] == 1 else 2
-            vae_parallel_config = MochiVAEParallelConfig.from_tuples(
-                time=(vae_mesh_shape[vae_tp_axis], vae_tp_axis),
-                h=(vae_mesh_shape[vae_sp_axis] // w_factor, vae_sp_axis),
-                w=(w_factor, vae_sp_axis),
-            )
+            if vae_mesh_shape[0] > 1 and vae_mesh_shape[1] > 1:
+                # 2D mesh (e.g. Galaxy): separate H/W on different axes
+                vae_parallel_config = MochiVAEParallelConfig.from_tuples(
+                    time=(1, vae_tp_axis),
+                    h=(vae_mesh_shape[vae_sp_axis], vae_sp_axis),
+                    w=(vae_mesh_shape[vae_tp_axis], vae_tp_axis),
+                )
+            else:
+                # 1D mesh (e.g. T3K, N300): use time parallelism, no spatial
+                t_axis = 1 if vae_mesh_shape[1] > 1 else 0
+                vae_parallel_config = MochiVAEParallelConfig.from_tuples(
+                    time=(vae_mesh_shape[t_axis], t_axis),
+                    h=(1, 0),
+                    w=(1, 1),
+                )
 
         return cls(
             topology=topology,

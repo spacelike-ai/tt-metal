@@ -123,12 +123,14 @@ def test_mochi_diffusers_pipeline():
         [(1, 8), 1, 0, (1, 8), 0, 1, 1],
         [(2, 4), 0, 1, (1, 8), 0, 1, 1],  # VAE mesh shape = (1, 8) is more memory efficient.
         [(4, 8), 1, 0, (4, 8), 0, 1, 4],  # note sp <-> tp switch for VAE for memory efficiency.
+        [(4, 8), 1, 0, (4, 8), 0, 1, 2],
     ],
     ids=[
         "dit_2x2sp0tp1_vae_1x4sp0tp1",
         "dit_1x8sp1tp0_vae_1x8sp0tp1",
         "dit_2x4sp0tp1_vae_1x8sp0tp1",
-        "dit_4x8sp1tp0_vae_4x8sp0tp1",
+        "dit_wh_4x8sp1tp0_vae_4x8sp0tp1",
+        "dit_bh_4x8sp1tp0_vae_4x8sp0tp1",
     ],
     indirect=["mesh_device"],
 )
@@ -176,16 +178,25 @@ def test_tt_mochi_pipeline(
         f"Creating TT Mochi pipeline with DiT mesh device shape {mesh_device.shape}, VAE mesh device shape {vae_mesh_shape}"
     )
     logger.info(f"DiT SP axis: {sp_axis}, TP axis: {tp_axis}")
-    logger.info(f"VAE SP axis: {vae_sp_axis}, TP axis: {tp_axis}")
+    logger.info(f"VAE SP axis: {vae_sp_axis}, TP axis: {vae_tp_axis}")
 
     parallel_config = DiTParallelConfig.from_tuples(cfg=(1, 0), sp=(sp_factor, sp_axis), tp=(tp_factor, tp_axis))
 
-    w_factor = 1 if vae_mesh_shape[vae_sp_axis] == 1 else 2
-    vae_parallel_config = MochiVAEParallelConfig.from_tuples(
-        time=(vae_mesh_shape[vae_tp_axis], vae_tp_axis),
-        h=(vae_mesh_shape[vae_sp_axis] // w_factor, vae_sp_axis),
-        w=(w_factor, vae_sp_axis),
-    )
+    if vae_mesh_shape[0] > 1 and vae_mesh_shape[1] > 1:
+        # 2D mesh (e.g. Galaxy): separate H/W on different axes
+        vae_parallel_config = MochiVAEParallelConfig.from_tuples(
+            time=(1, vae_tp_axis),
+            h=(vae_mesh_shape[vae_sp_axis], vae_sp_axis),
+            w=(vae_mesh_shape[vae_tp_axis], vae_tp_axis),
+        )
+    else:
+        # 1D mesh (e.g. T3K, N300): use time parallelism, no spatial
+        t_axis = 1 if vae_mesh_shape[1] > 1 else 0
+        vae_parallel_config = MochiVAEParallelConfig.from_tuples(
+            time=(vae_mesh_shape[t_axis], t_axis),
+            h=(1, 0),
+            w=(1, 1),
+        )
 
     tt_pipe = TTMochiPipeline(
         device=mesh_device,
