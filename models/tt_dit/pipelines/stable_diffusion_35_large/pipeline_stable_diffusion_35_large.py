@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import List
 
 import torch
@@ -25,7 +26,7 @@ from models.tt_dit.encoders.t5.model_t5 import T5Config, T5Encoder
 # NOTE: SD35Transformer is the new tt-dit implementation
 from models.tt_dit.models.transformers.transformer_sd35 import SD35Transformer2DModel
 from models.tt_dit.models.vae.vae_sd35 import VAEDecoder
-from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, ParallelFactor, VAEParallelConfig
+from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
 from models.tt_dit.solvers import EulerSolver, schedules
@@ -35,80 +36,155 @@ from models.tt_dit.utils.tracing import Tracer
 
 TILE_SIZE = 32
 
+_DEFAULT_CHECKPOINT = "stabilityai/stable-diffusion-3.5-large"
+
+_PRESETS: dict[tuple[int, ...], dict] = {
+    (2, 4): {"cfg": (2, 1), "sp": (2, 0), "tp": (2, 1), "num_links": 1},
+    (4, 8): {"cfg": (2, 1), "sp": (4, 0), "tp": (4, 1), "num_links": 4},
+}
+
+
+@dataclass(frozen=True, kw_only=True)
+class StableDiffusion3PipelineConfig:
+    topology: ttnn.Topology
+    num_links: int
+
+    dit_parallel_config: DiTParallelConfig
+    encoder_parallel_config: EncoderParallelConfig
+    vae_parallel_config: VAEParallelConfig
+
+    enable_t5_text_encoder: bool
+
+    height: int
+    width: int
+    cfg_enabled: bool
+
+    checkpoint_name: str
+
+    @classmethod
+    def default(
+        cls,
+        *,
+        mesh_shape: ttnn.MeshShape,
+        topology: ttnn.Topology = ttnn.Topology.Linear,
+        num_links: int | None = None,
+        dit_parallel_config: DiTParallelConfig | None = None,
+        encoder_parallel_config: EncoderParallelConfig | None = None,
+        vae_parallel_config: VAEParallelConfig | None = None,
+        enable_t5_text_encoder: bool | None = None,
+        height: int = 1024,
+        width: int = 1024,
+        cfg_enabled: bool = True,
+        checkpoint_name: str = _DEFAULT_CHECKPOINT,
+    ) -> StableDiffusion3PipelineConfig:
+        preset = _PRESETS.get(tuple(mesh_shape), {})
+
+        if dit_parallel_config is None:
+            dit_parallel_config = DiTParallelConfig.from_tuples(cfg=preset["cfg"], sp=preset["sp"], tp=preset["tp"])
+
+        # Encoder/VAE always run on a 1x4 (or 4x1) submesh, parallel along the row axis.
+        if encoder_parallel_config is None:
+            encoder_parallel_config = EncoderParallelConfig.from_tuple((4, 1))
+        if vae_parallel_config is None:
+            vae_parallel_config = VAEParallelConfig.from_tuple((4, 1))
+
+        # T5 only fits when the submesh has shape (_, 4) — i.e. no reshape needed for CLIP.
+        submesh_shape = list(mesh_shape)
+        submesh_shape[dit_parallel_config.cfg_parallel.mesh_axis] //= dit_parallel_config.cfg_parallel.factor
+        t5_fits = submesh_shape[1] == 4
+        if enable_t5_text_encoder is None:
+            enable_t5_text_encoder = t5_fits
+        elif enable_t5_text_encoder and not t5_fits:
+            logger.warning("VAE submesh requires reshape for CLIP, T5 cannot fit on this configuration. Disabling T5.")
+            enable_t5_text_encoder = False
+
+        return cls(
+            topology=topology,
+            num_links=num_links if num_links is not None else preset["num_links"],
+            dit_parallel_config=dit_parallel_config,
+            encoder_parallel_config=encoder_parallel_config,
+            vae_parallel_config=vae_parallel_config,
+            enable_t5_text_encoder=enable_t5_text_encoder,
+            height=height,
+            width=width,
+            cfg_enabled=cfg_enabled,
+            checkpoint_name=checkpoint_name,
+        )
+
 
 class StableDiffusion3Pipeline:
+    @classmethod
+    def create_pipeline(
+        cls,
+        *,
+        mesh_device: ttnn.MeshDevice,
+        width: int = 1024,
+        height: int = 1024,
+        cfg_enabled: bool = True,
+        checkpoint_name: str = _DEFAULT_CHECKPOINT,
+    ) -> StableDiffusion3Pipeline:
+        config = StableDiffusion3PipelineConfig.default(
+            mesh_shape=mesh_device.shape,
+            width=width,
+            height=height,
+            cfg_enabled=cfg_enabled,
+            checkpoint_name=checkpoint_name,
+        )
+        return cls(device=mesh_device, config=config)
+
     def __init__(
         self,
         *,
-        mesh_device: ttnn.MeshDevice,
-        enable_t5_text_encoder: bool = True,
-        guidance_cond: int,
-        parallel_config: DiTParallelConfig,
-        num_links: int,
-        height: int,
-        width: int,
-        checkpoint_name: str,
-        use_cache=False,
+        device: ttnn.MeshDevice,
+        config: StableDiffusion3PipelineConfig,
     ) -> None:
-        self._mesh_device = mesh_device
+        self._mesh_device = device
+        self.dit_parallel_config = config.dit_parallel_config
+        self.encoder_parallel_config = config.encoder_parallel_config
+        self.vae_parallel_config = config.vae_parallel_config
+        self._height = config.height
+        self._width = config.width
+        self._cfg_enabled = config.cfg_enabled
 
-        self.dit_parallel_config = parallel_config
-
-        logger.info(f"Parallel config: {parallel_config}")
-        logger.info(f"Original mesh shape: {mesh_device.shape}")
-        self.submesh_devices = create_submeshes(self._mesh_device, parallel_config)
+        logger.info(f"Parallel config: {config.dit_parallel_config}")
+        logger.info(f"Original mesh shape: {device.shape}")
+        self.submesh_devices = create_submeshes(self._mesh_device, config.dit_parallel_config)
         logger.info(f"Created submeshes with shape {self.submesh_devices[0].shape}")
 
         self.ccl_managers = [
-            CCLManager(submesh_device, num_links=num_links, topology=ttnn.Topology.Linear)
+            CCLManager(submesh_device, num_links=config.num_links, topology=config.topology)
             for submesh_device in self.submesh_devices
         ]
         self._cfg_combiner = CFGCombiner(self.submesh_devices)
 
-        # Hacky submesh reshapes and assignment to parallelize encoders and VAE
+        # Submesh reshape decisions for CLIP/T5 encoder + VAE placement.
         encoder_device = self.submesh_devices[0]
         self.original_submesh_shape = tuple(encoder_device.shape)
         self.desired_encoder_submesh_shape = tuple(encoder_device.shape)
 
         if encoder_device.shape[1] != 4:
-            # If reshaping, vae_device must be on submesh 0. That means T5 can't fit, so disable it.
+            # If reshaping, vae_device must be on submesh 0 (T5 already disabled by config.default).
             vae_submesh_idx = 0
-            if enable_t5_text_encoder:
-                logger.warning(
-                    "If VAE submesh must be reshaped, VAE must be on submesh 0, and T5 cannot fit. Disabling T5."
-                )
-                enable_t5_text_encoder = False
-
             cfg_shape = tuple(encoder_device.shape)
             assert cfg_shape[0] * cfg_shape[1] == 4, f"Cannot reshape {cfg_shape} to a 1x4 mesh"
             logger.info(f"Reshaping submesh device 0 from {cfg_shape} to (1, 4) for CLIP")
             self.desired_encoder_submesh_shape = (1, 4)
-
         else:
-            # vae_device can only be on submesh 1 if submesh is not getting reshaped.
             vae_submesh_idx = 1
         vae_device = self.submesh_devices[vae_submesh_idx]
 
-        # Create encoder parallel config
-        encoder_parallel_config = EncoderParallelConfig(
-            tensor_parallel=ParallelFactor(factor=4, mesh_axis=1)  # 1x4 submesh, parallel on axis 1
-        )
-
-        self.encoder_parallel_config = encoder_parallel_config
         self.encoder_device = encoder_device
-
-        vae_parallel_config = VAEParallelConfig(tensor_parallel=ParallelFactor(factor=4, mesh_axis=1))
-        self.vae_parallel_config = vae_parallel_config
         self.vae_device = vae_device
         self.vae_submesh_idx = vae_submesh_idx
 
         logger.info("loading models...")
+        checkpoint_name = config.checkpoint_name
         self._tokenizer_1 = CLIPTokenizer.from_pretrained(checkpoint_name, subfolder="tokenizer")
         self._tokenizer_2 = CLIPTokenizer.from_pretrained(checkpoint_name, subfolder="tokenizer_2")
         self._tokenizer_3 = T5TokenizerFast.from_pretrained(checkpoint_name, subfolder="tokenizer_3")
         self._text_encoder_1 = CLIPTextModelWithProjection.from_pretrained(checkpoint_name, subfolder="text_encoder")
         self._text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(checkpoint_name, subfolder="text_encoder_2")
-        if enable_t5_text_encoder:
+        if config.enable_t5_text_encoder:
             torch_text_encoder_3 = T5EncoderModel.from_pretrained(checkpoint_name, subfolder="text_encoder_3")
         self._torch_vae = AutoencoderKL.from_pretrained(checkpoint_name, subfolder="vae")
 
@@ -131,11 +207,11 @@ class StableDiffusion3Pipeline:
 
         assert "stabilityai/stable-diffusion-3.5-large" in str(checkpoint_name)
 
-        if torch_transformer.config.num_attention_heads % parallel_config.tensor_parallel.factor != 0:
+        if torch_transformer.config.num_attention_heads % config.dit_parallel_config.tensor_parallel.factor != 0:
             padding_config = PaddingConfig.from_tensor_parallel_factor(
                 torch_transformer.config.num_attention_heads,
                 torch_transformer.config.attention_head_dim,
-                parallel_config.tensor_parallel.factor,
+                config.dit_parallel_config.tensor_parallel.factor,
             )
         else:
             padding_config = None
@@ -174,7 +250,7 @@ class StableDiffusion3Pipeline:
             ttnn.synchronize_device(submesh_device)
 
         self._step_inner_tracers = [
-            Tracer(self._step_inner, device=device, prep_run=False) for device in self.submesh_devices
+            Tracer(self._step_inner, device=submesh, prep_run=False) for submesh in self.submesh_devices
         ]
         self._solvers = [EulerSolver() for _ in self.submesh_devices]
 
@@ -231,30 +307,28 @@ class StableDiffusion3Pipeline:
         self._text_encoder_1 = CLIPEncoder(
             config=clip_config_1,
             mesh_device=encoder_device,
-            ccl_manager=self.ccl_managers[0],  # use CCL manager for submesh 0
-            parallel_config=encoder_parallel_config,
-            eos_token_id=2,  # default EOS token ID for CLIP
+            ccl_manager=self.ccl_managers[0],
+            parallel_config=self.encoder_parallel_config,
+            eos_token_id=2,
         )
 
         self._text_encoder_2 = CLIPEncoder(
             config=clip_config_2,
             mesh_device=encoder_device,
-            ccl_manager=self.ccl_managers[0],  # Use CCL manager for submesh 0
-            parallel_config=encoder_parallel_config,
-            eos_token_id=2,  # default EOS token ID for CLIP
+            ccl_manager=self.ccl_managers[0],
+            parallel_config=self.encoder_parallel_config,
+            eos_token_id=2,
         )
 
-        # Load state dicts into new encoders
         self._text_encoder_1.load_torch_state_dict(text_encoder_1_state_dict)
         self._text_encoder_2.load_torch_state_dict(text_encoder_2_state_dict)
 
         self._clip_tracer_1 = Tracer(self._text_encoder_1.forward, device=encoder_device, prep_run=False)
         self._clip_tracer_2 = Tracer(self._text_encoder_2.forward, device=encoder_device, prep_run=False)
 
-        if enable_t5_text_encoder:
+        if config.enable_t5_text_encoder:
             logger.info("creating TT-NN T5 text encoder...")
 
-            # Create T5 config
             t5_config = T5Config(
                 vocab_size=torch_text_encoder_3.config.vocab_size,
                 embed_dim=torch_text_encoder_3.config.d_model,
@@ -262,24 +336,21 @@ class StableDiffusion3Pipeline:
                 kv_dim=torch_text_encoder_3.config.d_kv,
                 num_heads=torch_text_encoder_3.config.num_heads,
                 num_hidden_layers=torch_text_encoder_3.config.num_layers,
-                max_prompt_length=256,  # default T5 max prompt length
+                max_prompt_length=256,
                 layer_norm_eps=torch_text_encoder_3.config.layer_norm_epsilon,
                 relative_attention_num_buckets=torch_text_encoder_3.config.relative_attention_num_buckets,
                 relative_attention_max_distance=torch_text_encoder_3.config.relative_attention_max_distance,
             )
 
-            # Store original state dict before creating new encoder
             torch_text_encoder_3_state_dict = torch_text_encoder_3.state_dict()
 
-            # Create new T5 encoder
             self._text_encoder_3 = T5Encoder(
                 config=t5_config,
                 mesh_device=encoder_device,
-                ccl_manager=self.ccl_managers[0],  # use CCL manager for submesh 0
-                parallel_config=encoder_parallel_config,
+                ccl_manager=self.ccl_managers[0],
+                parallel_config=self.encoder_parallel_config,
             )
 
-            # Load state dict into new encoder
             self._text_encoder_3.load_torch_state_dict(torch_text_encoder_3_state_dict)
             self._t5_tracer = Tracer(self._text_encoder_3.forward, device=encoder_device, prep_run=False)
         else:
@@ -300,117 +371,16 @@ class StableDiffusion3Pipeline:
         self._vae_decoder_tracer = Tracer(self._vae_decoder.forward, device=self.vae_device, prep_run=False)
 
         if self.desired_encoder_submesh_shape != self.original_submesh_shape:
-            # HACK: reshape submesh device 0 to 1D
-            # If reshaping, vae device is same as encoder device
+            # HACK: reshape submesh device 0 back from 1D
             self.encoder_device.reshape(ttnn.MeshShape(*self.original_submesh_shape))
 
-    def _allocate_persistent_buffers(self) -> None:
-        """Allocate persistent buffers by running a pipeline pass without tracing.
-
-        This is important so they do not get allocated after trace capture, which would lead to
-        them being overwritten during trace execution.
-        """
         logger.info("Pipeline allocation run...")
-        self.run_single_prompt(prompt="", num_inference_steps=2, traced=False)
-
-    def prepare(
-        self,
-        *,
-        batch_size: int,
-        num_images_per_prompt: int = 1,
-        width: int = 1024,
-        height: int = 1024,
-        guidance_scale: float = 4.5,
-        max_t5_sequence_length: int = 256,
-        prompt_sequence_length: int = 333,
-        spatial_sequence_length: int = 4096,
-    ) -> None:
-        self._prepared_batch_size = batch_size
-        self._prepared_num_images_per_prompt = num_images_per_prompt
-        self._prepared_width = width
-        self._prepared_height = height
-        self._prepared_guidance_scale = guidance_scale
-        self._prepared_max_t5_sequence_length = max_t5_sequence_length
-        self._prepared_prompt_sequence_length = prompt_sequence_length
-
-        self._allocate_persistent_buffers()
-
-    @staticmethod
-    def create_pipeline(
-        mesh_device,
-        batch_size=1,
-        image_w=1024,
-        image_h=1024,
-        guidance_scale=3.5,
-        num_images_per_prompt=1,
-        max_t5_sequence_length=256,
-        prompt_sequence_length=333,
-        spatial_sequence_length=4096,
-        cfg_config=None,
-        sp_config=None,
-        tp_config=None,
-        num_links=None,
-        checkpoint_name=f"stabilityai/stable-diffusion-3.5-large",
-        model_checkpoint_path=None,
-    ):
-        if model_checkpoint_path is not None:
-            checkpoint_name = model_checkpoint_path
-            logger.warning(f"DEPRECATED: model_checkpoint_path parameter is deprecated. Use checkpoint_name instead.")
-        # default config per mesh shape
-        default_config = {
-            (2, 4): {"cfg_config": (2, 1), "sp_config": (2, 0), "tp_config": (2, 1), "num_links": 1},
-            (4, 8): {"cfg_config": (2, 1), "sp_config": (4, 0), "tp_config": (4, 1), "num_links": 4},
-        }
-
-        # get config from user or default if not provided
-        cfg_factor, cfg_axis = cfg_config or default_config[tuple(mesh_device.shape)]["cfg_config"]
-        sp_factor, sp_axis = sp_config or default_config[tuple(mesh_device.shape)]["sp_config"]
-        tp_factor, tp_axis = tp_config or default_config[tuple(mesh_device.shape)]["tp_config"]
-        num_links = num_links or default_config[tuple(mesh_device.shape)]["num_links"]
-
-        parallel_config = DiTParallelConfig(
-            cfg_parallel=ParallelFactor(factor=cfg_factor, mesh_axis=cfg_axis),
-            tensor_parallel=ParallelFactor(factor=tp_factor, mesh_axis=tp_axis),
-            sequence_parallel=ParallelFactor(factor=sp_factor, mesh_axis=sp_axis),
+        self(
+            prompts=[""],
+            num_inference_steps=2,
+            guidance_scale=2 if config.cfg_enabled else 1,
+            traced=False,
         )
-
-        guidance_cond = 2 if (guidance_scale > 1 and cfg_factor == 1) else 1
-
-        # Enable T5 based on device configuration
-        # T5 is disabled if mesh needs reshaping for CLIP encoder
-        submesh_shape = list(mesh_device.shape)
-        submesh_shape[cfg_axis] //= cfg_factor
-        enable_t5_text_encoder = submesh_shape[1] == 4  # T5 only works if submesh doesn't need reshaping
-
-        logger.info(f"Mesh device shape: {mesh_device.shape}")
-        logger.info(f"Submesh shape: {submesh_shape}")
-        logger.info(f"Parallel config: {parallel_config}")
-        logger.info(f"T5 enabled: {enable_t5_text_encoder}")
-
-        # Create pipeline
-        pipeline = StableDiffusion3Pipeline(
-            mesh_device=mesh_device,
-            enable_t5_text_encoder=enable_t5_text_encoder,
-            guidance_cond=guidance_cond,
-            parallel_config=parallel_config,
-            num_links=num_links,
-            height=image_h,
-            width=image_w,
-            checkpoint_name=checkpoint_name,
-        )
-
-        pipeline.prepare(
-            batch_size=batch_size,
-            num_images_per_prompt=num_images_per_prompt,
-            width=image_w,
-            height=image_h,
-            guidance_scale=guidance_scale,
-            max_t5_sequence_length=max_t5_sequence_length,
-            prompt_sequence_length=prompt_sequence_length,
-            spatial_sequence_length=spatial_sequence_length,
-        )
-
-        return pipeline
 
     def run_single_prompt(
         self,
@@ -425,12 +395,8 @@ class StableDiffusion3Pipeline:
         profiler_iteration: int = 0,
     ):
         return self.__call__(
-            prompt_1=[prompt],
-            prompt_2=[prompt],
-            prompt_3=[prompt],
-            negative_prompt_1=[negative_prompt or ""],
-            negative_prompt_2=[negative_prompt or ""],
-            negative_prompt_3=[negative_prompt or ""],
+            prompts=[prompt],
+            negative_prompts=[negative_prompt],
             num_inference_steps=num_inference_steps,
             seed=seed,
             traced=traced,
@@ -443,14 +409,17 @@ class StableDiffusion3Pipeline:
     def __call__(
         self,
         *,
-        prompt_1: list[str],
-        prompt_2: list[str],
-        prompt_3: list[str],
-        negative_prompt_1: list[str],
-        negative_prompt_2: list[str],
-        negative_prompt_3: list[str],
+        prompts: list[str],
+        prompts_2: list[str] | None = None,
+        prompts_3: list[str] | None = None,
+        negative_prompts: list[str] | None = None,
+        negative_prompts_2: list[str] | None = None,
+        negative_prompts_3: list[str] | None = None,
         num_inference_steps: int = 40,
         seed: int | None = None,
+        num_images_per_prompt: int = 1,
+        guidance_scale: float = 3.5,
+        max_t5_sequence_length: int = 256,
         traced: bool = False,
         vae_traced: bool | None = None,
         encoder_traced: bool | None = None,
@@ -458,20 +427,25 @@ class StableDiffusion3Pipeline:
         profiler: BenchmarkProfiler = None,
         profiler_iteration: int = 0,
     ) -> List[Image.Image]:
+        prompts_2 = prompts_2 if prompts_2 is not None else prompts
+        prompts_3 = prompts_3 if prompts_3 is not None else prompts
+        negative_prompts = negative_prompts if negative_prompts is not None else [""] * len(prompts)
+        negative_prompts_2 = negative_prompts_2 if negative_prompts_2 is not None else negative_prompts
+        negative_prompts_3 = negative_prompts_3 if negative_prompts_3 is not None else negative_prompts
+
         vae_traced = vae_traced if vae_traced is not None else traced
         encoder_traced = encoder_traced if encoder_traced is not None else traced
+        if guidance_scale > 1 and not self._cfg_enabled:
+            msg = "guidance_scale > 1 requires CFG to be enabled"
+            raise ValueError(msg)
         with profiler("total", profiler_iteration) if profiler else nullcontext():
-            batch_size = self._prepared_batch_size
-            num_images_per_prompt = self._prepared_num_images_per_prompt
-            width = self._prepared_width
-            height = self._prepared_height
-            guidance_scale = self._prepared_guidance_scale
-            max_t5_sequence_length = self._prepared_max_t5_sequence_length
+            batch_size = len(prompts)
+            width = self._width
+            height = self._height
 
             assert height % (self._torch_vae_scale_factor * self.patch_size) == 0
             assert width % (self._torch_vae_scale_factor * self.patch_size) == 0
             assert max_t5_sequence_length <= 512  # noqa: PLR2004
-            assert batch_size == len(prompt_1)
 
             do_classifier_free_guidance = guidance_scale > 1
             # TODO: pass the patch_size value
@@ -492,12 +466,12 @@ class StableDiffusion3Pipeline:
                     # HACK: reshape submesh device 0 from 2D to 1D
                     self.encoder_device.reshape(ttnn.MeshShape(*self.desired_encoder_submesh_shape))
                 prompt_embeds, pooled_prompt_embeds = self._encode_prompts(
-                    prompt_1=prompt_1,
-                    prompt_2=prompt_2,
-                    prompt_3=prompt_3,
-                    negative_prompt_1=negative_prompt_1,
-                    negative_prompt_2=negative_prompt_2,
-                    negative_prompt_3=negative_prompt_3,
+                    prompts=prompts,
+                    prompts_2=prompts_2,
+                    prompts_3=prompts_3,
+                    negative_prompts=negative_prompts,
+                    negative_prompts_2=negative_prompts_2,
+                    negative_prompts_3=negative_prompts_3,
                     num_images_per_prompt=num_images_per_prompt,
                     max_t5_sequence_length=max_t5_sequence_length,
                     do_classifier_free_guidance=do_classifier_free_guidance,
@@ -715,12 +689,12 @@ class StableDiffusion3Pipeline:
     def _encode_prompts(
         self,
         *,
-        prompt_1: list[str],
-        prompt_2: list[str],
-        prompt_3: list[str],
-        negative_prompt_1: list[str],
-        negative_prompt_2: list[str],
-        negative_prompt_3: list[str],
+        prompts: list[str],
+        prompts_2: list[str],
+        prompts_3: list[str],
+        negative_prompts: list[str],
+        negative_prompts_2: list[str],
+        negative_prompts_3: list[str],
         num_images_per_prompt: int,
         max_t5_sequence_length: int,
         do_classifier_free_guidance: bool,
@@ -733,7 +707,7 @@ class StableDiffusion3Pipeline:
 
         with profiler("clip_encoding", profiler_iteration) if profiler else nullcontext():
             prompt_embed, pooled_prompt_embed = _get_clip_prompt_embeds(
-                prompt=prompt_1,
+                prompt=prompts,
                 num_images_per_prompt=num_images_per_prompt,
                 tokenizer=self._tokenizer_1,
                 text_encoder=self._text_encoder_1,
@@ -745,7 +719,7 @@ class StableDiffusion3Pipeline:
             )
 
             prompt_2_embed, pooled_prompt_2_embed = _get_clip_prompt_embeds(
-                prompt=prompt_2,
+                prompt=prompts_2,
                 num_images_per_prompt=num_images_per_prompt,
                 tokenizer=self._tokenizer_2,
                 text_encoder=self._text_encoder_2,
@@ -761,7 +735,7 @@ class StableDiffusion3Pipeline:
             t5_prompt_embed = _get_t5_prompt_embeds(
                 device=self.encoder_device,
                 encoder_parallel_config=self.encoder_parallel_config,
-                prompt=prompt_3,
+                prompt=prompts_3,
                 num_images_per_prompt=num_images_per_prompt,
                 max_sequence_length=max_t5_sequence_length,
                 tokenizer=self._tokenizer_3,
@@ -784,7 +758,7 @@ class StableDiffusion3Pipeline:
 
         with profiler("clip_encoding", profiler_iteration) if profiler else nullcontext():
             negative_prompt_embed, negative_pooled_prompt_embed = _get_clip_prompt_embeds(
-                prompt=negative_prompt_1,
+                prompt=negative_prompts,
                 num_images_per_prompt=num_images_per_prompt,
                 tokenizer=self._tokenizer_1,
                 text_encoder=self._text_encoder_1,
@@ -795,7 +769,7 @@ class StableDiffusion3Pipeline:
                 clip_skip=clip_skip,
             )
             negative_prompt_2_embed, negative_pooled_prompt_2_embed = _get_clip_prompt_embeds(
-                prompt=negative_prompt_2,
+                prompt=negative_prompts_2,
                 num_images_per_prompt=num_images_per_prompt,
                 tokenizer=self._tokenizer_2,
                 text_encoder=self._text_encoder_2,
@@ -811,7 +785,7 @@ class StableDiffusion3Pipeline:
             t5_negative_prompt_embed = _get_t5_prompt_embeds(
                 device=self.encoder_device,
                 encoder_parallel_config=self.encoder_parallel_config,
-                prompt=negative_prompt_3,
+                prompt=negative_prompts_3,
                 num_images_per_prompt=num_images_per_prompt,
                 max_sequence_length=max_t5_sequence_length,
                 tokenizer=self._tokenizer_3,

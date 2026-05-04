@@ -7,6 +7,7 @@ from __future__ import annotations
 import math
 import os
 from contextlib import nullcontext
+from dataclasses import dataclass
 
 import torch
 import tqdm
@@ -22,7 +23,7 @@ from models.tt_dit.encoders.clip.model_clip import CLIPConfig, CLIPEncoder
 from models.tt_dit.encoders.t5.model_t5 import T5Config, T5Encoder
 from models.tt_dit.models.transformers.transformer_flux1 import Flux1Transformer
 from models.tt_dit.models.vae.vae_sd35 import VAEDecoder
-from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, ParallelFactor, VAEParallelConfig
+from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
 from models.tt_dit.solvers import EulerSolver, schedules
@@ -30,54 +31,130 @@ from models.tt_dit.utils import cache, tensor
 from models.tt_dit.utils.padding import PaddingConfig
 from models.tt_dit.utils.tracing import Tracer
 
+_DEFAULT_CHECKPOINT = "black-forest-labs/FLUX.1-dev"
+
+_PRESETS_WH: dict[tuple[int, ...], dict] = {
+    (1, 4): {"sp": (1, 0), "tp": (4, 1), "encoder_tp": (4, 1), "vae_tp": (4, 1), "num_links": 1},
+    (2, 4): {"sp": (2, 0), "tp": (4, 1), "encoder_tp": (4, 1), "vae_tp": (4, 1), "num_links": 1},
+    (4, 4): {"sp": (4, 0), "tp": (4, 1), "encoder_tp": (4, 1), "vae_tp": (4, 1), "num_links": 1},
+    (4, 8): {"sp": (4, 0), "tp": (8, 1), "encoder_tp": (4, 0), "vae_tp": (4, 0), "num_links": 4},
+}
+
+_PRESETS_BH: dict[tuple[int, ...], dict] = {
+    (1, 2): {"sp": (1, 0), "tp": (2, 1), "encoder_tp": (2, 1), "vae_tp": (2, 1), "num_links": 2},
+    (2, 2): {"sp": (2, 0), "tp": (2, 1), "encoder_tp": (2, 1), "vae_tp": (2, 1), "num_links": 2},
+    (2, 4): {"sp": (2, 0), "tp": (4, 1), "encoder_tp": (4, 1), "vae_tp": (4, 1), "num_links": 2},
+}
+
+
+@dataclass(frozen=True, kw_only=True)
+class Flux1PipelineConfig:
+    topology: ttnn.Topology
+    num_links: int
+
+    dit_parallel_config: DiTParallelConfig
+    encoder_parallel_config: EncoderParallelConfig
+    vae_parallel_config: VAEParallelConfig
+
+    enable_t5_text_encoder: bool
+    use_torch_t5_text_encoder: bool
+    use_torch_clip_text_encoder: bool
+
+    height: int
+    width: int
+    cfg_enabled: bool
+
+    checkpoint_name: str
+
+    @classmethod
+    def default(
+        cls,
+        *,
+        mesh_shape: ttnn.MeshShape,
+        topology: ttnn.Topology = ttnn.Topology.Linear,
+        num_links: int | None = None,
+        dit_parallel_config: DiTParallelConfig | None = None,
+        encoder_parallel_config: EncoderParallelConfig | None = None,
+        vae_parallel_config: VAEParallelConfig | None = None,
+        enable_t5_text_encoder: bool = True,
+        use_torch_t5_text_encoder: bool = False,
+        use_torch_clip_text_encoder: bool = False,
+        height: int = 1024,
+        width: int = 1024,
+        cfg_enabled: bool = False,  # Flux.1 doesn't support CFG.
+        checkpoint_name: str = _DEFAULT_CHECKPOINT,
+    ) -> Flux1PipelineConfig:
+        preset_dict = _PRESETS_BH if is_blackhole() else _PRESETS_WH
+        preset = preset_dict.get(tuple(mesh_shape), {})
+
+        if dit_parallel_config is None:
+            dit_parallel_config = DiTParallelConfig.from_tuples(cfg=(1, 0), sp=preset["sp"], tp=preset["tp"])
+
+        if encoder_parallel_config is None:
+            encoder_parallel_config = EncoderParallelConfig.from_tuple(preset["encoder_tp"])
+
+        if vae_parallel_config is None:
+            vae_parallel_config = VAEParallelConfig.from_tuple(preset["vae_tp"])
+
+        return cls(
+            topology=topology,
+            num_links=num_links if num_links is not None else preset["num_links"],
+            dit_parallel_config=dit_parallel_config,
+            encoder_parallel_config=encoder_parallel_config,
+            vae_parallel_config=vae_parallel_config,
+            enable_t5_text_encoder=enable_t5_text_encoder,
+            use_torch_t5_text_encoder=use_torch_t5_text_encoder,
+            use_torch_clip_text_encoder=use_torch_clip_text_encoder,
+            height=height,
+            width=width,
+            cfg_enabled=cfg_enabled,
+            checkpoint_name=checkpoint_name,
+        )
+
 
 class Flux1Pipeline:
     T5_SEQUENCE_LENGTH = 512
 
+    @classmethod
+    def create_pipeline(
+        cls,
+        *,
+        mesh_device: ttnn.MeshDevice,
+        width: int = 1024,
+        height: int = 1024,
+        cfg_enabled: bool = False,
+        checkpoint_name: str = _DEFAULT_CHECKPOINT,
+    ) -> Flux1Pipeline:
+        config = Flux1PipelineConfig.default(
+            mesh_shape=mesh_device.shape,
+            width=width,
+            height=height,
+            cfg_enabled=cfg_enabled,
+            checkpoint_name=checkpoint_name,
+        )
+        return cls(device=mesh_device, config=config)
+
     def __init__(
         self,
         *,
-        checkpoint_name: str,
-        mesh_device: ttnn.MeshDevice,
-        enable_t5_text_encoder: bool = True,
-        use_torch_t5_text_encoder: bool = False,
-        use_torch_clip_text_encoder: bool = False,
-        parallel_config: DiTParallelConfig,
-        encoder_parallel_config: EncoderParallelConfig = None,
-        vae_parallel_config: VAEParallelConfig = None,
-        topology: ttnn.Topology,
-        num_links: int,
+        device: ttnn.MeshDevice,
+        config: Flux1PipelineConfig,
     ) -> None:
-        self._mesh_device = mesh_device
-        self._parallel_config = parallel_config
+        self._mesh_device = device
+        self._parallel_config = config.dit_parallel_config
+        self._encoder_parallel_config = config.encoder_parallel_config
+        self._vae_parallel_config = config.vae_parallel_config
+        self._height = config.height
+        self._width = config.width
+        self._cfg_enabled = config.cfg_enabled
 
-        # setup encoder and vae parallel configs.
-        self._encoder_parallel_config = encoder_parallel_config
-        if self._encoder_parallel_config is None:
-            self._encoder_parallel_config = EncoderParallelConfig(
-                tensor_parallel=(
-                    parallel_config.tensor_parallel
-                    if parallel_config.tensor_parallel.mesh_axis == 4
-                    else parallel_config.sequence_parallel
-                )
-            )
-        self._vae_parallel_config = vae_parallel_config
-        if self._vae_parallel_config is None:
-            self._vae_parallel_config = VAEParallelConfig(
-                tensor_parallel=(
-                    parallel_config.tensor_parallel
-                    if parallel_config.tensor_parallel.mesh_axis == 4
-                    else parallel_config.sequence_parallel
-                )
-            )
-
-        logger.info(f"Parallel config: {parallel_config}")
-        logger.info(f"Original mesh shape: {mesh_device.shape}")
-        self._submesh_devices = create_submeshes(self._mesh_device, parallel_config)
+        logger.info(f"Parallel config: {config.dit_parallel_config}")
+        logger.info(f"Original mesh shape: {device.shape}")
+        self._submesh_devices = create_submeshes(self._mesh_device, config.dit_parallel_config)
         logger.info(f"Created submeshes with shape {self._submesh_devices[0].shape}")
 
         self._ccl_managers = [
-            CCLManager(submesh_device, num_links=num_links, topology=topology)
+            CCLManager(submesh_device, num_links=config.num_links, topology=config.topology)
             for submesh_device in self._submesh_devices
         ]
         self._cfg_combiner = CFGCombiner(self._submesh_devices)
@@ -89,11 +166,12 @@ class Flux1Pipeline:
         self.vae_submesh_idx = 0  # Use submesh 0 for VAE
 
         logger.info("loading models...")
+        checkpoint_name = config.checkpoint_name
         self._tokenizer_1 = CLIPTokenizer.from_pretrained(checkpoint_name, subfolder="tokenizer")
         self._t5_tokenizer = T5TokenizerFast.from_pretrained(checkpoint_name, subfolder="tokenizer_2")
         torch_text_encoder_1 = CLIPTextModel.from_pretrained(checkpoint_name, subfolder="text_encoder")
         torch_text_encoder_1.eval()
-        if enable_t5_text_encoder:
+        if config.enable_t5_text_encoder:
             torch_t5_text_encoder = T5EncoderModel.from_pretrained(checkpoint_name, subfolder="text_encoder_2")
         self._torch_vae = AutoencoderKL.from_pretrained(checkpoint_name, subfolder="vae")
 
@@ -106,11 +184,11 @@ class Flux1Pipeline:
 
         logger.info("creating TT-NN transformer...")
 
-        if torch_transformer.config.num_attention_heads % parallel_config.tensor_parallel.factor != 0:
+        if torch_transformer.config.num_attention_heads % config.dit_parallel_config.tensor_parallel.factor != 0:
             padding_config = PaddingConfig.from_tensor_parallel_factor(
                 torch_transformer.config.num_attention_heads,
                 torch_transformer.config.attention_head_dim,
-                parallel_config.tensor_parallel.factor,
+                config.dit_parallel_config.tensor_parallel.factor,
             )
         else:
             padding_config = None
@@ -131,7 +209,7 @@ class Flux1Pipeline:
                 with_guidance_embeds=torch_transformer.config.guidance_embeds,
                 mesh_device=submesh_device,
                 ccl_manager=self._ccl_managers[i],
-                parallel_config=parallel_config,
+                parallel_config=config.dit_parallel_config,
                 padding_config=padding_config,
             )
 
@@ -141,7 +219,7 @@ class Flux1Pipeline:
                 get_torch_state_dict=torch_transformer.state_dict,
                 model_name=model_name,
                 subfolder="transformer",
-                parallel_config=parallel_config,
+                parallel_config=config.dit_parallel_config,
                 mesh_shape=tuple(submesh_device.shape),
             )
 
@@ -169,7 +247,7 @@ class Flux1Pipeline:
 
         logger.info("creating TT-NN CLIP text encoder...")
 
-        if use_torch_clip_text_encoder:
+        if config.use_torch_clip_text_encoder:
             self._text_encoder_1 = torch_text_encoder_1
             self._clip_tracer = None
         else:
@@ -189,15 +267,15 @@ class Flux1Pipeline:
                 config=clip_config_1,
                 mesh_device=self.encoder_device,
                 ccl_manager=self._ccl_managers[self.encoder_submesh_idx],
-                parallel_config=encoder_parallel_config,
+                parallel_config=self._encoder_parallel_config,
                 eos_token_id=2,  # default EOS token ID for CLIP
             )
 
             self._text_encoder_1.load_torch_state_dict(torch_text_encoder_1.state_dict())
             self._clip_tracer = Tracer(self._text_encoder_1.forward, device=self.encoder_device, prep_run=False)
 
-        if enable_t5_text_encoder:
-            if use_torch_t5_text_encoder:
+        if config.enable_t5_text_encoder:
+            if config.use_torch_t5_text_encoder:
                 self._t5_text_encoder = torch_t5_text_encoder
                 self._t5_tracer = None
             else:
@@ -220,7 +298,7 @@ class Flux1Pipeline:
                     config=t5_config,
                     mesh_device=self.encoder_device,
                     ccl_manager=self._ccl_managers[self.encoder_submesh_idx],
-                    parallel_config=encoder_parallel_config,
+                    parallel_config=self._encoder_parallel_config,
                 )
 
                 cache.load_model(
@@ -228,7 +306,7 @@ class Flux1Pipeline:
                     get_torch_state_dict=torch_t5_text_encoder.state_dict,
                     model_name=model_name,
                     subfolder="t5_text_encoder",
-                    parallel_config=encoder_parallel_config,
+                    parallel_config=self._encoder_parallel_config,
                     mesh_shape=tuple(self.encoder_device.shape),
                 )
                 self._t5_tracer = Tracer(self._t5_text_encoder.forward, device=self.encoder_device, prep_run=False)
@@ -246,82 +324,18 @@ class Flux1Pipeline:
         )
         self._vae_decoder_tracer = Tracer(self._vae_decoder.forward, device=self.vae_device, prep_run=False)
 
-        self._allocate_persistent_buffers()
-
-    def _allocate_persistent_buffers(self) -> None:
-        """Allocate persistent buffers by running a pipeline pass without tracing.
-
-        This is important so they do not get allocated after trace capture, which would lead to
-        them being overwritten during trace execution.
-        """
         logger.info("Pipeline allocation run...")
-        self.run_single_prompt(prompt="", num_inference_steps=2, seed=0, traced=False)
-
-    @staticmethod
-    def create_pipeline(
-        checkpoint_name,
-        mesh_device,
-        dit_sp=None,
-        dit_tp=None,
-        encoder_tp=None,
-        vae_tp=None,
-        enable_t5_text_encoder=True,
-        use_torch_t5_text_encoder=False,
-        use_torch_clip_text_encoder=False,
-        num_links=None,
-        topology=ttnn.Topology.Linear,
-    ):
-        wh_config = {
-            (1, 4): {"sp": (1, 0), "tp": (4, 1), "encoder_tp": (4, 1), "vae_tp": (4, 1), "num_links": 1},
-            (2, 4): {"sp": (2, 0), "tp": (4, 1), "encoder_tp": (4, 1), "vae_tp": (4, 1), "num_links": 1},
-            (4, 4): {"sp": (4, 0), "tp": (4, 1), "encoder_tp": (4, 1), "vae_tp": (4, 1), "num_links": 1},
-            (4, 8): {"sp": (4, 0), "tp": (8, 1), "encoder_tp": (4, 0), "vae_tp": (4, 0), "num_links": 4},
-        }
-        bh_config = {
-            (1, 2): {"sp": (1, 0), "tp": (2, 1), "encoder_tp": (2, 1), "vae_tp": (2, 1), "num_links": 2},
-            (2, 2): {"sp": (2, 0), "tp": (2, 1), "encoder_tp": (2, 1), "vae_tp": (2, 1), "num_links": 2},
-            (2, 4): {"sp": (2, 0), "tp": (4, 1), "encoder_tp": (4, 1), "vae_tp": (4, 1), "num_links": 2},
-        }
-
-        default_config = bh_config if is_blackhole() else wh_config
-        sp_factor, sp_axis = dit_sp or default_config[tuple(mesh_device.shape)]["sp"]
-        tp_factor, tp_axis = dit_tp or default_config[tuple(mesh_device.shape)]["tp"]
-        encoder_tp_factor, encoder_tp_axis = encoder_tp or default_config[tuple(mesh_device.shape)]["encoder_tp"]
-        vae_tp_factor, vae_tp_axis = vae_tp or default_config[tuple(mesh_device.shape)]["vae_tp"]
-        num_links = num_links or default_config[tuple(mesh_device.shape)]["num_links"]
-
-        dit_parallel_config = DiTParallelConfig(
-            cfg_parallel=ParallelFactor(factor=1, mesh_axis=0),
-            tensor_parallel=ParallelFactor(factor=tp_factor, mesh_axis=tp_axis),
-            sequence_parallel=ParallelFactor(factor=sp_factor, mesh_axis=sp_axis),
+        self(
+            prompts=[""],
+            num_inference_steps=2,
+            seed=0,
+            cfg_scale=2 if config.cfg_enabled else 1,
+            traced=False,
         )
-        encoder_parallel_config = EncoderParallelConfig(
-            tensor_parallel=ParallelFactor(factor=encoder_tp_factor, mesh_axis=encoder_tp_axis)
-        )
-        vae_parallel_config = VAEParallelConfig(
-            tensor_parallel=ParallelFactor(factor=vae_tp_factor, mesh_axis=vae_tp_axis)
-        )
-
-        pipeline = Flux1Pipeline(
-            checkpoint_name=checkpoint_name,
-            mesh_device=mesh_device,
-            enable_t5_text_encoder=enable_t5_text_encoder,
-            use_torch_t5_text_encoder=use_torch_t5_text_encoder,
-            use_torch_clip_text_encoder=use_torch_clip_text_encoder,
-            parallel_config=dit_parallel_config,
-            encoder_parallel_config=encoder_parallel_config,
-            vae_parallel_config=vae_parallel_config,
-            topology=topology,
-            num_links=num_links,
-        )
-
-        return pipeline
 
     def run_single_prompt(
         self,
         *,
-        width: int = 1024,
-        height: int = 1024,
         prompt: str,
         negative_prompt: str = "",
         num_inference_steps: int,
@@ -333,12 +347,8 @@ class Flux1Pipeline:
         profiler_iteration: int = 0,
     ):
         return self(
-            width=width,
-            height=height,
-            prompt_1=[prompt],
-            prompt_2=[prompt],
-            negative_prompt_1=[negative_prompt],
-            negative_prompt_2=[negative_prompt],
+            prompts=[prompt],
+            negative_prompts=[negative_prompt],
             num_inference_steps=num_inference_steps,
             seed=seed,
             traced=traced,
@@ -352,14 +362,12 @@ class Flux1Pipeline:
         self,
         *,
         num_images_per_prompt: int = 1,
-        width: int = 1024,
-        height: int = 1024,
         cfg_scale: float = 1,  # Flux.1 is not indented to be used with CFG
         guidance_scale: float = 3.5,
-        prompt_1: list[str],
-        prompt_2: list[str],
-        negative_prompt_1: list[str] | None = None,
-        negative_prompt_2: list[str] | None = None,
+        prompts: list[str],
+        prompts_2: list[str] | None = None,
+        negative_prompts: list[str] | None = None,
+        negative_prompts_2: list[str] | None = None,
         num_inference_steps: int,
         seed: int | None = None,
         traced: bool = False,
@@ -369,14 +377,24 @@ class Flux1Pipeline:
         profiler: BenchmarkProfiler = None,
         profiler_iteration: int = 0,
     ) -> list[Image.Image]:
+        prompts_2 = prompts_2 if prompts_2 is not None else prompts
+        negative_prompts = negative_prompts if negative_prompts is not None else [""] * len(prompts)
+        negative_prompts_2 = negative_prompts_2 if negative_prompts_2 is not None else negative_prompts
+
         vae_traced = vae_traced if vae_traced is not None else traced
         encoder_traced = encoder_traced if encoder_traced is not None else traced
-        prompt_count = len(prompt_1)
+        prompt_count = len(prompts)
+        width = self._width
+        height = self._height
 
         sp_axis = self._parallel_config.sequence_parallel.mesh_axis
 
         assert num_images_per_prompt == 1, "generating multiple images is not supported"
         assert prompt_count == 1, "generating multiple images is not supported"
+
+        if cfg_scale > 1 and not self._cfg_enabled:
+            msg = "cfg_scale > 1 requires CFG to be enabled"
+            raise ValueError(msg)
 
         with profiler("total", profiler_iteration) if profiler else nullcontext():
             assert height % (self._vae_scale_factor * self._patch_size) == 0
@@ -393,10 +411,10 @@ class Flux1Pipeline:
 
             with profiler("encoder", profiler_iteration) if profiler else nullcontext():
                 prompt_embeds, pooled_prompt_embeds = self._encode_prompts(
-                    prompt_1=prompt_1,
-                    prompt_2=prompt_2,
-                    negative_prompt_1=negative_prompt_1,
-                    negative_prompt_2=negative_prompt_2,
+                    prompts=prompts,
+                    prompts_2=prompts_2,
+                    negative_prompts=negative_prompts,
+                    negative_prompts_2=negative_prompts_2,
                     num_images_per_prompt=num_images_per_prompt,
                     cfg_enabled=cfg_enabled,
                     clip_skip=clip_skip,
@@ -657,8 +675,8 @@ class Flux1Pipeline:
 
     def _encode_prompts_partial(
         self,
-        prompt_1: list[str],
-        prompt_2: list[str],
+        prompts: list[str],
+        prompts_2: list[str],
         num_images_per_prompt: int,
         clip_skip: int = 0,
         traced: bool = False,
@@ -669,7 +687,7 @@ class Flux1Pipeline:
 
         with profiler("clip_encoding", profiler_iteration) if profiler else nullcontext():
             prompt_1_embeds, pooled_prompt_1_embeds = _get_clip_prompt_embeds(
-                prompts=prompt_1,
+                prompts=prompts,
                 num_images_per_prompt=num_images_per_prompt,
                 tokenizer=self._tokenizer_1,
                 text_encoder=self._text_encoder_1,
@@ -681,7 +699,7 @@ class Flux1Pipeline:
 
         with profiler("t5_encoding", profiler_iteration) if profiler else nullcontext():
             t5_prompt_embeds = _get_t5_prompt_embeds(
-                prompts=prompt_2,
+                prompts=prompts_2,
                 text_encoder=self._t5_text_encoder,
                 tracer=self._t5_tracer if traced else None,
                 tokenizer=self._t5_tokenizer,
@@ -700,10 +718,10 @@ class Flux1Pipeline:
     def _encode_prompts(
         self,
         *,
-        prompt_1: list[str],
-        prompt_2: list[str],
-        negative_prompt_1: list[str] | None,
-        negative_prompt_2: list[str] | None,
+        prompts: list[str],
+        prompts_2: list[str],
+        negative_prompts: list[str] | None,
+        negative_prompts_2: list[str] | None,
         num_images_per_prompt: int,
         cfg_enabled: bool,
         clip_skip: int = 0,
@@ -712,8 +730,8 @@ class Flux1Pipeline:
         profiler_iteration: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         prompt_embeds, pooled_prompt_embeds = self._encode_prompts_partial(
-            prompt_1=prompt_1,
-            prompt_2=prompt_2,
+            prompts=prompts,
+            prompts_2=prompts_2,
             num_images_per_prompt=num_images_per_prompt,
             clip_skip=clip_skip,
             traced=traced,
@@ -725,8 +743,8 @@ class Flux1Pipeline:
             return prompt_embeds, pooled_prompt_embeds
 
         negative_prompt_embeds, negative_pooled_prompt_embeds = self._encode_prompts_partial(
-            prompt_1=negative_prompt_1,
-            prompt_2=negative_prompt_2,
+            prompts=negative_prompts,
+            prompts_2=negative_prompts_2,
             num_images_per_prompt=num_images_per_prompt,
             clip_skip=clip_skip,
             traced=traced,

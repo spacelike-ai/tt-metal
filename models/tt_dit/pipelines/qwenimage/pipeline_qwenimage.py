@@ -5,7 +5,8 @@
 from __future__ import annotations
 
 import math
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import diffusers
@@ -31,6 +32,7 @@ from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
 from models.tt_dit.solvers import EulerSolver, schedules
 from models.tt_dit.utils import cache, tensor
+from models.tt_dit.utils.mesh import reshape_device
 from models.tt_dit.utils.padding import PaddingConfig
 from models.tt_dit.utils.tracing import Tracer
 
@@ -42,6 +44,134 @@ if TYPE_CHECKING:
 PROMPT_TEMPLATE = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
 PROMPT_DROP_IDX = 34
 
+_DEFAULT_CHECKPOINT = "Qwen/Qwen-Image"
+
+# The encoder is currently hardcoded to always be FSDP as it is the most memory efficient
+# configuration with little to no performance penalty.
+_PRESETS_WH: dict[tuple[int, ...], dict] = {
+    (2, 4): {
+        "cfg": (2, 0),
+        "sp": (1, 0),
+        "tp": (4, 1),
+        "encoder_tp": (4, 1),
+        "vae_tp": (4, 1),
+        "num_links": 1,
+        "is_fsdp": False,
+        "dynamic_load_encoder": True,
+        "dynamic_load_vae": True,
+    },
+    (4, 8): {
+        "cfg": (2, 1),
+        "sp": (4, 0),
+        "tp": (4, 1),
+        "encoder_tp": (4, 1),
+        "vae_tp": (4, 1),
+        "num_links": 4,
+        "is_fsdp": False,
+        "dynamic_load_encoder": False,
+        "dynamic_load_vae": False,
+    },
+}
+
+_PRESETS_BH: dict[tuple[int, ...], dict] = {
+    (2, 4): {
+        "cfg": (2, 0),
+        "sp": (1, 0),
+        "tp": (4, 1),
+        "encoder_tp": (4, 1),
+        "vae_tp": (4, 1),
+        "num_links": 1,
+        "is_fsdp": False,
+        "dynamic_load_encoder": True,
+        "dynamic_load_vae": False,
+    },
+    (4, 8): {
+        "cfg": (2, 1),
+        "sp": (4, 0),
+        "tp": (4, 1),
+        "encoder_tp": (4, 1),
+        "vae_tp": (4, 1),
+        "num_links": 4,
+        "is_fsdp": False,
+        "dynamic_load_encoder": False,
+        "dynamic_load_vae": False,
+    },
+}
+
+
+@dataclass(frozen=True, kw_only=True)
+class QwenImagePipelineConfig:
+    topology: ttnn.Topology
+    num_links: int
+
+    dit_parallel_config: DiTParallelConfig
+    encoder_parallel_config: EncoderParallelConfig
+    vae_parallel_config: VAEParallelConfig
+
+    use_torch_text_encoder: bool
+    use_torch_vae_decoder: bool
+
+    height: int
+    width: int
+    cfg_enabled: bool
+
+    is_fsdp: bool
+    dynamic_load_encoder: bool
+    dynamic_load_vae: bool
+
+    checkpoint_name: str
+
+    @classmethod
+    def default(
+        cls,
+        *,
+        mesh_shape: ttnn.MeshShape,
+        topology: ttnn.Topology = ttnn.Topology.Linear,
+        num_links: int | None = None,
+        dit_parallel_config: DiTParallelConfig | None = None,
+        encoder_parallel_config: EncoderParallelConfig | None = None,
+        vae_parallel_config: VAEParallelConfig | None = None,
+        use_torch_text_encoder: bool = False,
+        use_torch_vae_decoder: bool = False,
+        height: int = 1024,
+        width: int = 1024,
+        cfg_enabled: bool = True,
+        is_fsdp: bool | None = None,
+        dynamic_load_encoder: bool | None = None,
+        dynamic_load_vae: bool | None = None,
+        checkpoint_name: str = _DEFAULT_CHECKPOINT,
+    ) -> QwenImagePipelineConfig:
+        preset_dict = _PRESETS_BH if ttnn.device.is_blackhole() else _PRESETS_WH
+        preset = preset_dict.get(tuple(mesh_shape), {})
+
+        if dit_parallel_config is None:
+            dit_parallel_config = DiTParallelConfig.from_tuples(cfg=preset["cfg"], sp=preset["sp"], tp=preset["tp"])
+
+        if encoder_parallel_config is None:
+            encoder_parallel_config = EncoderParallelConfig.from_tuple(preset["encoder_tp"])
+
+        if vae_parallel_config is None:
+            vae_parallel_config = VAEParallelConfig.from_tuple(preset["vae_tp"])
+
+        return cls(
+            topology=topology,
+            num_links=num_links if num_links is not None else preset["num_links"],
+            dit_parallel_config=dit_parallel_config,
+            encoder_parallel_config=encoder_parallel_config,
+            vae_parallel_config=vae_parallel_config,
+            use_torch_text_encoder=use_torch_text_encoder,
+            use_torch_vae_decoder=use_torch_vae_decoder,
+            height=height,
+            width=width,
+            cfg_enabled=cfg_enabled,
+            is_fsdp=is_fsdp if is_fsdp is not None else preset["is_fsdp"],
+            dynamic_load_encoder=(
+                dynamic_load_encoder if dynamic_load_encoder is not None else preset["dynamic_load_encoder"]
+            ),
+            dynamic_load_vae=dynamic_load_vae if dynamic_load_vae is not None else preset["dynamic_load_vae"],
+            checkpoint_name=checkpoint_name,
+        )
+
 
 class QwenImagePipeline:
     """
@@ -50,43 +180,53 @@ class QwenImagePipeline:
     Dynamic loading is controlled by the initialization state. During inference, modules will be loaded/offloaded as needed.
     """
 
+    @classmethod
+    def create_pipeline(
+        cls,
+        *,
+        mesh_device: ttnn.MeshDevice,
+        width: int = 1024,
+        height: int = 1024,
+        cfg_enabled: bool = True,
+        checkpoint_name: str = _DEFAULT_CHECKPOINT,
+    ) -> QwenImagePipeline:
+        config = QwenImagePipelineConfig.default(
+            mesh_shape=mesh_device.shape,
+            width=width,
+            height=height,
+            cfg_enabled=cfg_enabled,
+            checkpoint_name=checkpoint_name,
+        )
+        return cls(device=mesh_device, config=config)
+
     def __init__(
         self,
         *,
-        mesh_device: ttnn.MeshDevice,
-        checkpoint_name: str = "Qwen/Qwen-Image",
-        use_torch_text_encoder: bool = False,
-        use_torch_vae_decoder: bool = False,
-        parallel_config: DiTParallelConfig,
-        encoder_parallel_config: EncoderParallelConfig | None = None,
-        vae_parallel_config: VAEParallelConfig | None = None,
-        topology: ttnn.Topology,
-        num_links: int,
-        height: int = 1024,
-        width: int = 1024,
-        is_fsdp: bool = False,  # This only applies to the transformer model.
-        dynamic_load_encoder: bool = True,  # Set to true if it wouldn't fit with the transformer given the configuration
-        dynamic_load_vae: bool = False,  # Set to true if it wouldn't fit with the transformer given the configuration
+        device: ttnn.MeshDevice,
+        config: QwenImagePipelineConfig,
     ) -> None:
-        if dynamic_load_encoder or dynamic_load_vae:
+        if config.dynamic_load_encoder or config.dynamic_load_vae:
             assert (
                 cache.cache_dir_is_set()
             ), "Dynamic loading of encoder or vae is enabled but the cache directory (env variable TT_DIT_CACHE_DIR) is not set."
 
-        self._mesh_device = mesh_device
-        self._parallel_config = parallel_config
-        self._height = height
-        self._width = width
-        self._is_fsdp = is_fsdp
-        self._checkpoint_name = checkpoint_name
+        self._mesh_device = device
+        self._parallel_config = config.dit_parallel_config
+        self._encoder_parallel_config = config.encoder_parallel_config
+        self._vae_parallel_config = config.vae_parallel_config
+        self._height = config.height
+        self._width = config.width
+        self._cfg_enabled = config.cfg_enabled
+        self._is_fsdp = config.is_fsdp
+        self._checkpoint_name = config.checkpoint_name
 
-        logger.info(f"Parallel config: {parallel_config}")
-        logger.info(f"Original mesh shape: {mesh_device.shape}")
-        self._submesh_devices = create_submeshes(self._mesh_device, parallel_config)
+        logger.info(f"Parallel config: {config.dit_parallel_config}")
+        logger.info(f"Original mesh shape: {device.shape}")
+        self._submesh_devices = create_submeshes(self._mesh_device, config.dit_parallel_config)
         logger.info(f"Created submeshes with shape {self._submesh_devices[0].shape}")
 
         self._ccl_managers = [
-            CCLManager(submesh_device, num_links=num_links, topology=topology)
+            CCLManager(submesh_device, num_links=config.num_links, topology=config.topology)
             for submesh_device in self._submesh_devices
         ]
         self._cfg_combiner = CFGCombiner(self._submesh_devices)
@@ -94,12 +234,9 @@ class QwenImagePipeline:
         self.encoder_submesh_idx = 0  # Use submesh 0 for encoder
         self.vae_submesh_idx = len(self._submesh_devices) - self.encoder_submesh_idx - 1  # Use other submesh for VAE. 0
 
-        self.encoder_device = self._submesh_devices[self.encoder_submesh_idx] if not use_torch_text_encoder else None
-        self.vae_device = self._submesh_devices[self.vae_submesh_idx] if not use_torch_vae_decoder else None
+        self.encoder_device = self._submesh_devices[self.encoder_submesh_idx]
+        self.vae_device = self._submesh_devices[self.vae_submesh_idx]
 
-        # setup parallel configs
-        self._encoder_parallel_config = encoder_parallel_config
-        self._vae_parallel_config = vae_parallel_config
         self._wan_vae_parallel_config = self.get_wan_vae_parallel_config()
 
         self.encoder_mesh_shape = self.get_mesh_shape(
@@ -110,13 +247,13 @@ class QwenImagePipeline:
         logger.info("loading models...")
 
         torch_transformer = diffusers.QwenImageTransformer2DModel.from_pretrained(
-            checkpoint_name,
+            self._checkpoint_name,
             subfolder="transformer",
             torch_dtype=torch.bfloat16,
         )
         torch_transformer.eval()
 
-        self._torch_vae = AutoencoderKLQwenImage.from_pretrained(checkpoint_name, subfolder="vae")
+        self._torch_vae = AutoencoderKLQwenImage.from_pretrained(self._checkpoint_name, subfolder="vae")
         assert isinstance(self._torch_vae, AutoencoderKLQwenImage)
         # Store VAE state dict for loading/reloading
         self._vae_state_dict = self._torch_vae.state_dict()
@@ -125,11 +262,11 @@ class QwenImagePipeline:
         self._patch_size = torch_transformer.config.patch_size
         self._vae_scale_factor = 8
 
-        if torch_transformer.config.num_attention_heads % parallel_config.tensor_parallel.factor != 0:
+        if torch_transformer.config.num_attention_heads % config.dit_parallel_config.tensor_parallel.factor != 0:
             padding_config = PaddingConfig.from_tensor_parallel_factor(
                 torch_transformer.config.num_attention_heads,
                 torch_transformer.config.attention_head_dim,
-                parallel_config.tensor_parallel.factor,
+                config.dit_parallel_config.tensor_parallel.factor,
             )
         else:
             padding_config = None
@@ -163,8 +300,8 @@ class QwenImagePipeline:
         self._transformers_loaded = False
 
         # initialize text encoder. This will load the weights
-        self._use_torch_text_encoder = use_torch_text_encoder
-        with self.mesh_reshape(self.encoder_device, self.encoder_mesh_shape, synchronize=True):
+        self._use_torch_text_encoder = config.use_torch_text_encoder
+        with reshape_device(self.encoder_device, self.encoder_mesh_shape):
             logger.info("creating TT-NN text encoder (loading before transformers for memory efficiency)...")
             self._text_encoder = Qwen25VlTokenizerEncoderPair(
                 self._checkpoint_name,
@@ -173,13 +310,14 @@ class QwenImagePipeline:
                 device=self._submesh_devices[self.encoder_submesh_idx],
                 ccl_manager=self._ccl_managers[self.encoder_submesh_idx],
                 parallel_config=self._encoder_parallel_config,
-                use_torch=use_torch_text_encoder,
+                use_torch=config.use_torch_text_encoder,
                 is_fsdp=True,  # Best configuration for wh t3k and galaxy
             )
+        ttnn.synchronize_device(self.encoder_device)
 
         # Encoder is already loaded. Decide if we should also load the transformers.
         if (
-            not dynamic_load_encoder or use_torch_text_encoder
+            not config.dynamic_load_encoder or config.use_torch_text_encoder
         ):  # Implies we have enough space. VAE comes after denoising, so load all transformers now.
             self._load_transformers(self.encoder_submesh_idx)
 
@@ -191,13 +329,13 @@ class QwenImagePipeline:
 
         self._image_processor = VaeImageProcessor(vae_scale_factor=2 * self._vae_scale_factor)
 
-        self._use_torch_vae_decoder = use_torch_vae_decoder
+        self._use_torch_vae_decoder = config.use_torch_vae_decoder
 
-        if use_torch_vae_decoder:
+        if config.use_torch_vae_decoder:
             self._vae_decoder = None
             self._vae_decoder_tracer = None
         else:
-            with self.mesh_reshape(self.vae_device, self.vae_mesh_shape, synchronize=True):
+            with reshape_device(self.vae_device, self.vae_mesh_shape):
                 logger.info("creating TT-NN VAE decoder...")
                 self._vae_decoder = QwenImageVaeDecoder(
                     base_dim=self._torch_vae.config.base_dim,
@@ -210,21 +348,20 @@ class QwenImagePipeline:
                     ccl_manager=self._ccl_managers[self.vae_submesh_idx],
                 )
                 self._vae_decoder_tracer = Tracer(self._vae_decoder.forward, device=self.vae_device, prep_run=False)
+            ttnn.synchronize_device(self.vae_device)
 
             # Load VAE weights based on configuration
-            if not dynamic_load_vae:
+            if not config.dynamic_load_vae:
                 self._vae_decoder.load_torch_state_dict(self._vae_state_dict)
 
-        self._allocate_persistent_buffers()
-
-    def _allocate_persistent_buffers(self) -> None:
-        """Allocate persistent buffers by running a pipeline pass without tracing.
-
-        This is important so they do not get allocated after trace capture, which would lead to
-        them being overwritten during trace execution.
-        """
         logger.info("Pipeline allocation run...")
-        self.run_single_prompt(prompt="", num_inference_steps=2, seed=0, traced=False)
+        self.run_single_prompt(
+            prompt="",
+            num_inference_steps=2,
+            seed=0,
+            cfg_scale=2 if config.cfg_enabled else 1,
+            traced=False,
+        )
 
     def _load_transformers(self, idx) -> None:
         """Load transformer weights to device. Called lazily for device encoder path."""
@@ -266,33 +403,13 @@ class QwenImagePipeline:
         if self._use_torch_vae_decoder or self._vae_decoder.is_loaded():
             return
 
-        with self.mesh_reshape(self.vae_device, self.vae_mesh_shape, synchronize=True):
+        with reshape_device(self.vae_device, self.vae_mesh_shape):
             logger.info("loading VAE decoder weights to device...")
             self._vae_decoder.load_torch_state_dict(self._vae_state_dict)
-
-    @contextmanager
-    def mesh_reshape(
-        self, device: ttnn.MeshDevice | None, mesh_shape: ttnn.MeshShape | None, synchronize: bool = False
-    ):
-        if device is None:
-            yield
-        else:
-            original_mesh_shape = ttnn.MeshShape(tuple(device.shape))
-            assert (
-                original_mesh_shape.mesh_size() == mesh_shape.mesh_size()
-            ), f"Device cannot be reshaped device shape: {device.shape} mesh shape: {mesh_shape}"
-            if original_mesh_shape != mesh_shape:
-                device.reshape(mesh_shape)
-            yield
-            if original_mesh_shape != device.shape:
-                device.reshape(original_mesh_shape)
-            if synchronize:
-                ttnn.synchronize_device(device)
+        ttnn.synchronize_device(self.vae_device)
 
     @staticmethod
     def get_mesh_shape(mesh_device, parallel_factor):
-        if mesh_device is None:
-            return None
         mesh_shape = list(mesh_device.shape)
         mesh_shape[parallel_factor.mesh_axis] = parallel_factor.factor
         mesh_shape[1 - parallel_factor.mesh_axis] = mesh_device.shape.mesh_size() // parallel_factor.factor
@@ -339,101 +456,11 @@ class QwenImagePipeline:
             profiler_iteration=profiler_iteration,
         )
 
-    @staticmethod
-    def create_pipeline(
-        *,
-        checkpoint_name: str = "Qwen/Qwen-Image",
-        mesh_device: ttnn.MeshDevice,
-        dit_cfg: tuple[int, int] | None = None,
-        dit_sp: tuple[int, int] | None = None,
-        dit_tp: tuple[int, int] | None = None,
-        encoder_tp: tuple[int, int] | None = None,
-        vae_tp: tuple[int, int] | None = None,
-        use_torch_text_encoder: bool = False,
-        use_torch_vae_decoder: bool = False,
-        num_links: int | None = None,
-        topology: ttnn.Topology = ttnn.Topology.Linear,
-        width: int = 1024,
-        height: int = 1024,
-        is_fsdp: bool | None = None,
-        dynamic_load_encoder: bool | None = None,
-        dynamic_load_vae: bool | None = None,
-    ) -> QwenImagePipeline:
-        default_config = {
-            # The default configurations are the best found from sweeping the following: is_fsdp, dynamic_load_encoder, and dynamic_load_vae.
-            # The encoder is currently hardcoded to always be FSDP as it is the most memory efficient configuration with little to no performance penalty.
-            (2, 4): {
-                "cfg_config": (2, 0),
-                "sp": (1, 0),
-                "tp": (4, 1),
-                "encoder_tp": (4, 1),
-                "vae_tp": (4, 1),
-                "num_links": 1,
-                "is_fsdp": False,
-                "dynamic_load_encoder": True,
-                "dynamic_load_vae": not ttnn.device.is_blackhole(),
-            },
-            (4, 8): {
-                "cfg_config": (2, 1),
-                "sp": (4, 0),
-                "tp": (4, 1),
-                "encoder_tp": (4, 1),
-                "vae_tp": (4, 1),
-                "num_links": 4,
-                "is_fsdp": False,
-                "dynamic_load_encoder": False,
-                "dynamic_load_vae": False,
-            },
-        }
-        cfg_factor, cfg_axis = dit_cfg or default_config[tuple(mesh_device.shape)]["cfg_config"]
-        sp_factor, sp_axis = dit_sp or default_config[tuple(mesh_device.shape)]["sp"]
-        tp_factor, tp_axis = dit_tp or default_config[tuple(mesh_device.shape)]["tp"]
-        encoder_tp_factor, encoder_tp_axis = encoder_tp or default_config[tuple(mesh_device.shape)]["encoder_tp"]
-        vae_tp_factor, vae_tp_axis = vae_tp or default_config[tuple(mesh_device.shape)]["vae_tp"]
-        num_links = num_links or default_config[tuple(mesh_device.shape)]["num_links"]
-        is_fsdp = is_fsdp or default_config[tuple(mesh_device.shape)]["is_fsdp"]
-        dynamic_load_encoder = dynamic_load_encoder or default_config[tuple(mesh_device.shape)]["dynamic_load_encoder"]
-        dynamic_load_vae = dynamic_load_vae or default_config[tuple(mesh_device.shape)]["dynamic_load_vae"]
-
-        dit_parallel_config = DiTParallelConfig(
-            cfg_parallel=ParallelFactor(factor=cfg_factor, mesh_axis=cfg_axis),
-            tensor_parallel=ParallelFactor(factor=tp_factor, mesh_axis=tp_axis),
-            sequence_parallel=ParallelFactor(factor=sp_factor, mesh_axis=sp_axis),
-        )
-        encoder_parallel_config = EncoderParallelConfig(
-            tensor_parallel=ParallelFactor(factor=encoder_tp_factor, mesh_axis=encoder_tp_axis)
-        )
-        vae_parallel_config = VAEParallelConfig(
-            tensor_parallel=ParallelFactor(factor=vae_tp_factor, mesh_axis=vae_tp_axis)
-        )
-
-        logger.info(f"Mesh device shape: {mesh_device.shape}")
-        logger.info(f"Parallel config: {dit_parallel_config}")
-        logger.info(f"Encoder parallel config: {encoder_parallel_config}")
-        logger.info(f"VAE parallel config: {vae_parallel_config}")
-
-        return QwenImagePipeline(
-            mesh_device=mesh_device,
-            checkpoint_name=checkpoint_name,
-            use_torch_text_encoder=use_torch_text_encoder,
-            use_torch_vae_decoder=use_torch_vae_decoder,
-            parallel_config=dit_parallel_config,
-            encoder_parallel_config=encoder_parallel_config,
-            vae_parallel_config=vae_parallel_config,
-            topology=topology,
-            num_links=num_links,
-            width=width,
-            height=height,
-            is_fsdp=is_fsdp,
-            dynamic_load_encoder=dynamic_load_encoder,
-            dynamic_load_vae=dynamic_load_vae,
-        )
-
     def prepare_encoder(self) -> None:
         """Prepare encoder for inference."""
         if not self._text_encoder.encoder_loaded():
             self._deallocate_transformers(self.encoder_submesh_idx)
-            with self.mesh_reshape(self.encoder_device, self.encoder_mesh_shape):
+            with reshape_device(self.encoder_device, self.encoder_mesh_shape):
                 self._text_encoder.reload_encoder_weights()
 
     def prepare_transformers(self) -> None:
@@ -448,7 +475,7 @@ class QwenImagePipeline:
     def prepare_vae(self) -> None:
         if not self._vae_decoder.is_loaded():
             self._deallocate_transformers(self.vae_submesh_idx)
-            with self.mesh_reshape(self.vae_device, self.vae_mesh_shape):
+            with reshape_device(self.vae_device, self.vae_mesh_shape):
                 self._reload_vae()
 
     def __call__(
@@ -472,6 +499,10 @@ class QwenImagePipeline:
 
         sp_axis = self._parallel_config.sequence_parallel.mesh_axis
 
+        if cfg_scale > 1 and not self._cfg_enabled:
+            msg = "cfg_scale > 1 requires CFG to be enabled"
+            raise ValueError(msg)
+
         assert num_images_per_prompt == 1, "generating multiple images is not supported"
         assert prompt_count == 1, "generating multiple images is not supported"
 
@@ -487,7 +518,7 @@ class QwenImagePipeline:
             self.prepare_encoder()
 
             with profiler("encoder", profiler_iteration) if profiler else nullcontext():
-                with self.mesh_reshape(self.encoder_device, self.encoder_mesh_shape):
+                with reshape_device(self.encoder_device, self.encoder_mesh_shape):
                     prompt_embeds, prompt_mask = self._encode_prompts(
                         prompts=prompts,
                         negative_prompts=negative_prompts,
@@ -625,7 +656,7 @@ class QwenImagePipeline:
                 else:
                     self.prepare_vae()
 
-                    with self.mesh_reshape(self.vae_device, self.vae_mesh_shape):
+                    with reshape_device(self.vae_device, self.vae_mesh_shape):
                         tt_latents, logical_h = self._vae_decoder.prepare_input(torch_latents)
                         vae_decode = self._vae_decoder_tracer if vae_traced else self._vae_decoder.forward
                         tt_decoded_output, logical_h = vae_decode(tt_latents, logical_h)
