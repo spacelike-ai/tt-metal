@@ -16,7 +16,7 @@ from transformers import T5EncoderModel, T5TokenizerFast
 import ttnn
 from models.perf.benchmarking_utils import BenchmarkProfiler
 
-from ...models.transformers.transformer_mochi import MochiTransformer3DModel
+from ...models.transformers.transformer_mochi import MochiCheckpoint
 from ...models.vae.vae_mochi import MochiVAEDecoder
 from ...parallel.config import DiTParallelConfig, MochiVAEParallelConfig, ParallelFactor
 from ...parallel.manager import CCLManager
@@ -118,41 +118,19 @@ class MochiPipeline(DiffusionPipeline):
         self.tokenizer = T5TokenizerFast.from_pretrained(model_name, subfolder="tokenizer")
 
         # Load pretrained Mochi Transformer (TT)
-        # First load the torch version to get the config and state dict
-        from diffusers import MochiTransformer3DModel as TorchMochiTransformer3DModel
+        self._checkpoint = MochiCheckpoint(model_name)
 
-        torch_transformer = TorchMochiTransformer3DModel.from_pretrained(
-            model_name, subfolder="transformer", torch_dtype=torch.float32
-        )
-
-        self.transformer_config = torch_transformer.config
-
-        # Create TT version with the same config
-        self.transformer = MochiTransformer3DModel(
-            patch_size=torch_transformer.config.patch_size,
-            num_attention_heads=torch_transformer.config.num_attention_heads,
-            attention_head_dim=torch_transformer.config.attention_head_dim,
-            num_layers=torch_transformer.config.num_layers,
-            pooled_projection_dim=torch_transformer.config.pooled_projection_dim,
-            in_channels=torch_transformer.config.in_channels,
-            text_embed_dim=torch_transformer.config.text_embed_dim,
-            time_embed_dim=torch_transformer.config.time_embed_dim,
-            activation_fn=torch_transformer.config.activation_fn,
-            mesh_device=mesh_device,
+        self.transformer = self._checkpoint.build(
             ccl_manager=self.ccl_manager,
             parallel_config=parallel_config,
             is_fsdp=True,
         )
         self._transformer_tracer = Tracer(self.transformer.forward, device=mesh_device, prep_run=False)
 
-        # Load state dict into TT transformer
-        cache.load_model(
+        self._checkpoint.load(
             self.transformer,
-            model_name="mochi-1-preview",
-            subfolder="transformer",
+            mesh_device=self.mesh_device,
             parallel_config=self.parallel_config,
-            mesh_shape=tuple(self.mesh_device.shape),
-            get_torch_state_dict=lambda: torch_transformer.state_dict(),
         )
 
         # Load pretrained VAE (Torch)
@@ -681,17 +659,7 @@ class MochiPipeline(DiffusionPipeline):
         # 3b. If the transformer was destroyed, recreate it.
         if self.transformer is None:
             logger.info("Recreating MochiTransformer3DModel")
-            self.transformer = MochiTransformer3DModel(
-                patch_size=self.transformer_config.patch_size,
-                num_attention_heads=self.transformer_config.num_attention_heads,
-                attention_head_dim=self.transformer_config.attention_head_dim,
-                num_layers=self.transformer_config.num_layers,
-                pooled_projection_dim=self.transformer_config.pooled_projection_dim,
-                in_channels=self.transformer_config.in_channels,
-                text_embed_dim=self.transformer_config.text_embed_dim,
-                time_embed_dim=self.transformer_config.time_embed_dim,
-                activation_fn=self.transformer_config.activation_fn,
-                mesh_device=self.mesh_device,
+            self.transformer = self._checkpoint.build(
                 ccl_manager=self.ccl_manager,
                 parallel_config=self.parallel_config,
                 is_fsdp=True,
@@ -700,22 +668,18 @@ class MochiPipeline(DiffusionPipeline):
                 self.transformer.forward, device=self.mesh_device, prep_run=True, clone_prep_inputs=False
             )
 
-            # Load state dict into TT transformer
             logger.info("Loading MochiTransformer3DModel state_dict")
-
-            cache.load_model(
+            self._checkpoint.load(
                 self.transformer,
-                model_name="mochi-1-preview",
-                subfolder="transformer",
+                mesh_device=self.mesh_device,
                 parallel_config=self.parallel_config,
-                mesh_shape=tuple(self.mesh_device.shape),
             )
 
         # 4. Prepare latent variables
         if seed is not None:
             torch.manual_seed(seed)
 
-        num_channels_latents = self.transformer_config.in_channels
+        num_channels_latents = self._checkpoint.in_channels
         latents = self.prepare_latents(
             batch_size * num_videos_per_prompt,
             num_channels_latents,

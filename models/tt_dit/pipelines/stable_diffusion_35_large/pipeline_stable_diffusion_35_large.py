@@ -12,7 +12,6 @@ import torch
 import tqdm
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
-from diffusers.models.transformers.transformer_sd3 import SD3Transformer2DModel as TorchSD3Transformer2DModel
 from loguru import logger
 from PIL import Image
 from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
@@ -24,14 +23,13 @@ from models.tt_dit.encoders.clip.model_clip import CLIPConfig, CLIPEncoder
 from models.tt_dit.encoders.t5.model_t5 import T5Config, T5Encoder
 
 # NOTE: SD35Transformer is the new tt-dit implementation
-from models.tt_dit.models.transformers.transformer_sd35 import SD35Transformer2DModel
+from models.tt_dit.models.transformers.transformer_sd35 import SD35Checkpoint
 from models.tt_dit.models.vae.vae_sd35 import VAEDecoder
 from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
 from models.tt_dit.solvers import EulerSolver, schedules
-from models.tt_dit.utils import cache, tensor
-from models.tt_dit.utils.padding import PaddingConfig
+from models.tt_dit.utils import tensor
 from models.tt_dit.utils.tracing import Tracer
 
 TILE_SIZE = 32
@@ -188,65 +186,20 @@ class StableDiffusion3Pipeline:
             torch_text_encoder_3 = T5EncoderModel.from_pretrained(checkpoint_name, subfolder="text_encoder_3")
         self._torch_vae = AutoencoderKL.from_pretrained(checkpoint_name, subfolder="vae")
 
-        torch_transformer = TorchSD3Transformer2DModel.from_pretrained(
-            checkpoint_name,
-            subfolder="transformer",
-            torch_dtype=torch.bfloat16,  # bfloat16 is the native datatype of the model
-        )
-        torch_transformer.eval()
-
         assert isinstance(self._tokenizer_1, CLIPTokenizer)
         assert isinstance(self._tokenizer_2, CLIPTokenizer)
         assert isinstance(self._tokenizer_3, T5TokenizerFast)
         assert isinstance(self._text_encoder_1, CLIPTextModelWithProjection)
         assert isinstance(self._text_encoder_2, CLIPTextModelWithProjection)
         assert isinstance(self._torch_vae, AutoencoderKL)
-        assert isinstance(torch_transformer, TorchSD3Transformer2DModel)
 
         logger.info("creating TT-NN transformer...")
 
-        assert "stabilityai/stable-diffusion-3.5-large" in str(checkpoint_name)
-
-        if torch_transformer.config.num_attention_heads % config.dit_parallel_config.tensor_parallel.factor != 0:
-            padding_config = PaddingConfig.from_tensor_parallel_factor(
-                torch_transformer.config.num_attention_heads,
-                torch_transformer.config.attention_head_dim,
-                config.dit_parallel_config.tensor_parallel.factor,
-            )
-        else:
-            padding_config = None
-
-        self.transformers = []
-        for i, submesh_device in enumerate(self.submesh_devices):
-            tt_transformer = SD35Transformer2DModel(
-                sample_size=128,
-                patch_size=2,
-                in_channels=16,
-                num_layers=38,
-                attention_head_dim=64,
-                num_attention_heads=38,
-                joint_attention_dim=4096,
-                caption_projection_dim=2432,
-                pooled_projection_dim=2048,
-                out_channels=16,
-                pos_embed_max_size=192,
-                dual_attention_layers=(),
-                mesh_device=submesh_device,
-                ccl_manager=self.ccl_managers[i],
-                parallel_config=self.dit_parallel_config,
-                padding_config=padding_config,
-            )
-
-            cache.load_model(
-                tt_model=tt_transformer,
-                get_torch_state_dict=torch_transformer.state_dict,
-                model_name="stable-diffusion-3.5-large",
-                subfolder="transformer",
-                parallel_config=self.dit_parallel_config,
-                mesh_shape=tuple(submesh_device.shape),
-            )
-
-            self.transformers.append(tt_transformer)
+        checkpoint = SD35Checkpoint(checkpoint_name)
+        self.transformers = [
+            checkpoint.build(ccl_manager=mgr, parallel_config=self.dit_parallel_config) for mgr in self.ccl_managers
+        ]
+        for submesh_device in self.submesh_devices:
             ttnn.synchronize_device(submesh_device)
 
         self._step_inner_tracers = [
@@ -254,9 +207,9 @@ class StableDiffusion3Pipeline:
         ]
         self._solvers = [EulerSolver() for _ in self.submesh_devices]
 
-        self._num_channels_latents = torch_transformer.config.in_channels
-        self._joint_attention_dim = torch_transformer.config.joint_attention_dim
-        self.patch_size = 2  # SD3.5 uses patch_size of 2
+        self._num_channels_latents = checkpoint.num_channels_latents
+        self._joint_attention_dim = checkpoint.joint_attention_dim
+        self.patch_size = checkpoint.patch_size
 
         self._block_out_channels = self._torch_vae.config.block_out_channels
         self._torch_vae_scaling_factor = self._torch_vae.config.scaling_factor

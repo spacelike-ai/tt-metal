@@ -9,7 +9,6 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import diffusers
 import torch
 import tqdm
 from diffusers.image_processor import VaeImageProcessor
@@ -19,7 +18,7 @@ from loguru import logger
 import ttnn
 
 from models.tt_dit.encoders.qwen25vl.encoder_pair import Qwen25VlTokenizerEncoderPair
-from models.tt_dit.models.transformers.transformer_qwenimage import QwenImageTransformer
+from models.tt_dit.models.transformers.transformer_qwenimage import QwenImageCheckpoint
 from models.tt_dit.models.vae.vae_qwenimage import QwenImageVaeDecoder
 from models.tt_dit.parallel.config import (
     DiTParallelConfig,
@@ -33,7 +32,6 @@ from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribut
 from models.tt_dit.solvers import EulerSolver, schedules
 from models.tt_dit.utils import cache, tensor
 from models.tt_dit.utils.mesh import reshape_device
-from models.tt_dit.utils.padding import PaddingConfig
 from models.tt_dit.utils.tracing import Tracer
 
 if TYPE_CHECKING:
@@ -246,12 +244,7 @@ class QwenImagePipeline:
 
         logger.info("loading models...")
 
-        torch_transformer = diffusers.QwenImageTransformer2DModel.from_pretrained(
-            self._checkpoint_name,
-            subfolder="transformer",
-            torch_dtype=torch.bfloat16,
-        )
-        torch_transformer.eval()
+        self._checkpoint = QwenImageCheckpoint(self._checkpoint_name)
 
         self._torch_vae = AutoencoderKLQwenImage.from_pretrained(self._checkpoint_name, subfolder="vae")
         assert isinstance(self._torch_vae, AutoencoderKLQwenImage)
@@ -259,39 +252,18 @@ class QwenImagePipeline:
         self._vae_state_dict = self._torch_vae.state_dict()
 
         self._num_channels_latents = 16
-        self._patch_size = torch_transformer.config.patch_size
+        self._patch_size = self._checkpoint.patch_size
         self._vae_scale_factor = 8
+        self._pos_embed = self._checkpoint.pos_embed
 
-        if torch_transformer.config.num_attention_heads % config.dit_parallel_config.tensor_parallel.factor != 0:
-            padding_config = PaddingConfig.from_tensor_parallel_factor(
-                torch_transformer.config.num_attention_heads,
-                torch_transformer.config.attention_head_dim,
-                config.dit_parallel_config.tensor_parallel.factor,
-            )
-        else:
-            padding_config = None
-
-        self._transformer_state_dict = torch_transformer.state_dict()
-        self._padding_config = padding_config
-        self._pos_embed = torch_transformer.pos_embed
-
-        # Initialize the transformers. Loading logic comes after.
+        # Initialize the transformers. Weight loading is deferred (see _load_transformers).
         self.transformers = [
-            QwenImageTransformer(
-                patch_size=torch_transformer.config.patch_size,
-                in_channels=torch_transformer.config.in_channels,
-                num_layers=torch_transformer.config.num_layers,
-                attention_head_dim=torch_transformer.config.attention_head_dim,
-                num_attention_heads=torch_transformer.config.num_attention_heads,
-                joint_attention_dim=torch_transformer.config.joint_attention_dim,
-                out_channels=torch_transformer.config.out_channels,
-                device=submesh_device,
-                ccl_manager=self._ccl_managers[i],
+            self._checkpoint.build(
+                ccl_manager=mgr,
                 parallel_config=self._parallel_config,
-                padding_config=self._padding_config,
                 is_fsdp=self._is_fsdp,
             )
-            for i, submesh_device in enumerate(self._submesh_devices)
+            for mgr in self._ccl_managers
         ]
         self._step_inner_tracers = [
             Tracer(self._step_inner, device=device, prep_run=False) for device in self._submesh_devices
@@ -368,13 +340,10 @@ class QwenImagePipeline:
         if self.transformers[idx].is_loaded():
             return
 
-        cache.load_model(
-            tt_model=self.transformers[idx],
-            get_torch_state_dict=lambda: self._transformer_state_dict,
-            model_name=self._checkpoint_name,
-            subfolder="transformer",
+        self._checkpoint.load(
+            self.transformers[idx],
+            mesh_device=self._submesh_devices[idx],
             parallel_config=self._parallel_config,
-            mesh_shape=tuple(self._submesh_devices[idx].shape),
             is_fsdp=self._is_fsdp,
         )
 

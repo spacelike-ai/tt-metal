@@ -15,7 +15,6 @@ import regex as re
 import torch
 from diffusers.loaders import WanLoraLoaderMixin
 from diffusers.models import AutoencoderKLWan
-from diffusers.models import WanTransformer3DModel as TorchWanTransformer3DModel
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.wan.pipeline_output import WanPipelineOutput
 from diffusers.video_processor import VideoProcessor
@@ -26,7 +25,7 @@ import ttnn
 from models.perf.benchmarking_utils import BenchmarkProfiler
 
 from ...encoders.umt5.model_umt5 import UMT5Config, UMT5Encoder
-from ...models.transformers.wan2_2.transformer_wan import WanTransformer3DModel
+from ...models.transformers.wan2_2.transformer_wan import WanCheckpoint, WanTransformer3DModel
 from ...models.vae.vae_wan2_1 import WanDecoder
 from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, ParallelFactor, VaeHWParallelConfig
 from ...parallel.manager import CCLManager
@@ -95,8 +94,7 @@ def prompt_clean(text):
 @dataclass
 class TransformerState:
     model: WanTransformer3DModel
-    subfolder: str
-    torch_model: TorchWanTransformer3DModel
+    checkpoint: WanCheckpoint
     guidance_scale: float
     prompt_buffer: object = field(default=None)
     negative_prompt_buffer: object = field(default=None)
@@ -182,12 +180,8 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         )
         self.vae = AutoencoderKLWan.from_pretrained(checkpoint_name, subfolder="vae", trust_remote_code=True)
         self._flow_shift = flow_shift
-        self.torch_transformer = TorchWanTransformer3DModel.from_pretrained(
-            checkpoint_name, subfolder="transformer", trust_remote_code=True
-        )
-        self.torch_transformer_2 = TorchWanTransformer3DModel.from_pretrained(
-            checkpoint_name, subfolder="transformer_2", trust_remote_code=True
-        )
+        self._checkpoint = WanCheckpoint(checkpoint_name, subfolder="transformer")
+        self._checkpoint_2 = WanCheckpoint(checkpoint_name, subfolder="transformer_2")
 
         self.dit_ccl_manager = CCLManager(
             mesh_device=mesh_device,
@@ -231,39 +225,14 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
             parallel_config=self.encoder_parallel_config,
         )
 
-        self.transformer = WanTransformer3DModel(
-            patch_size=self.torch_transformer.config.patch_size,
-            num_heads=self.torch_transformer.config.num_attention_heads,
-            dim=self.torch_transformer.config.num_attention_heads * self.torch_transformer.config.attention_head_dim,
-            in_channels=self.torch_transformer.config.in_channels,
-            out_channels=self.torch_transformer.config.out_channels,
-            text_dim=self.torch_transformer.config.text_dim,
-            freq_dim=self.torch_transformer.config.freq_dim,
-            ffn_dim=self.torch_transformer.config.ffn_dim,
-            cross_attn_norm=self.torch_transformer.config.cross_attn_norm,
-            eps=self.torch_transformer.config.eps,
-            rope_max_seq_len=self.torch_transformer.config.rope_max_seq_len,
-            mesh_device=self.mesh_device,
+        self.transformer = self._checkpoint.build(
             ccl_manager=self.dit_ccl_manager,
             parallel_config=self.parallel_config,
             is_fsdp=self.is_fsdp,
             model_type=self.model_type,
         )
 
-        self.transformer_2 = WanTransformer3DModel(
-            patch_size=self.torch_transformer_2.config.patch_size,
-            num_heads=self.torch_transformer_2.config.num_attention_heads,
-            dim=self.torch_transformer_2.config.num_attention_heads
-            * self.torch_transformer_2.config.attention_head_dim,
-            in_channels=self.torch_transformer_2.config.in_channels,
-            out_channels=self.torch_transformer_2.config.out_channels,
-            text_dim=self.torch_transformer_2.config.text_dim,
-            freq_dim=self.torch_transformer_2.config.freq_dim,
-            ffn_dim=self.torch_transformer_2.config.ffn_dim,
-            cross_attn_norm=self.torch_transformer_2.config.cross_attn_norm,
-            eps=self.torch_transformer_2.config.eps,
-            rope_max_seq_len=self.torch_transformer_2.config.rope_max_seq_len,
-            mesh_device=self.mesh_device,
+        self.transformer_2 = self._checkpoint_2.build(
             ccl_manager=self.dit_ccl_manager,
             parallel_config=self.parallel_config,
             is_fsdp=self.is_fsdp,
@@ -291,8 +260,8 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         )
 
         self.transformer_states = [
-            TransformerState(self.transformer, "transformer", self.torch_transformer, guidance_scale=4.0),
-            TransformerState(self.transformer_2, "transformer_2", self.torch_transformer_2, guidance_scale=3.0),
+            TransformerState(self.transformer, self._checkpoint, guidance_scale=4.0),
+            TransformerState(self.transformer_2, self._checkpoint_2, guidance_scale=3.0),
         ]
 
         self._solver = UniPCSolver(order=2, variant=UniPCVariant.B2)
@@ -492,14 +461,11 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
 
     def _prepare_transformer(self, idx: int):
         state = self.transformer_states[idx]
-        cache.load_model(
+        state.checkpoint.load(
             state.model,
-            model_name=os.path.basename(self.checkpoint_name),
-            subfolder=state.subfolder,
+            mesh_device=self.mesh_device,
             parallel_config=self.parallel_config,
-            mesh_shape=tuple(self.mesh_device.shape),
             is_fsdp=self.is_fsdp,
-            get_torch_state_dict=lambda: state.torch_model.state_dict(),
         )
 
     def _prepare_vae(self):

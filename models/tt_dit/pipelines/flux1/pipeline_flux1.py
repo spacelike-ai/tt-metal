@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import torch
 import tqdm
-from diffusers import AutoencoderKL, FluxTransformer2DModel
+from diffusers import AutoencoderKL
 from diffusers.image_processor import VaeImageProcessor
 from loguru import logger
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
@@ -21,17 +21,14 @@ from models.common.utility_functions import is_blackhole
 from models.perf.benchmarking_utils import BenchmarkProfiler
 from models.tt_dit.encoders.clip.model_clip import CLIPConfig, CLIPEncoder
 from models.tt_dit.encoders.t5.model_t5 import T5Config, T5Encoder
-from models.tt_dit.models.transformers.transformer_flux1 import Flux1Transformer
+from models.tt_dit.models.transformers.transformer_flux1 import Flux1Checkpoint
 from models.tt_dit.models.vae.vae_sd35 import VAEDecoder
 from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
 from models.tt_dit.solvers import EulerSolver, schedules
 from models.tt_dit.utils import cache, tensor
-from models.tt_dit.utils.padding import PaddingConfig
 from models.tt_dit.utils.tracing import Tracer
-
-_DEFAULT_CHECKPOINT = "black-forest-labs/FLUX.1-dev"
 
 _PRESETS_WH: dict[tuple[int, ...], dict] = {
     (1, 4): {"sp": (1, 0), "tp": (4, 1), "encoder_tp": (4, 1), "vae_tp": (4, 1), "num_links": 1},
@@ -82,7 +79,7 @@ class Flux1PipelineConfig:
         height: int = 1024,
         width: int = 1024,
         cfg_enabled: bool = False,  # Flux.1 doesn't support CFG.
-        checkpoint_name: str = _DEFAULT_CHECKPOINT,
+        checkpoint_name: str,
     ) -> Flux1PipelineConfig:
         preset_dict = _PRESETS_BH if is_blackhole() else _PRESETS_WH
         preset = preset_dict.get(tuple(mesh_shape), {})
@@ -123,7 +120,7 @@ class Flux1Pipeline:
         width: int = 1024,
         height: int = 1024,
         cfg_enabled: bool = False,
-        checkpoint_name: str = _DEFAULT_CHECKPOINT,
+        checkpoint_name: str,
     ) -> Flux1Pipeline:
         config = Flux1PipelineConfig.default(
             mesh_shape=mesh_device.shape,
@@ -175,68 +172,27 @@ class Flux1Pipeline:
             torch_t5_text_encoder = T5EncoderModel.from_pretrained(checkpoint_name, subfolder="text_encoder_2")
         self._torch_vae = AutoencoderKL.from_pretrained(checkpoint_name, subfolder="vae")
 
-        torch_transformer = FluxTransformer2DModel.from_pretrained(
-            checkpoint_name,
-            subfolder="transformer",
-            torch_dtype=torch.bfloat16,  # bfloat16 is the native datatype of the model
-        )
-        torch_transformer.eval()
-
         logger.info("creating TT-NN transformer...")
 
-        if torch_transformer.config.num_attention_heads % config.dit_parallel_config.tensor_parallel.factor != 0:
-            padding_config = PaddingConfig.from_tensor_parallel_factor(
-                torch_transformer.config.num_attention_heads,
-                torch_transformer.config.attention_head_dim,
-                config.dit_parallel_config.tensor_parallel.factor,
-            )
-        else:
-            padding_config = None
-
-        self.transformers = []
-        for i, submesh_device in enumerate(self._submesh_devices):
-            tt_transformer = Flux1Transformer(
-                patch_size=torch_transformer.config.patch_size,
-                in_channels=torch_transformer.config.in_channels,
-                num_layers=torch_transformer.config.num_layers,
-                num_single_layers=torch_transformer.config.num_single_layers,
-                attention_head_dim=torch_transformer.config.attention_head_dim,
-                num_attention_heads=torch_transformer.config.num_attention_heads,
-                joint_attention_dim=torch_transformer.config.joint_attention_dim,
-                pooled_projection_dim=torch_transformer.config.pooled_projection_dim,
-                out_channels=torch_transformer.out_channels,
-                axes_dims_rope=torch_transformer.config.axes_dims_rope,
-                with_guidance_embeds=torch_transformer.config.guidance_embeds,
-                mesh_device=submesh_device,
-                ccl_manager=self._ccl_managers[i],
-                parallel_config=config.dit_parallel_config,
-                padding_config=padding_config,
-            )
-
-            model_name = os.path.basename(checkpoint_name)
-            cache.load_model(
-                tt_transformer,
-                get_torch_state_dict=torch_transformer.state_dict,
-                model_name=model_name,
-                subfolder="transformer",
-                parallel_config=config.dit_parallel_config,
-                mesh_shape=tuple(submesh_device.shape),
-            )
-
-            self.transformers.append(tt_transformer)
+        checkpoint = Flux1Checkpoint(checkpoint_name)
+        self.transformers = [
+            checkpoint.build(ccl_manager=mgr, parallel_config=config.dit_parallel_config) for mgr in self._ccl_managers
+        ]
+        for submesh_device in self._submesh_devices:
             ttnn.synchronize_device(submesh_device)
+
+        model_name = os.path.basename(checkpoint_name)
 
         self._step_inner_tracers = [
             Tracer(self._step_inner, device=device, prep_run=False) for device in self._submesh_devices
         ]
         self._solvers = [EulerSolver() for _ in self._submesh_devices]
 
-        self._pos_embed = torch_transformer.pos_embed
-
-        self._num_channels_latents = torch_transformer.config.in_channels // 4
-        self._joint_attention_dim = torch_transformer.config.joint_attention_dim
-        self._patch_size = torch_transformer.config.patch_size
-        self._with_guidance_embeds = torch_transformer.config.guidance_embeds
+        self._pos_embed = checkpoint.pos_embed
+        self._num_channels_latents = checkpoint.num_channels_latents
+        self._joint_attention_dim = checkpoint.joint_attention_dim
+        self._patch_size = checkpoint.patch_size
+        self._with_guidance_embeds = checkpoint.with_guidance_embeds
 
         self._block_out_channels = self._torch_vae.config.block_out_channels
         self._latents_scaling = self._torch_vae.config.scaling_factor

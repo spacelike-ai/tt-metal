@@ -2,7 +2,13 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
+import os
+from typing import TYPE_CHECKING
+
 import torch
+from diffusers.models.transformers.transformer_sd3 import SD3Transformer2DModel as TorchSD3Transformer2DModel
 
 import ttnn
 
@@ -11,8 +17,14 @@ from ...layers.feedforward import ParallelFeedForward
 from ...layers.linear import ColParallelLinear, Linear, prepare_chunked_linear_output
 from ...layers.module import Module, ModuleList
 from ...layers.normalization import DistributedLayerNorm, LayerNorm
+from ...utils import cache
+from ...utils.padding import PaddingConfig
 from ...utils.substate import rename_substate
 from .attention_sd35 import SD35JointAttention
+
+if TYPE_CHECKING:
+    from ...parallel.config import DiTParallelConfig
+    from ...parallel.manager import CCLManager
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/models/attention_processor.py
@@ -494,3 +506,70 @@ class SD35Transformer2DModel(Module):
 
         spatial = spatial.reshape([batch_size, height // patch, width // patch, patch, patch, -1])
         return spatial.transpose(2, 3).flatten(3, 4).flatten(1, 2)
+
+
+class SD35Checkpoint:
+    """An SD3.5 checkpoint: fetches weights and builds loaded transformers."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        torch_transformer = TorchSD3Transformer2DModel.from_pretrained(
+            name,
+            subfolder="transformer",
+            torch_dtype=torch.bfloat16,
+        )
+        torch_transformer.eval()
+        assert isinstance(torch_transformer, TorchSD3Transformer2DModel)
+        self._config = torch_transformer.config
+        self._state_dict = torch_transformer.state_dict()
+
+        self.num_channels_latents: int = self._config.in_channels
+        self.joint_attention_dim: int = self._config.joint_attention_dim
+        self.patch_size: int = self._config.patch_size
+
+    def build(
+        self,
+        *,
+        ccl_manager: CCLManager,
+        parallel_config: DiTParallelConfig,
+    ) -> SD35Transformer2DModel:
+        """Construct an ``SD35Transformer2DModel`` for this checkpoint and load its weights."""
+        device = ccl_manager.mesh_device
+        c = self._config
+
+        if c.num_attention_heads % parallel_config.tensor_parallel.factor != 0:
+            padding_config = PaddingConfig.from_tensor_parallel_factor(
+                c.num_attention_heads,
+                c.attention_head_dim,
+                parallel_config.tensor_parallel.factor,
+            )
+        else:
+            padding_config = None
+
+        model = SD35Transformer2DModel(
+            sample_size=c.sample_size,
+            patch_size=c.patch_size,
+            in_channels=c.in_channels,
+            num_layers=c.num_layers,
+            attention_head_dim=c.attention_head_dim,
+            num_attention_heads=c.num_attention_heads,
+            joint_attention_dim=c.joint_attention_dim,
+            caption_projection_dim=c.caption_projection_dim,
+            pooled_projection_dim=c.pooled_projection_dim,
+            out_channels=c.out_channels,
+            pos_embed_max_size=c.pos_embed_max_size,
+            dual_attention_layers=c.dual_attention_layers,
+            mesh_device=device,
+            ccl_manager=ccl_manager,
+            parallel_config=parallel_config,
+            padding_config=padding_config,
+        )
+        cache.load_model(
+            tt_model=model,
+            get_torch_state_dict=lambda: self._state_dict,
+            model_name=os.path.basename(self._name),
+            subfolder="transformer",
+            parallel_config=parallel_config,
+            mesh_shape=tuple(device.shape),
+        )
+        return model
