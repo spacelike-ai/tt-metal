@@ -29,15 +29,17 @@ from models.tt_dit.parallel.config import (
 )
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
+from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
+from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
 from models.tt_dit.solvers import EulerSolver, schedules
 from models.tt_dit.utils import cache, tensor
 from models.tt_dit.utils.mesh import reshape_device
 from models.tt_dit.utils.tracing import Tracer
 
 if TYPE_CHECKING:
-    from PIL import Image
+    from collections.abc import Sequence
 
-    from models.perf.benchmarking_utils import BenchmarkProfiler
+    from PIL import Image
 
 PROMPT_TEMPLATE = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
 PROMPT_DROP_IDX = 34
@@ -171,7 +173,7 @@ class QwenImagePipelineConfig:
         )
 
 
-class QwenImagePipeline:
+class QwenImagePipeline(PipelineAPIMixin):
     """
     QwenImagePipeline is a pipeline for generating images from text prompts.
     It uses a transformer to encode the text prompts and a VAE to decode the latent space.
@@ -327,8 +329,8 @@ class QwenImagePipeline:
                 self._vae_decoder.load_torch_state_dict(self._vae_state_dict)
 
         logger.info("Pipeline allocation run...")
-        self.run_single_prompt(
-            prompt="",
+        self(
+            prompts=[""],
             num_inference_steps=2,
             seed=0,
             cfg_scale=2 if config.cfg_enabled else 1,
@@ -397,34 +399,6 @@ class QwenImagePipeline:
             ),
         )
 
-    def run_single_prompt(
-        self,
-        *,
-        prompt: str,
-        negative_prompt: str | None = None,
-        num_inference_steps: int = 50,
-        cfg_scale: float = 4.0,
-        seed: int = 0,
-        traced: bool = True,
-        vae_traced: bool | None = None,
-        encoder_traced: bool | None = None,
-        profiler: BenchmarkProfiler = None,
-        profiler_iteration: int = 0,
-    ) -> list[Image.Image]:
-        """Run inference for a single prompt. Convenience method for inference server."""
-        return self(
-            prompts=[prompt],
-            negative_prompts=[negative_prompt],
-            num_inference_steps=num_inference_steps,
-            cfg_scale=cfg_scale,
-            seed=seed,
-            traced=traced,
-            vae_traced=vae_traced,
-            encoder_traced=encoder_traced,
-            profiler=profiler,
-            profiler_iteration=profiler_iteration,
-        )
-
     def prepare_encoder(self) -> None:
         """Prepare encoder for inference."""
         if not self._text_encoder.encoder_loaded():
@@ -452,16 +426,17 @@ class QwenImagePipeline:
         *,
         num_images_per_prompt: int = 1,
         cfg_scale: float,
-        prompts: list[str],
-        negative_prompts: list[str | None],
+        prompts: Sequence[str],
+        negative_prompts: Sequence[str] | None = None,
         num_inference_steps: int,
         seed: int | None = None,
         traced: bool = False,
         vae_traced: bool | None = None,
         encoder_traced: bool | None = None,
-        profiler: BenchmarkProfiler = None,
-        profiler_iteration: int = 0,
+        on_event: PipelineEventCallback | None = None,
     ) -> list[Image.Image]:
+        on_event = on_event if on_event is not None else null_callback
+        negative_prompts = negative_prompts if negative_prompts is not None else [""] * len(prompts)
         vae_traced = vae_traced if vae_traced is not None else traced
         encoder_traced = encoder_traced if encoder_traced is not None else traced
         prompt_count = len(prompts)
@@ -480,23 +455,25 @@ class QwenImagePipeline:
         transformer_batch_size = prompt_count * num_images_per_prompt
         spatial_sequence_length = (latents_height // self._patch_size) * (latents_width // self._patch_size)
 
-        with profiler("total", profiler_iteration) if profiler else nullcontext():
+        on_event(SectionStart("total"))
+        with nullcontext():
             cfg_enabled = cfg_scale > 1
             logger.info("encoding prompts...")
 
             self.prepare_encoder()
 
-            with profiler("encoder", profiler_iteration) if profiler else nullcontext():
+            on_event(SectionStart("encoder"))
+            with nullcontext():
                 with reshape_device(self.encoder_device, self.encoder_mesh_shape):
                     prompt_embeds, prompt_mask = self._encode_prompts(
                         prompts=prompts,
                         negative_prompts=negative_prompts,
                         num_images_per_prompt=num_images_per_prompt,
                         cfg_enabled=cfg_enabled,
-                        profiler=profiler,
-                        profiler_iteration=profiler_iteration,
+                        on_event=on_event,
                         traced=encoder_traced,
                     )
+            on_event(SectionEnd("encoder"))
             _, prompt_sequence_length, _ = prompt_embeds.shape
 
             self.prepare_transformers()
@@ -559,9 +536,11 @@ class QwenImagePipeline:
 
             logger.info("denoising...")
 
-            with profiler("denoising", profiler_iteration) if profiler else nullcontext():
+            on_event(SectionStart("denoising"))
+            with nullcontext():
                 for i, t in enumerate(tqdm.tqdm(timesteps)):
-                    with profiler(f"denoising_step_{i}", profiler_iteration) if profiler else nullcontext():
+                    on_event(SectionStart(f"denoising_step_{i}"))
+                    with nullcontext():
                         # Allocation on device is fine, because timesteps are not used after
                         # trace execution, and can be overwritten during trace execution.
                         tt_timestep_list = [
@@ -590,14 +569,16 @@ class QwenImagePipeline:
                             prompt_sequence_length=prompt_sequence_length,
                             cfg_scale=cfg_scale,
                             cfg_enabled=cfg_enabled,
-                            profiler=profiler,
-                            profiler_iteration=profiler_iteration,
+                            on_event=on_event,
                             traced=traced,
                         )
+                    on_event(SectionEnd(f"denoising_step_{i}"))
+            on_event(SectionEnd("denoising"))
 
             logger.info("decoding image...")
 
-            with profiler("vae", profiler_iteration) if profiler else nullcontext():
+            on_event(SectionStart("vae"))
+            with nullcontext():
                 # Sync because we don't pass a persistent buffer or a barrier semaphore.
                 ttnn.synchronize_device(self.vae_device)
 
@@ -635,6 +616,8 @@ class QwenImagePipeline:
                 assert isinstance(image, torch.Tensor)
 
                 output = self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
+            on_event(SectionEnd("vae"))
+        on_event(SectionEnd("total"))
 
         return output
 
@@ -686,8 +669,7 @@ class QwenImagePipeline:
         prompt_sequence_length: int,
         cfg_enabled: bool,
         cfg_scale: float,
-        profiler: BenchmarkProfiler = None,
-        profiler_iteration: int = 0,
+        on_event: PipelineEventCallback = null_callback,
         traced: bool,
     ) -> list[ttnn.Tensor]:
         latents_out = []
@@ -728,21 +710,17 @@ class QwenImagePipeline:
     def _encode_prompts(
         self,
         *,
-        prompts: list[str],
-        negative_prompts: list[str | None],
+        prompts: Sequence[str],
+        negative_prompts: Sequence[str],
         num_images_per_prompt: int,
         cfg_enabled: bool,
-        profiler: BenchmarkProfiler = None,
-        profiler_iteration: int = 0,
+        on_event: PipelineEventCallback = null_callback,
         traced: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert len(prompts) == len(negative_prompts), "prompts and negative_prompts must have the same length"
 
-        # TODO: necessary?
-        negative_prompts = [x if x is not None else "" for x in negative_prompts]
-
         if cfg_enabled:
-            prompts = negative_prompts + prompts
+            prompts = [*negative_prompts, *prompts]
 
         prompts = [PROMPT_TEMPLATE.format(e) for e in prompts]
 

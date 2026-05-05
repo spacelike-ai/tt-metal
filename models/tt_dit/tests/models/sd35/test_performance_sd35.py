@@ -12,6 +12,7 @@ from models.common.utility_functions import is_blackhole
 from models.perf.benchmarking_utils import BenchmarkData, BenchmarkProfiler
 
 from ....parallel.config import DiTParallelConfig
+from ....pipelines.events import profiler_event_callback
 from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large import (
     StableDiffusion3Pipeline,
     StableDiffusion3PipelineConfig,
@@ -172,8 +173,7 @@ def test_sd35_new_pipeline_performance(
                     num_inference_steps=num_inference_steps,
                     seed=0,  # Different seed for each run
                     traced=True,
-                    profiler=benchmark_profiler,
-                    profiler_iteration=i,
+                    on_event=profiler_event_callback(benchmark_profiler, i),
                 )
             images[0].save(f"sd35_new_{image_w}_{image_h}_perf_run{i}.png")
 

@@ -5,27 +5,30 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 
 import torch
+import tqdm
 from diffusers.models import AutoencoderKLMochi
-from diffusers.pipelines.mochi.pipeline_output import MochiPipelineOutput
-from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.video_processor import VideoProcessor
 from loguru import logger
 from transformers import T5EncoderModel, T5TokenizerFast
 
 import ttnn
-from models.perf.benchmarking_utils import BenchmarkProfiler
 
 from ...models.transformers.transformer_mochi import MochiCheckpoint
 from ...models.vae.vae_mochi import MochiVAEDecoder
 from ...parallel.config import DiTParallelConfig, MochiVAEParallelConfig
 from ...parallel.manager import CCLManager
+from ...pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
+from ...pipelines.pipeline_api import PipelineAPIMixin
 from ...solvers import EulerSolver, schedules
 from ...utils import cache
 from ...utils.mesh import reshape_device
 from ...utils.tracing import Tracer
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 _DEFAULT_CHECKPOINT = "genmo/mochi-1-preview"
 
@@ -156,7 +159,7 @@ class MochiPipelineConfig:
         )
 
 
-class MochiPipeline(DiffusionPipeline):
+class MochiPipeline(PipelineAPIMixin):
     r"""
     The mochi pipeline for text-to-video generation.
 
@@ -209,15 +212,13 @@ class MochiPipeline(DiffusionPipeline):
         device: ttnn.MeshDevice,
         config: MochiPipelineConfig,
     ) -> None:
-        super().__init__()
-
         # TODO: determine these scaling factors from model parameters
         self.vae_spatial_scale_factor = 8
         self.vae_temporal_scale_factor = 6
         self.patch_size = 2
 
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_spatial_scale_factor)
-        self.register_to_config(force_zeros_for_empty_prompt=config.force_zeros_for_empty_prompt)
+        self._force_zeros_for_empty_prompt = config.force_zeros_for_empty_prompt
 
         self.mesh_device = device
         self.vae_mesh_shape = config.vae_mesh_shape
@@ -311,14 +312,6 @@ class MochiPipeline(DiffusionPipeline):
         # Update tokenizer max length
         self.tokenizer_max_length = self.tokenizer.model_max_length if self.tokenizer is not None else 256
 
-        # Register components for pipeline
-        self.register_modules(
-            text_encoder=self.text_encoder,
-            tokenizer=self.tokenizer,
-            transformer=self.transformer,
-            vae=self.vae,
-        )
-
         logger.info("Pipeline allocation run...")
         self(
             prompts=[""],
@@ -362,7 +355,7 @@ class MochiPipeline(DiffusionPipeline):
         # The original Mochi implementation zeros out empty negative prompts
         # but this can lead to overflow when placing the entire pipeline under the autocast context
         # adding this here so that we can enable zeroing prompts if necessary
-        if self.config.force_zeros_for_empty_prompt and (prompt == "" or prompt[-1] == ""):
+        if self._force_zeros_for_empty_prompt and (prompt == "" or prompt[-1] == ""):
             text_input_ids = torch.zeros_like(text_input_ids, device=device)
             prompt_attention_mask = torch.zeros_like(prompt_attention_mask, dtype=torch.bool, device=device)
 
@@ -580,8 +573,8 @@ class MochiPipeline(DiffusionPipeline):
     def __call__(
         self,
         *,
-        prompts: list[str],
-        negative_prompts: list[str] | None = None,
+        prompts: Sequence[str],
+        negative_prompts: Sequence[str] | None = None,
         num_inference_steps: int = 64,
         timesteps: List[int] = None,
         guidance_scale: float = 4.5,
@@ -593,7 +586,6 @@ class MochiPipeline(DiffusionPipeline):
         negative_prompt_embeds: Optional[torch.Tensor] = None,
         negative_prompt_attention_mask: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pil",
-        return_dict: bool = True,
         attention_kwargs: Optional[Dict[str, Any]] = None,
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
@@ -601,9 +593,9 @@ class MochiPipeline(DiffusionPipeline):
         traced: bool = False,
         vae_traced: bool | None = None,
         encoder_traced: bool | None = None,
-        profiler: BenchmarkProfiler = None,
-        profiler_iteration: int = 0,
+        on_event: PipelineEventCallback | None = None,
     ):
+        on_event = on_event if on_event is not None else null_callback
         negative_prompts = negative_prompts if negative_prompts is not None else [""] * len(prompts)
 
         vae_traced = vae_traced if vae_traced is not None else traced
@@ -641,8 +633,7 @@ class MochiPipeline(DiffusionPipeline):
 
         device = "cpu"
         # 3. Prepare text embeddings
-        if profiler:
-            profiler.start("encoder", profiler_iteration)
+        on_event(SectionStart("encoder"))
         (
             prompt_embeds,
             prompt_attention_mask,
@@ -661,8 +652,7 @@ class MochiPipeline(DiffusionPipeline):
             device=device,
             disable_attention_mask=traced,
         )
-        if profiler:
-            profiler.end("encoder", profiler_iteration)
+        on_event(SectionEnd("encoder"))
 
         print(f"prompt_embeds.shape: {prompt_embeds.shape}")
         print(f"prompt_attention_mask.shape: {prompt_attention_mask.shape}")
@@ -720,9 +710,8 @@ class MochiPipeline(DiffusionPipeline):
         self._num_timesteps = len(timesteps)
 
         # 6. Denoising loop
-        if profiler:
-            profiler.start("denoising", profiler_iteration)
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
+        on_event(SectionStart("denoising"))
+        with tqdm.tqdm(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
@@ -784,8 +773,7 @@ class MochiPipeline(DiffusionPipeline):
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
 
                 progress_bar.update()
-        if profiler:
-            profiler.end("denoising", profiler_iteration)
+        on_event(SectionEnd("denoising"))
 
         self._current_timestep = None
 
@@ -814,10 +802,8 @@ class MochiPipeline(DiffusionPipeline):
                 self._transformer_tracer.release_trace()
                 self._transformer_tracer = None
 
+            on_event(SectionStart("vae"))
             with reshape_device(self.mesh_device, self.vae_mesh_shape):
-                if profiler:
-                    profiler.start("vae", profiler_iteration)
-
                 if isinstance(self.vae, MochiVAEDecoder):
                     tt_latents = self.vae.prepare_input(latents)
                     vae_forward = self._vae_decoder_tracer if vae_traced else self.vae.forward
@@ -825,39 +811,11 @@ class MochiPipeline(DiffusionPipeline):
                     video = self.vae.postprocess_output(tt_output, latents.shape)
                 else:
                     video = self.vae.decode(latents, return_dict=False)[0]
-
-                if profiler:
-                    profiler.end("vae", profiler_iteration)
+            on_event(SectionEnd("vae"))
 
             video = self.video_processor.postprocess_video(video, output_type=output_type)
 
-        if not return_dict:
-            return (video,)
-
-        return MochiPipelineOutput(frames=video)
-
-    def run_single_prompt(
-        self,
-        *,
-        prompt: str,
-        negative_prompt: str = "",
-        num_inference_steps: int = 64,
-        guidance_scale: float = 4.5,
-        seed: int | None = None,
-        traced: bool = False,
-        profiler: BenchmarkProfiler | None = None,
-        profiler_iteration: int = 0,
-    ):
-        return self(
-            prompts=[prompt],
-            negative_prompts=[negative_prompt],
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            seed=seed,
-            traced=traced,
-            profiler=profiler,
-            profiler_iteration=profiler_iteration,
-        ).frames
+        return video
 
     def synchronize_devices(self):
         ttnn.synchronize_device(self.mesh_device)

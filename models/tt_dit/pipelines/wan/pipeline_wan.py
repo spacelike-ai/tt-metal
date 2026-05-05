@@ -10,27 +10,26 @@ import html
 import os
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import List, Optional, Union
+from typing import TYPE_CHECKING, List, Optional, Union
 
 import ftfy
 import regex as re
 import torch
-from diffusers.loaders import WanLoraLoaderMixin
+import tqdm
 from diffusers.models import AutoencoderKLWan
-from diffusers.pipelines.pipeline_utils import DiffusionPipeline
-from diffusers.pipelines.wan.pipeline_output import WanPipelineOutput
 from diffusers.video_processor import VideoProcessor
 from loguru import logger
 from transformers import AutoTokenizer, UMT5EncoderModel
 
 import ttnn
-from models.perf.benchmarking_utils import BenchmarkProfiler
 
 from ...encoders.umt5.model_umt5 import UMT5Config, UMT5Encoder
 from ...models.transformers.wan2_2.transformer_wan import WanCheckpoint, WanTransformer3DModel
 from ...models.vae.vae_wan2_1 import WanDecoder
 from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, VaeHWParallelConfig
 from ...parallel.manager import CCLManager
+from ...pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
+from ...pipelines.pipeline_api import PipelineAPIMixin
 from ...solvers import UniPCSolver, UniPCVariant, schedules
 from ...utils import cache, tensor
 from ...utils.conv3d import conv3d_blocking_hash
@@ -41,6 +40,9 @@ from ...utils.tensor import (
     float_to_unit_range,
     typed_tensor_2dshard,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 _UNSET = object()  # sentinel for "use config default" in WanPipelineConfig.default
 
@@ -271,12 +273,9 @@ class TransformerState:
     negative_prompt_buffer: object = field(default=None)
 
 
-class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
+class WanPipeline(PipelineAPIMixin):
     r"""
     Pipeline for text-to-video generation using Wan.
-
-    This model inherits from [`DiffusionPipeline`]. Check the superclass documentation for the generic methods
-    implemented for all pipelines (downloading, saving, running on a particular device, etc.).
 
     Args:
         mesh_device (`ttnn.MeshDevice`):
@@ -344,8 +343,6 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         device: ttnn.MeshDevice,
         config: WanPipelineConfig,
     ) -> None:
-        super().__init__()
-
         self.checkpoint_name = config.checkpoint_name
         self.model_type = config.model_type
         self.vae_t_chunk_size = config.vae_t_chunk_size
@@ -470,8 +467,8 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         self._prepare_text_encoder()
         self._prepare_vae()
 
-        self.register_to_config(boundary_ratio=config.boundary_ratio)
-        self.register_to_config(expand_timesteps=config.expand_timesteps)
+        self._boundary_ratio = config.boundary_ratio
+        self._expand_timesteps = config.expand_timesteps
         self.vae_scale_factor_temporal = self.vae.config.scale_factor_temporal if getattr(self, "vae", None) else 4
         self.vae_scale_factor_spatial = self.vae.config.scale_factor_spatial if getattr(self, "vae", None) else 8
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
@@ -713,7 +710,7 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         ):
             raise ValueError(f"`negative_prompt` has to be of type `str` or `list` but is {type(negative_prompt)}")
 
-        if self.config.boundary_ratio is None and guidance_scale_2 is not None:
+        if self._boundary_ratio is None and guidance_scale_2 is not None:
             raise ValueError("`guidance_scale_2` is only supported when the pipeline's `boundary_ratio` is not None.")
 
     def get_model_input(self, latents, cond_latents):
@@ -763,8 +760,8 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
     def __call__(
         self,
         *,
-        prompts: list[str],
-        negative_prompts: list[str] | None = None,
+        prompts: Sequence[str],
+        negative_prompts: Sequence[str] | None = None,
         image_prompt=None,
         num_inference_steps: int = 40,
         guidance_scale: float = 4.0,
@@ -775,12 +772,11 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         prompt_embeds: Optional[torch.Tensor] = None,
         negative_prompt_embeds: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "np",
-        return_dict: bool = True,
         max_sequence_length: int = 512,
         traced: bool = False,
-        profiler: BenchmarkProfiler = None,
-        profiler_iteration: int = 0,
+        on_event: PipelineEventCallback | None = None,
     ):
+        on_event = on_event if on_event is not None else null_callback
         r"""
         The call function to the pipeline for generation.
 
@@ -822,8 +818,6 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                 provided, text embeddings are generated from the `prompt` input argument.
             output_type (`str`, *optional*, defaults to `"np"`):
                 The output format of the generated image. Choose between `PIL.Image` or `np.array`.
-            return_dict (`bool`, *optional*, defaults to `True`):
-                Whether or not to return a [`WanPipelineOutput`] instead of a plain tuple.
             max_sequence_length (`int`, defaults to `512`):
                 The maximum sequence length of the text encoder. If the prompt is longer than this, it will be
                 truncated. If the prompt is shorter, it will be padded to this length.
@@ -831,10 +825,7 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         Examples:
 
         Returns:
-            [`~WanPipelineOutput`] or `tuple`:
-                If `return_dict` is `True`, [`WanPipelineOutput`] is returned, otherwise a `tuple` is returned where
-                the first element is a list with the generated images and the second element is a list of `bool`s
-                indicating whether the corresponding generated image contains "not-safe-for-work" (nsfw) content.
+            The generated video frames.
         """
 
         negative_prompts = (
@@ -869,7 +860,7 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
             num_frames = num_frames // self.vae_scale_factor_temporal * self.vae_scale_factor_temporal + 1
         num_frames = max(num_frames, 1)
 
-        if self.config.boundary_ratio is not None and guidance_scale_2 is None:
+        if self._boundary_ratio is not None and guidance_scale_2 is None:
             guidance_scale_2 = guidance_scale
 
         self.transformer_states[0].guidance_scale = guidance_scale
@@ -885,7 +876,8 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
             batch_size = prompt_embeds.shape[0]
 
         # 3. Encode input prompt
-        with profiler("encoder", profiler_iteration) if profiler else nullcontext():
+        on_event(SectionStart("encoder"))
+        with nullcontext():
             self._prepare_text_encoder()
             prompt_embeds, negative_prompt_embeds = self.encode_prompt(
                 prompt=prompts,
@@ -896,6 +888,7 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                 negative_prompt_embeds=negative_prompt_embeds,
                 max_sequence_length=max_sequence_length,
             )
+        on_event(SectionEnd("encoder"))
 
         # 4. Prepare schedule
         (sigmas, alphas) = schedules.shifted_linear(
@@ -914,7 +907,8 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         if seed is not None:
             torch.manual_seed(seed)
 
-        with profiler("prepare_latents", profiler_iteration) if profiler else nullcontext():
+        on_event(SectionStart("prepare_latents"))
+        with nullcontext():
             latents, cond_latents = self.prepare_latents(
                 batch_size=batch_size * num_videos_per_prompt,
                 image_prompt=image_prompt,
@@ -926,19 +920,19 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                 device=device,
                 latents=latents,
             )
+        on_event(SectionEnd("prepare_latents"))
 
         mask = torch.ones(latents.shape, dtype=torch.float32, device=device)
 
         # 6. Denoising loop
         self._num_timesteps = len(timesteps)
 
-        if self.config.boundary_ratio is not None:
-            boundary_timestep = self.config.boundary_ratio * 1000
+        if self._boundary_ratio is not None:
+            boundary_timestep = self._boundary_ratio * 1000
         else:
             boundary_timestep = -1  # Always use transformer (no transformer_2)
 
-        if profiler:
-            profiler.start("denoising", profiler_iteration)
+        on_event(SectionStart("denoising"))
 
         permuted_latent_tt = None
         rope_args = None
@@ -946,7 +940,7 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         latent_frames, latent_height, latent_width = latents.shape[2], latents.shape[3], latents.shape[4]
         prepared_prompts = [False, False]
 
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
+        with tqdm.tqdm(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 warmup_t2 = i == 1 and len(timesteps) == 2  # Ensure transformer_2 is also warmed up
 
@@ -984,7 +978,7 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                         dtype=ttnn.float32,
                     )
 
-                if self.config.expand_timesteps:
+                if self._expand_timesteps:
                     # seq_len: num_latent_frames * latent_height//2 * latent_width//2
                     temp_ts = (mask[0][0][:, ::2, ::2] * t).flatten()
                     # batch_size, seq_len
@@ -1034,9 +1028,8 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
             permuted_latent, F=latent_frames, H=latent_height, W=latent_width, N=patchified_seqlen
         )
 
-        if profiler:
-            profiler.end("denoising", profiler_iteration)
-            profiler.start("vae", profiler_iteration)
+        on_event(SectionEnd("denoising"))
+        on_event(SectionStart("vae"))
 
         if not output_type == "latent":
             latents = latents.to(self.vae.dtype)
@@ -1094,38 +1087,9 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         else:
             video = latents
 
-        if profiler:
-            profiler.end("vae", profiler_iteration)
+        on_event(SectionEnd("vae"))
 
-        if not return_dict:
-            return (video,)
-
-        return WanPipelineOutput(frames=video)
-
-    def run_single_prompt(
-        self,
-        *,
-        prompt: str,
-        negative_prompt: str | None = None,
-        num_inference_steps: int = 40,
-        guidance_scale: float = 4.0,
-        guidance_scale_2: float | None = 3.0,
-        seed: int | None = None,
-        traced: bool = False,
-        profiler: BenchmarkProfiler | None = None,
-        profiler_iteration: int = 0,
-    ):
-        return self(
-            prompts=[prompt],
-            negative_prompts=[negative_prompt] if negative_prompt is not None else None,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            guidance_scale_2=guidance_scale_2,
-            seed=seed,
-            traced=traced,
-            profiler=profiler,
-            profiler_iteration=profiler_iteration,
-        ).frames
+        return video
 
     def synchronize_devices(self):
         ttnn.synchronize_device(self.mesh_device)

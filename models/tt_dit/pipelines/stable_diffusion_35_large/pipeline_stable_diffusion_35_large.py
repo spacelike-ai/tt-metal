@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import List
+from typing import TYPE_CHECKING, List
 
 import torch
 import tqdm
@@ -17,7 +17,6 @@ from PIL import Image
 from transformers import CLIPTextModelWithProjection, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
 
 import ttnn
-from models.perf.benchmarking_utils import BenchmarkProfiler
 
 from models.tt_dit.encoders.clip.model_clip import CLIPConfig, CLIPEncoder
 from models.tt_dit.encoders.t5.model_t5 import T5Config, T5Encoder
@@ -28,10 +27,15 @@ from models.tt_dit.models.vae.vae_sd35 import VAEDecoder
 from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
+from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
+from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
 from models.tt_dit.solvers import EulerSolver, schedules
 from models.tt_dit.utils import tensor
 from models.tt_dit.utils.mesh import reshape_device
 from models.tt_dit.utils.tracing import Tracer
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 TILE_SIZE = 32
 
@@ -111,7 +115,7 @@ class StableDiffusion3PipelineConfig:
         )
 
 
-class StableDiffusion3Pipeline:
+class StableDiffusion3Pipeline(PipelineAPIMixin):
     @classmethod
     def create_pipeline(
         cls,
@@ -323,39 +327,15 @@ class StableDiffusion3Pipeline:
             traced=False,
         )
 
-    def run_single_prompt(
-        self,
-        prompt,
-        negative_prompt="",
-        num_inference_steps=40,
-        seed=None,
-        traced=True,
-        vae_traced: bool | None = None,
-        encoder_traced: bool | None = None,
-        profiler: BenchmarkProfiler = None,
-        profiler_iteration: int = 0,
-    ):
-        return self.__call__(
-            prompts=[prompt],
-            negative_prompts=[negative_prompt],
-            num_inference_steps=num_inference_steps,
-            seed=seed,
-            traced=traced,
-            vae_traced=vae_traced,
-            encoder_traced=encoder_traced,
-            profiler=profiler,
-            profiler_iteration=profiler_iteration,
-        )
-
     def __call__(
         self,
         *,
-        prompts: list[str],
-        prompts_2: list[str] | None = None,
-        prompts_3: list[str] | None = None,
-        negative_prompts: list[str] | None = None,
-        negative_prompts_2: list[str] | None = None,
-        negative_prompts_3: list[str] | None = None,
+        prompts: Sequence[str],
+        prompts_2: Sequence[str] | None = None,
+        prompts_3: Sequence[str] | None = None,
+        negative_prompts: Sequence[str] | None = None,
+        negative_prompts_2: Sequence[str] | None = None,
+        negative_prompts_3: Sequence[str] | None = None,
         num_inference_steps: int = 40,
         seed: int | None = None,
         num_images_per_prompt: int = 1,
@@ -365,9 +345,9 @@ class StableDiffusion3Pipeline:
         vae_traced: bool | None = None,
         encoder_traced: bool | None = None,
         clip_skip: int | None = None,
-        profiler: BenchmarkProfiler = None,
-        profiler_iteration: int = 0,
+        on_event: PipelineEventCallback | None = None,
     ) -> List[Image.Image]:
+        on_event = on_event if on_event is not None else null_callback
         prompts_2 = prompts_2 if prompts_2 is not None else prompts
         prompts_3 = prompts_3 if prompts_3 is not None else prompts
         negative_prompts = negative_prompts if negative_prompts is not None else [""] * len(prompts)
@@ -379,7 +359,8 @@ class StableDiffusion3Pipeline:
         if guidance_scale > 1 and not self._cfg_enabled:
             msg = "guidance_scale > 1 requires CFG to be enabled"
             raise ValueError(msg)
-        with profiler("total", profiler_iteration) if profiler else nullcontext():
+        on_event(SectionStart("total"))
+        with nullcontext():
             batch_size = len(prompts)
             width = self._width
             height = self._height
@@ -402,7 +383,8 @@ class StableDiffusion3Pipeline:
 
             logger.info("encoding prompts...")
 
-            with profiler("encoder", profiler_iteration) if profiler else nullcontext():
+            on_event(SectionStart("encoder"))
+            with nullcontext():
                 with reshape_device(self.encoder_device, self.encoder_mesh_shape):
                     prompt_embeds, pooled_prompt_embeds = self._encode_prompts(
                         prompts=prompts,
@@ -416,9 +398,9 @@ class StableDiffusion3Pipeline:
                         do_classifier_free_guidance=do_classifier_free_guidance,
                         clip_skip=clip_skip,
                         traced=encoder_traced,
-                        profiler=profiler,
-                        profiler_iteration=profiler_iteration,
+                        on_event=on_event,
                     )
+            on_event(SectionEnd("encoder"))
 
             logger.info("preparing timesteps...")
 
@@ -454,9 +436,11 @@ class StableDiffusion3Pipeline:
 
             logger.info("denoising...")
 
-            with profiler("denoising", profiler_iteration) if profiler else nullcontext():
+            on_event(SectionStart("denoising"))
+            with nullcontext():
                 for i, t in enumerate(tqdm.tqdm(timesteps)):
-                    with profiler(f"denoising_step_{i}", profiler_iteration) if profiler else nullcontext():
+                    on_event(SectionStart(f"denoising_step_{i}"))
+                    with nullcontext():
                         tt_timestep_list = []
                         for submesh_device in self.submesh_devices:
                             # Allocation on device is fine, because timesteps are not used after
@@ -484,10 +468,13 @@ class StableDiffusion3Pipeline:
                             spatial_sequence_length=4096,
                             traced=traced,
                         )
+                    on_event(SectionEnd(f"denoising_step_{i}"))
+            on_event(SectionEnd("denoising"))
 
             logger.info("decoding image...")
 
-            with profiler("vae", profiler_iteration) if profiler else nullcontext():
+            on_event(SectionStart("vae"))
+            with nullcontext():
                 decoded_output = self._vae_decode(
                     tt_latents_step_list[self.vae_submesh_idx], width, height, traced=vae_traced
                 )
@@ -498,12 +485,8 @@ class StableDiffusion3Pipeline:
                 assert isinstance(image, torch.Tensor)
 
                 output = self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
-
-        if profiler:
-            logger.info(f"prompt encoding duration: {profiler.get_duration('encoder', profiler_iteration)}")
-            logger.info(f"denoising duration: {profiler.get_duration('denoising', profiler_iteration)}")
-            logger.info(f"image decoding duration: {profiler.get_duration('vae', profiler_iteration)}")
-            logger.info(f"total runtime: {profiler.get_duration('total', profiler_iteration)}")
+            on_event(SectionEnd("vae"))
+        on_event(SectionEnd("total"))
 
         return output
 
@@ -616,23 +599,23 @@ class StableDiffusion3Pipeline:
     def _encode_prompts(
         self,
         *,
-        prompts: list[str],
-        prompts_2: list[str],
-        prompts_3: list[str],
-        negative_prompts: list[str],
-        negative_prompts_2: list[str],
-        negative_prompts_3: list[str],
+        prompts: Sequence[str],
+        prompts_2: Sequence[str],
+        prompts_3: Sequence[str],
+        negative_prompts: Sequence[str],
+        negative_prompts_2: Sequence[str],
+        negative_prompts_3: Sequence[str],
         num_images_per_prompt: int,
         max_t5_sequence_length: int,
         do_classifier_free_guidance: bool,
         clip_skip: int | None = None,
         traced: bool = False,
-        profiler: BenchmarkProfiler = None,
-        profiler_iteration: int = 0,
+        on_event: PipelineEventCallback = null_callback,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         tokenizer_max_length = self._tokenizer_1.model_max_length
 
-        with profiler("clip_encoding", profiler_iteration) if profiler else nullcontext():
+        on_event(SectionStart("clip_encoding"))
+        with nullcontext():
             prompt_embed, pooled_prompt_embed = _get_clip_prompt_embeds(
                 prompt=prompts,
                 num_images_per_prompt=num_images_per_prompt,
@@ -657,8 +640,10 @@ class StableDiffusion3Pipeline:
                 clip_skip=clip_skip,
             )
             clip_prompt_embeds = torch.cat([prompt_embed, prompt_2_embed], dim=-1)
+        on_event(SectionEnd("clip_encoding"))
 
-        with profiler("t5_encoding", profiler_iteration) if profiler else nullcontext():
+        on_event(SectionStart("t5_encoding"))
+        with nullcontext():
             t5_prompt_embed = _get_t5_prompt_embeds(
                 device=self.encoder_device,
                 encoder_parallel_config=self.encoder_parallel_config,
@@ -671,6 +656,7 @@ class StableDiffusion3Pipeline:
                 tokenizer_max_length=tokenizer_max_length,
                 joint_attention_dim=self._joint_attention_dim,
             )
+        on_event(SectionEnd("t5_encoding"))
 
         clip_prompt_embeds = torch.nn.functional.pad(
             clip_prompt_embeds,
@@ -683,7 +669,8 @@ class StableDiffusion3Pipeline:
         if not do_classifier_free_guidance:
             return prompt_embeds, pooled_prompt_embeds
 
-        with profiler("clip_encoding", profiler_iteration) if profiler else nullcontext():
+        on_event(SectionStart("clip_encoding"))
+        with nullcontext():
             negative_prompt_embed, negative_pooled_prompt_embed = _get_clip_prompt_embeds(
                 prompt=negative_prompts,
                 num_images_per_prompt=num_images_per_prompt,
@@ -707,8 +694,10 @@ class StableDiffusion3Pipeline:
                 clip_skip=clip_skip,
             )
             negative_clip_prompt_embeds = torch.cat([negative_prompt_embed, negative_prompt_2_embed], dim=-1)
+        on_event(SectionEnd("clip_encoding"))
 
-        with profiler("t5_encoding", profiler_iteration) if profiler else nullcontext():
+        on_event(SectionStart("t5_encoding"))
+        with nullcontext():
             t5_negative_prompt_embed = _get_t5_prompt_embeds(
                 device=self.encoder_device,
                 encoder_parallel_config=self.encoder_parallel_config,
@@ -721,6 +710,7 @@ class StableDiffusion3Pipeline:
                 tokenizer_max_length=tokenizer_max_length,
                 joint_attention_dim=self._joint_attention_dim,
             )
+        on_event(SectionEnd("t5_encoding"))
 
         negative_clip_prompt_embeds = torch.nn.functional.pad(
             negative_clip_prompt_embeds,
@@ -752,7 +742,7 @@ def _get_clip_prompt_embeds(
     ttnn_device: ttnn.Device | None = None,
     encoder_parallel_config: EncoderParallelConfig | None = None,
     num_images_per_prompt: int,
-    prompt: list[str],
+    prompt: Sequence[str],
     text_encoder: CLIPEncoder,
     tracer: Tracer | None = None,
     tokenizer_max_length: int,
@@ -819,7 +809,7 @@ def _get_clip_prompt_embeds(
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/stable_diffusion_3/pipeline_stable_diffusion_3.py
 def _get_t5_prompt_embeds(
-    prompt: list[str],
+    prompt: Sequence[str],
     *,
     torch_device: torch.device | None = None,
     device: ttnn.Device,

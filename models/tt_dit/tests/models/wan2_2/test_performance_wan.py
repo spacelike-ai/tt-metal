@@ -13,6 +13,7 @@ from PIL import Image
 import ttnn
 from models.common.utility_functions import is_blackhole
 from models.perf.benchmarking_utils import BenchmarkData, BenchmarkProfiler
+from models.tt_dit.pipelines.events import profiler_event_callback
 from models.tt_dit.pipelines.wan.pipeline_wan import WanPipeline
 from models.tt_dit.pipelines.wan.pipeline_wan_i2v import WanPipelineI2V
 from models.tt_dit.utils.video import export_to_video
@@ -279,12 +280,11 @@ def test_pipeline_performance(
         prompt_idx = (i + 1) % len(prompts)
         with benchmark_profiler("run", iteration=i):
             with torch.no_grad():
-                result = pipeline(
+                frames = pipeline(
                     prompts=[prompts[prompt_idx]],
                     image_prompt=image_prompt,
                     num_inference_steps=num_inference_steps,
-                    profiler=benchmark_profiler,
-                    profiler_iteration=i,
+                    on_event=profiler_event_callback(benchmark_profiler, i),
                     seed=42,
                     traced=traced,
                     output_type="uint8",
@@ -294,11 +294,6 @@ def test_pipeline_performance(
         # Check output
 
     pipeline.release_traces()
-
-    if hasattr(result, "frames"):
-        frames = result.frames
-    else:
-        frames = result[0] if isinstance(result, tuple) else result
 
     print(f"✓ Inference completed successfully")
     print(f"  Output shape: {frames.shape if hasattr(frames, 'shape') else 'Unknown'}")

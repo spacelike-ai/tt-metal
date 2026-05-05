@@ -12,6 +12,7 @@ import ttnn
 from models.perf.benchmarking_utils import BenchmarkProfiler
 
 from ....parallel.config import DiTParallelConfig
+from ....pipelines.events import profiler_event_callback
 from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large import (
     StableDiffusion3Pipeline,
     StableDiffusion3PipelineConfig,
@@ -109,8 +110,7 @@ def test_sd35_pipeline(
                 traced=traced,
                 vae_traced=False,
                 encoder_traced=False,
-                profiler=benchmark_profiler,
-                profiler_iteration=0,
+                on_event=profiler_event_callback(benchmark_profiler, 0),
             )
 
         # Save image

@@ -11,6 +11,7 @@ import ttnn
 from models.common.utility_functions import is_blackhole
 from models.perf.benchmarking_utils import BenchmarkData, BenchmarkProfiler
 
+from ....pipelines.events import profiler_event_callback
 from ....pipelines.mochi.pipeline_mochi import MochiPipeline as TTMochiPipeline
 
 
@@ -122,7 +123,7 @@ def test_mochi_pipeline_performance(
             num_inference_steps=2,  # Small number of steps to reduce test time.
             guidance_scale=guidance_scale,
             seed=0,  # Make deterministic
-        ).frames[0]
+        )[0]
 
     logger.info(f"Warmup completed in {benchmark_profiler.get_duration('run', 0):.2f}s")
 
@@ -172,9 +173,8 @@ def test_mochi_pipeline_performance(
                     num_inference_steps=num_inference_steps,
                     guidance_scale=guidance_scale,
                     seed=0,  # Make deterministic
-                    profiler=benchmark_profiler,
-                    profiler_iteration=i,
-                ).frames[0]
+                    on_event=profiler_event_callback(benchmark_profiler, i),
+                )[0]
 
             logger.info(f"  Run {i+1} completed in {benchmark_profiler.get_duration('run', i):.2f}s")
 

@@ -12,6 +12,7 @@ from models.common.utility_functions import is_blackhole
 from models.perf.benchmarking_utils import BenchmarkData, BenchmarkProfiler
 
 from ....parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
+from ....pipelines.events import profiler_event_callback
 from ....pipelines.flux1.pipeline_flux1 import Flux1Pipeline, Flux1PipelineConfig
 
 
@@ -118,7 +119,6 @@ def test_flux1_pipeline_performance(
             prompt=prompts[0],
             num_inference_steps=num_inference_steps,
             seed=0,
-            traced=True,
         )
     images[0].save(f"flux1_dev_{image_w}_{image_h}_warmup.png")
 
@@ -150,9 +150,7 @@ def test_flux1_pipeline_performance(
                     prompt=prompts[prompt_idx],
                     num_inference_steps=num_inference_steps,
                     seed=0,
-                    traced=True,
-                    profiler=benchmark_profiler,
-                    profiler_iteration=i,
+                    on_event=profiler_event_callback(benchmark_profiler, i),
                 )
             images[0].save(f"flux1_dev_{image_w}_{image_h}_perf_run{i}.png")
 

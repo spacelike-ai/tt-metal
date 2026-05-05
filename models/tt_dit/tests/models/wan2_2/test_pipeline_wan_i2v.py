@@ -112,7 +112,7 @@ def test_pipeline_inference(
         logger.info(f"Parameters: {height}x{width}, {num_frames} frames, {num_inference_steps} steps")
 
         with torch.no_grad():
-            result = pipeline(
+            frames = pipeline(
                 prompts=[prompt],
                 negative_prompts=[negative_prompt],
                 image_prompt=image_prompt,
@@ -122,11 +122,6 @@ def test_pipeline_inference(
                 guidance_scale_2=guidance_scale_2,
                 output_type="uint8",
             )
-
-        if hasattr(result, "frames"):
-            frames = result.frames
-        else:
-            frames = result[0] if isinstance(result, tuple) else result
 
         logger.info(f"Inference completed successfully")
         logger.info(f"  Output shape: {frames.shape if hasattr(frames, 'shape') else 'Unknown'}")

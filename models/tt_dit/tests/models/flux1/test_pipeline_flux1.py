@@ -12,6 +12,7 @@ import ttnn
 from models.perf.benchmarking_utils import BenchmarkProfiler
 
 from ....parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
+from ....pipelines.events import profiler_event_callback
 from ....pipelines.flux1.pipeline_flux1 import Flux1Pipeline, Flux1PipelineConfig
 
 
@@ -151,15 +152,14 @@ def test_flux1_pipeline(
     def run(*, prompt: str, number: int, seed: int) -> None:
         benchmark_profiler = BenchmarkProfiler()
         with benchmark_profiler("run", iteration=0):
-            images = pipeline.run_single_prompt(
-                prompt=prompt,
+            images = pipeline(
+                prompts=[prompt],
                 num_inference_steps=num_inference_steps,
                 seed=seed,
                 traced=traced,
                 vae_traced=False,
                 encoder_traced=False,
-                profiler=benchmark_profiler,
-                profiler_iteration=0,
+                on_event=profiler_event_callback(benchmark_profiler, 0),
             )
 
         output_filename = f"{filename_prefix}_{number}.png"

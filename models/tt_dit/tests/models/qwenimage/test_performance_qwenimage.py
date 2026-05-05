@@ -12,6 +12,7 @@ from models.common.utility_functions import is_blackhole
 from models.perf.benchmarking_utils import BenchmarkData, BenchmarkProfiler
 
 from ....parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
+from ....pipelines.events import profiler_event_callback
 from ....pipelines.qwenimage.pipeline_qwenimage import QwenImagePipeline, QwenImagePipelineConfig
 
 
@@ -95,7 +96,6 @@ def test_qwenimage_pipeline_performance(
     with benchmark_profiler("run", iteration=0):
         images = pipeline(
             prompts=[prompts[0]],
-            negative_prompts=[None],
             num_inference_steps=num_inference_steps,
             cfg_scale=4.0,
             seed=0,
@@ -129,13 +129,11 @@ def test_qwenimage_pipeline_performance(
             with benchmark_profiler("run", iteration=i):
                 images = pipeline(
                     prompts=[prompts[prompt_idx]],
-                    negative_prompts=[None],
                     num_inference_steps=num_inference_steps,
                     cfg_scale=4.0,
                     seed=0,
                     traced=True,
-                    profiler=benchmark_profiler,
-                    profiler_iteration=i,
+                    on_event=profiler_event_callback(benchmark_profiler, i),
                 )
 
             logger.info(f"  Run {i+1} completed in {benchmark_profiler.get_duration('run', i):.2f}s")

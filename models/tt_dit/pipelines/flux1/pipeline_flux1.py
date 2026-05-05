@@ -8,6 +8,7 @@ import math
 import os
 from contextlib import nullcontext
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 import tqdm
@@ -18,7 +19,6 @@ from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5Tokeniz
 
 import ttnn
 from models.common.utility_functions import is_blackhole
-from models.perf.benchmarking_utils import BenchmarkProfiler
 from models.tt_dit.encoders.clip.model_clip import CLIPConfig, CLIPEncoder
 from models.tt_dit.encoders.t5.model_t5 import T5Config, T5Encoder
 from models.tt_dit.models.transformers.transformer_flux1 import Flux1Checkpoint
@@ -26,9 +26,14 @@ from models.tt_dit.models.vae.vae_sd35 import VAEDecoder
 from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
+from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
+from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
 from models.tt_dit.solvers import EulerSolver, schedules
 from models.tt_dit.utils import cache, tensor
 from models.tt_dit.utils.tracing import Tracer
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 _PRESETS_WH: dict[tuple[int, ...], dict] = {
     (1, 4): {"sp": (1, 0), "tp": (4, 1), "encoder_tp": (4, 1), "vae_tp": (4, 1), "num_links": 1},
@@ -109,7 +114,7 @@ class Flux1PipelineConfig:
         )
 
 
-class Flux1Pipeline:
+class Flux1Pipeline(PipelineAPIMixin):
     T5_SEQUENCE_LENGTH = 512
 
     @classmethod
@@ -289,50 +294,25 @@ class Flux1Pipeline:
             traced=False,
         )
 
-    def run_single_prompt(
-        self,
-        *,
-        prompt: str,
-        negative_prompt: str = "",
-        num_inference_steps: int,
-        seed: int,
-        traced: bool = True,
-        vae_traced: bool | None = None,
-        encoder_traced: bool | None = None,
-        profiler: BenchmarkProfiler = None,
-        profiler_iteration: int = 0,
-    ):
-        return self(
-            prompts=[prompt],
-            negative_prompts=[negative_prompt],
-            num_inference_steps=num_inference_steps,
-            seed=seed,
-            traced=traced,
-            vae_traced=vae_traced,
-            encoder_traced=encoder_traced,
-            profiler=profiler,
-            profiler_iteration=profiler_iteration,
-        )
-
     def __call__(
         self,
         *,
         num_images_per_prompt: int = 1,
         cfg_scale: float = 1,  # Flux.1 is not indented to be used with CFG
         guidance_scale: float = 3.5,
-        prompts: list[str],
-        prompts_2: list[str] | None = None,
-        negative_prompts: list[str] | None = None,
-        negative_prompts_2: list[str] | None = None,
+        prompts: Sequence[str],
+        prompts_2: Sequence[str] | None = None,
+        negative_prompts: Sequence[str] | None = None,
+        negative_prompts_2: Sequence[str] | None = None,
         num_inference_steps: int,
         seed: int | None = None,
         traced: bool = False,
         vae_traced: bool | None = None,
         encoder_traced: bool | None = None,
         clip_skip: int = 0,
-        profiler: BenchmarkProfiler = None,
-        profiler_iteration: int = 0,
+        on_event: PipelineEventCallback | None = None,
     ) -> list[Image.Image]:
+        on_event = on_event if on_event is not None else null_callback
         prompts_2 = prompts_2 if prompts_2 is not None else prompts
         negative_prompts = negative_prompts if negative_prompts is not None else [""] * len(prompts)
         negative_prompts_2 = negative_prompts_2 if negative_prompts_2 is not None else negative_prompts
@@ -352,7 +332,8 @@ class Flux1Pipeline:
             msg = "cfg_scale > 1 requires CFG to be enabled"
             raise ValueError(msg)
 
-        with profiler("total", profiler_iteration) if profiler else nullcontext():
+        on_event(SectionStart("total"))
+        with nullcontext():
             assert height % (self._vae_scale_factor * self._patch_size) == 0
             assert width % (self._vae_scale_factor * self._patch_size) == 0
 
@@ -365,7 +346,8 @@ class Flux1Pipeline:
 
             logger.info("encoding prompts...")
 
-            with profiler("encoder", profiler_iteration) if profiler else nullcontext():
+            on_event(SectionStart("encoder"))
+            with nullcontext():
                 prompt_embeds, pooled_prompt_embeds = self._encode_prompts(
                     prompts=prompts,
                     prompts_2=prompts_2,
@@ -375,10 +357,10 @@ class Flux1Pipeline:
                     cfg_enabled=cfg_enabled,
                     clip_skip=clip_skip,
                     traced=encoder_traced,
-                    profiler=profiler,
-                    profiler_iteration=profiler_iteration,
+                    on_event=on_event,
                 )
                 _, prompt_sequence_length, _ = prompt_embeds.shape
+            on_event(SectionEnd("encoder"))
 
             logger.info("preparing timesteps...")
 
@@ -459,9 +441,11 @@ class Flux1Pipeline:
 
             logger.info("denoising...")
 
-            with profiler("denoising", profiler_iteration) if profiler else nullcontext():
+            on_event(SectionStart("denoising"))
+            with nullcontext():
                 for i, t in enumerate(tqdm.tqdm(timesteps)):
-                    with profiler(f"denoising_step_{i}", profiler_iteration) if profiler else nullcontext():
+                    on_event(SectionStart(f"denoising_step_{i}"))
+                    with nullcontext():
                         tt_timestep_list = []
                         for submesh_device in self._submesh_devices:
                             # Allocation on device is fine, because timesteps are not used after
@@ -494,10 +478,13 @@ class Flux1Pipeline:
                             prompt_sequence_length=prompt_sequence_length,
                             traced=traced,
                         )
+                    on_event(SectionEnd(f"denoising_step_{i}"))
+            on_event(SectionEnd("denoising"))
 
             logger.info("decoding image...")
 
-            with profiler("vae", profiler_iteration) if profiler else nullcontext():
+            on_event(SectionStart("vae"))
+            with nullcontext():
                 # Sync because we don't pass a persistent buffer or a barrier semaphore.
                 ttnn.synchronize_device(self.vae_device)
 
@@ -527,6 +514,8 @@ class Flux1Pipeline:
                 assert isinstance(image, torch.Tensor)
 
                 output = self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
+            on_event(SectionEnd("vae"))
+        on_event(SectionEnd("total"))
 
         return output
 
@@ -631,17 +620,17 @@ class Flux1Pipeline:
 
     def _encode_prompts_partial(
         self,
-        prompts: list[str],
-        prompts_2: list[str],
+        prompts: Sequence[str],
+        prompts_2: Sequence[str],
         num_images_per_prompt: int,
         clip_skip: int = 0,
         traced: bool = False,
-        profiler: BenchmarkProfiler = None,
-        profiler_iteration: int = 0,
+        on_event: PipelineEventCallback = null_callback,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         tokenizer_max_length = self._tokenizer_1.model_max_length
 
-        with profiler("clip_encoding", profiler_iteration) if profiler else nullcontext():
+        on_event(SectionStart("clip_encoding"))
+        with nullcontext():
             prompt_1_embeds, pooled_prompt_1_embeds = _get_clip_prompt_embeds(
                 prompts=prompts,
                 num_images_per_prompt=num_images_per_prompt,
@@ -652,8 +641,10 @@ class Flux1Pipeline:
                 mesh_device=self.encoder_device,
                 clip_skip=clip_skip,
             )
+        on_event(SectionEnd("clip_encoding"))
 
-        with profiler("t5_encoding", profiler_iteration) if profiler else nullcontext():
+        on_event(SectionStart("t5_encoding"))
+        with nullcontext():
             t5_prompt_embeds = _get_t5_prompt_embeds(
                 prompts=prompts_2,
                 text_encoder=self._t5_text_encoder,
@@ -665,6 +656,7 @@ class Flux1Pipeline:
                 mesh_device=self.encoder_device,
                 embedding_dim=self._joint_attention_dim,
             )
+        on_event(SectionEnd("t5_encoding"))
 
         prompt_embeds = t5_prompt_embeds
         pooled_prompt_embeds = pooled_prompt_1_embeds
@@ -674,16 +666,15 @@ class Flux1Pipeline:
     def _encode_prompts(
         self,
         *,
-        prompts: list[str],
-        prompts_2: list[str],
-        negative_prompts: list[str] | None,
-        negative_prompts_2: list[str] | None,
+        prompts: Sequence[str],
+        prompts_2: Sequence[str],
+        negative_prompts: Sequence[str] | None,
+        negative_prompts_2: Sequence[str] | None,
         num_images_per_prompt: int,
         cfg_enabled: bool,
         clip_skip: int = 0,
         traced: bool = False,
-        profiler: BenchmarkProfiler = None,
-        profiler_iteration: int = 0,
+        on_event: PipelineEventCallback = null_callback,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         prompt_embeds, pooled_prompt_embeds = self._encode_prompts_partial(
             prompts=prompts,
@@ -691,8 +682,7 @@ class Flux1Pipeline:
             num_images_per_prompt=num_images_per_prompt,
             clip_skip=clip_skip,
             traced=traced,
-            profiler=profiler,
-            profiler_iteration=profiler_iteration,
+            on_event=on_event,
         )
 
         if not cfg_enabled:
@@ -704,8 +694,7 @@ class Flux1Pipeline:
             num_images_per_prompt=num_images_per_prompt,
             clip_skip=clip_skip,
             traced=traced,
-            profiler=profiler,
-            profiler_iteration=profiler_iteration,
+            on_event=on_event,
         )
 
         prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
@@ -717,7 +706,7 @@ class Flux1Pipeline:
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/stable_diffusion_3/pipeline_stable_diffusion_3.py
 def _get_clip_prompt_embeds(
     *,
-    prompts: list[str],
+    prompts: Sequence[str],
     text_encoder: CLIPEncoder | CLIPTextModel,
     tracer: Tracer | None = None,
     tokenizer: CLIPTokenizer,
@@ -784,7 +773,7 @@ def _get_clip_prompt_embeds(
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/stable_diffusion_3/pipeline_stable_diffusion_3.py
 def _get_t5_prompt_embeds(
     *,
-    prompts: list[str],
+    prompts: Sequence[str],
     text_encoder: T5Encoder | T5EncoderModel | None,
     tracer: Tracer | None = None,
     tokenizer: T5TokenizerFast,

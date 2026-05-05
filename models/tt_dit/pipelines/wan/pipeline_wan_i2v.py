@@ -131,7 +131,7 @@ class WanPipelineI2V(WanPipeline):
 
             if video_condition is None:
                 video_condition = image.new_zeros(image.shape[0], image.shape[1], num_frames, height, width)
-            if self.config.expand_timesteps:  # Unverified code path
+            if self._expand_timesteps:  # Unverified code path
                 video_condition = image_prompt.unqueeze(2)
                 assert len(image_prompt) == 1, "Only single image conditioning is supported for expand timesteps"
             else:
