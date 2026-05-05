@@ -24,6 +24,7 @@ from ...parallel.config import DiTParallelConfig, MochiVAEParallelConfig
 from ...parallel.manager import CCLManager
 from ...solvers import EulerSolver, schedules
 from ...utils import cache
+from ...utils.mesh import reshape_device
 from ...utils.tracing import Tracer
 
 _DEFAULT_CHECKPOINT = "genmo/mochi-1-preview"
@@ -219,7 +220,6 @@ class MochiPipeline(DiffusionPipeline):
         self.register_to_config(force_zeros_for_empty_prompt=config.force_zeros_for_empty_prompt)
 
         self.mesh_device = device
-        self.dit_mesh_shape = tuple(device.shape)
         self.vae_mesh_shape = config.vae_mesh_shape
         self.parallel_config = config.dit_parallel_config
         self.vae_parallel_config = config.vae_parallel_config
@@ -245,15 +245,12 @@ class MochiPipeline(DiffusionPipeline):
         )
 
         # Create VAE CCL manager using the VAE mesh shape.
-        if tuple(self.mesh_device.shape) != self.vae_mesh_shape:
-            self.mesh_device.reshape(ttnn.MeshShape(self.vae_mesh_shape))
-        self.vae_ccl_manager = CCLManager(
-            mesh_device=device,
-            num_links=config.num_links,
-            topology=ttnn.Topology.Linear,
-        )
-        if tuple(self.mesh_device.shape) != self.dit_mesh_shape:
-            self.mesh_device.reshape(ttnn.MeshShape(self.dit_mesh_shape))
+        with reshape_device(self.mesh_device, self.vae_mesh_shape):
+            self.vae_ccl_manager = CCLManager(
+                mesh_device=device,
+                num_links=config.num_links,
+                topology=ttnn.Topology.Linear,
+            )
 
         self._solver = EulerSolver()
 
@@ -286,37 +283,30 @@ class MochiPipeline(DiffusionPipeline):
             self.vae = torch_vae
             self._vae_decoder_tracer = None
         else:
-            # Reshape the device mesh to the VAE mesh shape:
-            if tuple(self.mesh_device.shape) != self.vae_mesh_shape:
-                self.mesh_device.reshape(ttnn.MeshShape(self.vae_mesh_shape))
-
-            self.vae = MochiVAEDecoder(
-                mesh_device=self.mesh_device,
-                parallel_config=self.vae_parallel_config,
-                ccl_manager=self.vae_ccl_manager,
-                out_channels=torch_vae.config.out_channels,
-                base_channels=torch_vae.config.decoder_block_out_channels[0],
-                channel_multipliers=[
-                    x // torch_vae.config.decoder_block_out_channels[0]
-                    for x in torch_vae.config.decoder_block_out_channels
-                ],
-                temporal_expansions=torch_vae.config.temporal_expansions,
-                spatial_expansions=torch_vae.config.spatial_expansions,
-                num_res_blocks=torch_vae.config.layers_per_block,
-                latent_dim=torch_vae.config.latent_channels,
-                has_attention=[False, False, False, False, False],  # torch_vae.config.add_attention_block,
-                nonlinearity=torch_vae.config.act_fn,
-                output_nonlinearity=torch_vae.config.act_fn,
-                latents_mean=torch_vae.config.latents_mean,
-                latents_std=torch_vae.config.latents_std,
-                scaling_factor=torch_vae.config.scaling_factor,
-            )
-            self.vae.load_torch_state_dict(torch_vae.decoder.state_dict())
+            with reshape_device(self.mesh_device, self.vae_mesh_shape):
+                self.vae = MochiVAEDecoder(
+                    mesh_device=self.mesh_device,
+                    parallel_config=self.vae_parallel_config,
+                    ccl_manager=self.vae_ccl_manager,
+                    out_channels=torch_vae.config.out_channels,
+                    base_channels=torch_vae.config.decoder_block_out_channels[0],
+                    channel_multipliers=[
+                        x // torch_vae.config.decoder_block_out_channels[0]
+                        for x in torch_vae.config.decoder_block_out_channels
+                    ],
+                    temporal_expansions=torch_vae.config.temporal_expansions,
+                    spatial_expansions=torch_vae.config.spatial_expansions,
+                    num_res_blocks=torch_vae.config.layers_per_block,
+                    latent_dim=torch_vae.config.latent_channels,
+                    has_attention=[False, False, False, False, False],  # torch_vae.config.add_attention_block,
+                    nonlinearity=torch_vae.config.act_fn,
+                    output_nonlinearity=torch_vae.config.act_fn,
+                    latents_mean=torch_vae.config.latents_mean,
+                    latents_std=torch_vae.config.latents_std,
+                    scaling_factor=torch_vae.config.scaling_factor,
+                )
+                self.vae.load_torch_state_dict(torch_vae.decoder.state_dict())
             self._vae_decoder_tracer = Tracer(self.vae.forward, device=self.mesh_device, prep_run=False)
-
-            # Reshape the device mesh back to the DiT mesh shape:
-            if tuple(self.mesh_device.shape) != self.dit_mesh_shape:
-                self.mesh_device.reshape(ttnn.MeshShape(self.dit_mesh_shape))
 
         # Update tokenizer max length
         self.tokenizer_max_length = self.tokenizer.model_max_length if self.tokenizer is not None else 256
@@ -824,27 +814,20 @@ class MochiPipeline(DiffusionPipeline):
                 self._transformer_tracer.release_trace()
                 self._transformer_tracer = None
 
-            # Reshape the device mesh to the VAE mesh shape:
-            if tuple(self.mesh_device.shape) != self.vae_mesh_shape:
-                self.mesh_device.reshape(ttnn.MeshShape(self.vae_mesh_shape))
+            with reshape_device(self.mesh_device, self.vae_mesh_shape):
+                if profiler:
+                    profiler.start("vae", profiler_iteration)
 
-            if profiler:
-                profiler.start("vae", profiler_iteration)
+                if isinstance(self.vae, MochiVAEDecoder):
+                    tt_latents = self.vae.prepare_input(latents)
+                    vae_forward = self._vae_decoder_tracer if vae_traced else self.vae.forward
+                    tt_output = vae_forward(tt_latents)
+                    video = self.vae.postprocess_output(tt_output, latents.shape)
+                else:
+                    video = self.vae.decode(latents, return_dict=False)[0]
 
-            if isinstance(self.vae, MochiVAEDecoder):
-                tt_latents = self.vae.prepare_input(latents)
-                vae_forward = self._vae_decoder_tracer if vae_traced else self.vae.forward
-                tt_output = vae_forward(tt_latents)
-                video = self.vae.postprocess_output(tt_output, latents.shape)
-            else:
-                video = self.vae.decode(latents, return_dict=False)[0]
-
-            if profiler:
-                profiler.end("vae", profiler_iteration)
-
-            # Reshape the device mesh back to the DiT mesh shape:
-            if tuple(self.mesh_device.shape) != self.dit_mesh_shape:
-                self.mesh_device.reshape(ttnn.MeshShape(self.dit_mesh_shape))
+                if profiler:
+                    profiler.end("vae", profiler_iteration)
 
             video = self.video_processor.postprocess_video(video, output_type=output_type)
 
