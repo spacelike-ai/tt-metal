@@ -4,18 +4,21 @@
 
 # Adapted from https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/wan/pipeline_wan.py
 
+from __future__ import annotations
+
 from typing import List, NamedTuple, Optional, Union
 
 import PIL
 import torch
-from diffusers.schedulers import UniPCMultistepScheduler
 
 import ttnn
 
 from ...models.vae.vae_wan2_1 import WanEncoder
 from ...utils.conv3d import conv_pad_height, conv_pad_in_channels
 from ...utils.tensor import bf16_tensor_2dshard, fast_device_to_host
-from .pipeline_wan import WanPipeline
+from .pipeline_wan import WanPipeline, WanPipelineConfig
+
+_DEFAULT_I2V_CHECKPOINT = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
 
 
 class ImagePrompt(NamedTuple):
@@ -24,16 +27,8 @@ class ImagePrompt(NamedTuple):
 
 
 class WanPipelineI2V(WanPipeline):
-    def __init__(self, *args, **kwargs):
-        # Update I2V specific defaults
-        if "checkpoint_name" not in kwargs:
-            kwargs["checkpoint_name"] = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
-        if "scheduler" not in kwargs:
-            kwargs["scheduler"] = UniPCMultistepScheduler.from_pretrained(
-                kwargs["checkpoint_name"], subfolder="scheduler", trust_remote_code=True
-            )
-
-        super().__init__(*args, model_type="i2v", **kwargs)
+    def __init__(self, *, device: ttnn.MeshDevice, config: WanPipelineConfig) -> None:
+        super().__init__(device=device, config=config)
 
         self.tt_encoder = WanEncoder(
             base_dim=self.vae.config.base_dim,
@@ -51,16 +46,29 @@ class WanPipelineI2V(WanPipeline):
 
         self.tt_encoder.load_state_dict(self.vae.state_dict())
 
-    @staticmethod
-    def create_pipeline(*args, **kwargs):
-        # Update I2V specific defaults
-        if "checkpoint_name" not in kwargs:
-            kwargs["checkpoint_name"] = "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
-        if "scheduler" not in kwargs:
-            kwargs["scheduler"] = UniPCMultistepScheduler.from_pretrained(
-                kwargs["checkpoint_name"], subfolder="scheduler", trust_remote_code=True
-            )
-        return WanPipeline.create_pipeline(*args, pipeline_class=WanPipelineI2V, **kwargs)
+    @classmethod
+    def create_pipeline(
+        cls,
+        *,
+        mesh_device: ttnn.MeshDevice,
+        checkpoint_name: str = _DEFAULT_I2V_CHECKPOINT,
+        height: int = 480,
+        width: int = 832,
+        num_frames: int = 81,
+        cfg_enabled: bool = True,
+        pipeline_class: type[WanPipeline] | None = None,
+    ) -> WanPipelineI2V:
+        config = WanPipelineConfig.default(
+            mesh_shape=mesh_device.shape,
+            checkpoint_name=checkpoint_name,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            cfg_enabled=cfg_enabled,
+            model_type="i2v",
+        )
+        pipeline_class_ = pipeline_class or cls
+        return pipeline_class_(device=mesh_device, config=config)
 
     def get_model_input(self, latents, cond_latents):
         """

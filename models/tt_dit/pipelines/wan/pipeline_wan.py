@@ -4,6 +4,8 @@
 
 # Adapted from https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/wan/pipeline_wan.py
 
+from __future__ import annotations
+
 import html
 import os
 from contextlib import nullcontext
@@ -27,7 +29,7 @@ from models.perf.benchmarking_utils import BenchmarkProfiler
 from ...encoders.umt5.model_umt5 import UMT5Config, UMT5Encoder
 from ...models.transformers.wan2_2.transformer_wan import WanCheckpoint, WanTransformer3DModel
 from ...models.vae.vae_wan2_1 import WanDecoder
-from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, ParallelFactor, VaeHWParallelConfig
+from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, VaeHWParallelConfig
 from ...parallel.manager import CCLManager
 from ...solvers import UniPCSolver, UniPCVariant, schedules
 from ...utils import cache, tensor
@@ -40,7 +42,176 @@ from ...utils.tensor import (
     typed_tensor_2dshard,
 )
 
-_UNSET = object()  # sentinel for "use config default" in create_pipeline
+_UNSET = object()  # sentinel for "use config default" in WanPipelineConfig.default
+
+_DEFAULT_CHECKPOINT = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+
+_PRESETS_WH: dict[tuple[int, ...], dict] = {
+    (2, 4): {
+        "sp_axis": 0,
+        "tp_axis": 1,
+        "num_links": 1,
+        "dynamic_load": True,
+        "topology": ttnn.Topology.Linear,
+        "is_fsdp": True,
+    },
+    (4, 8): {
+        "sp_axis": 1,
+        "tp_axis": 0,
+        "num_links": 4,
+        "dynamic_load": False,
+        "topology": ttnn.Topology.Ring,
+        "is_fsdp": True,
+    },
+}
+
+_PRESETS_BH: dict[tuple[int, ...], dict] = {
+    (1, 4): {
+        "sp_axis": 0,
+        "tp_axis": 1,
+        "num_links": 2,
+        "dynamic_load": False,
+        "topology": ttnn.Topology.Linear,
+        "is_fsdp": True,
+    },
+    (2, 2): {
+        "sp_axis": 0,
+        "tp_axis": 1,
+        "num_links": 2,
+        "dynamic_load": False,
+        "topology": ttnn.Topology.Linear,
+        "is_fsdp": True,
+    },
+    (2, 4): {
+        "sp_axis": 1,
+        "tp_axis": 0,
+        "num_links": 2,
+        "dynamic_load": True,
+        "topology": ttnn.Topology.Linear,
+        "is_fsdp": False,
+        "vae_t_chunk_size": 7,
+    },
+    (4, 8): {
+        "sp_axis": 1,
+        "tp_axis": 0,
+        "num_links": 2,
+        "dynamic_load": False,
+        "topology": ttnn.Topology.Ring,
+        "is_fsdp": False,
+        "vae_t_chunk_size": None,  # full-T
+    },
+    (4, 32): {
+        "sp_axis": 1,
+        "tp_axis": 0,
+        "num_links": 2,
+        "dynamic_load": False,
+        "topology": ttnn.Topology.Ring,
+        "is_fsdp": False,
+        "vae_t_chunk_size": None,
+        "sdpa_t_fracture_w_only": True,
+    },
+}
+
+
+@dataclass(frozen=True, kw_only=True)
+class WanPipelineConfig:
+    topology: ttnn.Topology
+    num_links: int
+
+    dit_parallel_config: DiTParallelConfig
+    encoder_parallel_config: EncoderParallelConfig
+    vae_parallel_config: VaeHWParallelConfig
+
+    flow_shift: float
+    boundary_ratio: float | None
+    expand_timesteps: bool
+    dynamic_load: bool
+    is_fsdp: bool
+    model_type: str
+    vae_dtype: ttnn.DataType
+    vae_t_chunk_size: int | None
+    sdpa_t_fracture_w_only: bool
+
+    height: int
+    width: int
+    num_frames: int
+    cfg_enabled: bool
+
+    checkpoint_name: str
+
+    @classmethod
+    def default(
+        cls,
+        *,
+        mesh_shape: ttnn.MeshShape,
+        topology: ttnn.Topology | None = None,
+        num_links: int | None = None,
+        dit_parallel_config: DiTParallelConfig | None = None,
+        encoder_parallel_config: EncoderParallelConfig | None = None,
+        vae_parallel_config: VaeHWParallelConfig | None = None,
+        flow_shift: float = 12.0,
+        boundary_ratio: float | None = 0.875,
+        expand_timesteps: bool = False,
+        dynamic_load: bool | None = None,
+        is_fsdp: bool | None = None,
+        model_type: str = "t2v",
+        vae_dtype: ttnn.DataType = ttnn.bfloat16,
+        vae_t_chunk_size: object = _UNSET,
+        sdpa_t_fracture_w_only: bool | None = None,
+        height: int = 480,
+        width: int = 832,
+        num_frames: int = 81,
+        cfg_enabled: bool = True,
+        checkpoint_name: str = _DEFAULT_CHECKPOINT,
+    ) -> WanPipelineConfig:
+        preset_dict = _PRESETS_BH if ttnn.device.is_blackhole() else _PRESETS_WH
+        preset = preset_dict.get(tuple(mesh_shape), {})
+
+        if dit_parallel_config is None or vae_parallel_config is None or encoder_parallel_config is None:
+            sp_axis = preset["sp_axis"]
+            tp_axis = preset["tp_axis"]
+            h_factor = tuple(mesh_shape)[tp_axis]
+            w_factor = tuple(mesh_shape)[sp_axis]
+            if dit_parallel_config is None:
+                dit_parallel_config = DiTParallelConfig.from_tuples(
+                    cfg=(1, 0), sp=(w_factor, sp_axis), tp=(h_factor, tp_axis)
+                )
+            if vae_parallel_config is None:
+                vae_parallel_config = VaeHWParallelConfig.from_tuples(
+                    height=(h_factor, tp_axis), width=(w_factor, sp_axis)
+                )
+            if encoder_parallel_config is None:
+                encoder_parallel_config = EncoderParallelConfig.from_tuple((h_factor, tp_axis))
+
+        if vae_t_chunk_size is _UNSET:
+            vae_t_chunk_size = preset.get("vae_t_chunk_size", 1)
+
+        return cls(
+            topology=topology if topology is not None else preset["topology"],
+            num_links=num_links if num_links is not None else preset["num_links"],
+            dit_parallel_config=dit_parallel_config,
+            encoder_parallel_config=encoder_parallel_config,
+            vae_parallel_config=vae_parallel_config,
+            flow_shift=flow_shift,
+            boundary_ratio=boundary_ratio,
+            expand_timesteps=expand_timesteps,
+            dynamic_load=dynamic_load if dynamic_load is not None else preset["dynamic_load"],
+            is_fsdp=is_fsdp if is_fsdp is not None else preset["is_fsdp"],
+            model_type=model_type,
+            vae_dtype=vae_dtype,
+            vae_t_chunk_size=vae_t_chunk_size,
+            sdpa_t_fracture_w_only=(
+                sdpa_t_fracture_w_only
+                if sdpa_t_fracture_w_only is not None
+                else preset.get("sdpa_t_fracture_w_only", False)
+            ),
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            cfg_enabled=cfg_enabled,
+            checkpoint_name=checkpoint_name,
+        )
+
 
 EXAMPLE_DOC_STRING = """
     Examples:
@@ -144,65 +315,76 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
             Whether to fracture SDPA only along the width dimension for temporal attention.
     """
 
+    @classmethod
+    def create_pipeline(
+        cls,
+        *,
+        mesh_device: ttnn.MeshDevice,
+        checkpoint_name: str = _DEFAULT_CHECKPOINT,
+        height: int = 480,
+        width: int = 832,
+        num_frames: int = 81,
+        cfg_enabled: bool = True,
+        pipeline_class: type[WanPipeline] | None = None,
+    ) -> WanPipeline:
+        config = WanPipelineConfig.default(
+            mesh_shape=mesh_device.shape,
+            checkpoint_name=checkpoint_name,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            cfg_enabled=cfg_enabled,
+        )
+        pipeline_class_ = pipeline_class or cls
+        return pipeline_class_(device=mesh_device, config=config)
+
     def __init__(
         self,
-        mesh_device,
-        parallel_config,
-        vae_parallel_config,
-        encoder_parallel_config,
-        num_links,
         *,
-        checkpoint_name: str = "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-        flow_shift: float = 12.0,
-        boundary_ratio: Optional[float] = 0.875,
-        expand_timesteps: bool = False,  # Wan2.2 ti2v
-        dynamic_load=False,
-        topology: ttnn.Topology = ttnn.Topology.Linear,
-        is_fsdp: bool = True,
-        model_type: str = "t2v",
-        vae_dtype: ttnn.DataType = ttnn.bfloat16,
-        vae_t_chunk_size: int | None = 1,
-        sdpa_t_fracture_w_only: bool = False,
-        target_height: int = 0,
-        target_width: int = 0,
-        t_chunk_size: int = 0,
-        num_frames: int = 81,
-    ):
+        device: ttnn.MeshDevice,
+        config: WanPipelineConfig,
+    ) -> None:
         super().__init__()
 
-        self.checkpoint_name = checkpoint_name
-        self.model_type = model_type
-        self.vae_t_chunk_size = vae_t_chunk_size
+        self.checkpoint_name = config.checkpoint_name
+        self.model_type = config.model_type
+        self.vae_t_chunk_size = config.vae_t_chunk_size
+        self._cfg_enabled = config.cfg_enabled
+        self._height = config.height
+        self._width = config.width
+        self._num_frames = config.num_frames
 
-        self.tokenizer = AutoTokenizer.from_pretrained(checkpoint_name, subfolder="tokenizer", trust_remote_code=True)
-        self.text_encoder = UMT5EncoderModel.from_pretrained(
-            checkpoint_name, subfolder="text_encoder", trust_remote_code=True
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            config.checkpoint_name, subfolder="tokenizer", trust_remote_code=True
         )
-        self.vae = AutoencoderKLWan.from_pretrained(checkpoint_name, subfolder="vae", trust_remote_code=True)
-        self._flow_shift = flow_shift
-        self._checkpoint = WanCheckpoint(checkpoint_name, subfolder="transformer")
-        self._checkpoint_2 = WanCheckpoint(checkpoint_name, subfolder="transformer_2")
+        self.text_encoder = UMT5EncoderModel.from_pretrained(
+            config.checkpoint_name, subfolder="text_encoder", trust_remote_code=True
+        )
+        self.vae = AutoencoderKLWan.from_pretrained(config.checkpoint_name, subfolder="vae", trust_remote_code=True)
+        self._flow_shift = config.flow_shift
+        self._checkpoint = WanCheckpoint(config.checkpoint_name, subfolder="transformer")
+        self._checkpoint_2 = WanCheckpoint(config.checkpoint_name, subfolder="transformer_2")
 
         self.dit_ccl_manager = CCLManager(
-            mesh_device=mesh_device,
-            num_links=num_links,
-            topology=topology,
+            mesh_device=device,
+            num_links=config.num_links,
+            topology=config.topology,
         )
         self.vae_ccl_manager = CCLManager(
-            mesh_device=mesh_device,
-            num_links=num_links,
+            mesh_device=device,
+            num_links=config.num_links,
             topology=ttnn.Topology.Linear,  # NOTE: VAE always uses Linear topology. TODO: enable ring if given.
         )
 
         # See what options we have for topology. We should consider reusing CCL managers
         self.encoder_ccl_manager = self.vae_ccl_manager
 
-        self.is_fsdp = is_fsdp
-        self.parallel_config = parallel_config
-        self.vae_parallel_config = vae_parallel_config
-        self.encoder_parallel_config = encoder_parallel_config
-        self.mesh_device = mesh_device
-        self.dynamic_load = dynamic_load
+        self.is_fsdp = config.is_fsdp
+        self.parallel_config = config.dit_parallel_config
+        self.vae_parallel_config = config.vae_parallel_config
+        self.encoder_parallel_config = config.encoder_parallel_config
+        self.mesh_device = device
+        self.dynamic_load = config.dynamic_load
 
         # Load TT text encoder
         umt5_config = UMT5Config(
@@ -239,6 +421,9 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
             model_type=self.model_type,
         )
 
+        full_latent_T = (config.num_frames - 1) // 4 + 1
+        decoder_t_chunk_size = full_latent_T if config.vae_t_chunk_size is None else config.vae_t_chunk_size
+
         self.tt_vae = WanDecoder(
             base_dim=self.vae.config.base_dim,
             z_dim=self.vae.config.z_dim,
@@ -251,12 +436,12 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
             mesh_device=self.mesh_device,
             ccl_manager=self.vae_ccl_manager,
             parallel_config=self.vae_parallel_config,
-            dtype=vae_dtype,
-            sdpa_t_fracture_w_only=sdpa_t_fracture_w_only,
-            target_height=target_height,
-            target_width=target_width,
-            t_chunk_size=t_chunk_size,
-            cached=(vae_t_chunk_size is not None),
+            dtype=config.vae_dtype,
+            sdpa_t_fracture_w_only=config.sdpa_t_fracture_w_only,
+            target_height=config.height,
+            target_width=config.width,
+            t_chunk_size=decoder_t_chunk_size,
+            cached=(config.vae_t_chunk_size is not None),
         )
 
         self.transformer_states = [
@@ -285,8 +470,8 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         self._prepare_text_encoder()
         self._prepare_vae()
 
-        self.register_to_config(boundary_ratio=boundary_ratio)
-        self.register_to_config(expand_timesteps=expand_timesteps)
+        self.register_to_config(boundary_ratio=config.boundary_ratio)
+        self.register_to_config(expand_timesteps=config.expand_timesteps)
         self.vae_scale_factor_temporal = self.vae.config.scale_factor_temporal if getattr(self, "vae", None) else 4
         self.vae_scale_factor_spatial = self.vae.config.scale_factor_spatial if getattr(self, "vae", None) else 8
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
@@ -300,7 +485,13 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         )
 
         # TODO: Reset buffers for change in resolution. Also reinitialize trace
-        self.warmup_buffers(height=target_height, width=target_width, num_frames=num_frames)
+        logger.info("Pipeline allocation run...")
+        self(
+            prompts=["warmup"],
+            num_inference_steps=2,
+            guidance_scale=2 if config.cfg_enabled else 1,
+            guidance_scale_2=2 if config.cfg_enabled else 1,
+        )
 
     def prepare_text_conditioning(self, tt_model, prompt_embeds, buffer, traced=False):
         prompt_1BLP = tt_model.prepare_text_conditioning(prompt_embeds)
@@ -309,145 +500,6 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         else:
             ttnn.copy(prompt_1BLP, buffer)
         return buffer
-
-    def warmup_buffers(self, height, width, num_frames):
-        self.run_single_prompt(
-            prompt="warmup",
-            height=height,
-            width=width,
-            num_frames=num_frames,
-            num_inference_steps=2,
-        )
-
-    @staticmethod
-    def create_pipeline(
-        mesh_device,
-        *,
-        checkpoint_name="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-        flow_shift=12.0,
-        sp_axis=None,
-        tp_axis=None,
-        num_links=None,
-        dynamic_load=None,
-        topology=None,
-        is_fsdp=None,
-        pipeline_class=None,
-        vae_t_chunk_size=_UNSET,
-        sdpa_t_fracture_w_only=None,
-        target_height: int = 0,
-        target_width: int = 0,
-        num_frames: int = 81,
-    ):
-        device_configs = {}
-        if ttnn.device.is_blackhole():
-            device_configs[(1, 4)] = {
-                "sp_axis": 0,
-                "tp_axis": 1,
-                "num_links": 2,
-                "dynamic_load": False,
-                "topology": ttnn.Topology.Linear,
-                "is_fsdp": True,
-            }
-            device_configs[(2, 2)] = device_configs[(1, 4)]
-            device_configs[(2, 4)] = {
-                "sp_axis": 1,
-                "tp_axis": 0,
-                "num_links": 2,
-                "dynamic_load": True,
-                "topology": ttnn.Topology.Linear,
-                "is_fsdp": False,
-                "vae_t_chunk_size": 7,
-            }
-            device_configs[(4, 8)] = {
-                "sp_axis": 1,
-                "tp_axis": 0,
-                "num_links": 2,
-                "dynamic_load": False,
-                "topology": ttnn.Topology.Ring,
-                "is_fsdp": False,
-                "vae_t_chunk_size": None,  # full-T
-            }
-            device_configs[(4, 32)] = {
-                "sp_axis": 1,
-                "tp_axis": 0,
-                "num_links": 2,
-                "dynamic_load": False,
-                "topology": ttnn.Topology.Ring,
-                "is_fsdp": False,
-                "vae_t_chunk_size": None,
-                "sdpa_t_fracture_w_only": True,
-            }
-            config = device_configs[tuple(mesh_device.shape)]
-        else:
-            device_configs[(2, 4)] = {
-                "sp_axis": 0,
-                "tp_axis": 1,
-                "num_links": 1,
-                "dynamic_load": True,
-                "topology": ttnn.Topology.Linear,
-                "is_fsdp": True,
-            }
-            device_configs[(4, 8)] = {
-                "sp_axis": 1,
-                "tp_axis": 0,
-                "num_links": 4,
-                "dynamic_load": False,
-                "topology": ttnn.Topology.Ring,
-                "is_fsdp": True,
-            }
-
-            config = device_configs[tuple(mesh_device.shape)]
-
-        sp_axis = config["sp_axis"] if sp_axis is None else sp_axis
-        tp_axis = config["tp_axis"] if tp_axis is None else tp_axis
-        if vae_t_chunk_size is _UNSET:
-            vae_t_chunk_size = config.get("vae_t_chunk_size", 1)
-        full_latent_T = (num_frames - 1) // 4 + 1
-        decoder_t_chunk_size = full_latent_T if vae_t_chunk_size is None else vae_t_chunk_size
-
-        h_factor = tuple(mesh_device.shape)[tp_axis]
-        w_factor = tuple(mesh_device.shape)[sp_axis]
-
-        parallel_config = DiTParallelConfig(
-            tensor_parallel=ParallelFactor(mesh_axis=tp_axis, factor=h_factor),
-            sequence_parallel=ParallelFactor(mesh_axis=sp_axis, factor=w_factor),
-            cfg_parallel=None,
-        )
-        vae_parallel_config = VaeHWParallelConfig(
-            height_parallel=ParallelFactor(
-                factor=h_factor,
-                mesh_axis=tp_axis,
-            ),
-            width_parallel=ParallelFactor(
-                factor=w_factor,
-                mesh_axis=sp_axis,
-            ),
-        )
-        encoder_parallel_config = EncoderParallelConfig(
-            tensor_parallel=ParallelFactor(factor=h_factor, mesh_axis=tp_axis)
-        )
-        pipeline_class_ = pipeline_class or WanPipeline
-        return pipeline_class_(
-            mesh_device=mesh_device,
-            parallel_config=parallel_config,
-            vae_parallel_config=vae_parallel_config,
-            encoder_parallel_config=encoder_parallel_config,
-            num_links=num_links or config["num_links"],
-            boundary_ratio=0.875,
-            flow_shift=flow_shift,
-            dynamic_load=dynamic_load if dynamic_load is not None else config["dynamic_load"],
-            topology=topology or config["topology"],
-            is_fsdp=is_fsdp if is_fsdp is not None else config["is_fsdp"],
-            checkpoint_name=checkpoint_name,
-            vae_t_chunk_size=vae_t_chunk_size,
-            sdpa_t_fracture_w_only=sdpa_t_fracture_w_only
-            if sdpa_t_fracture_w_only is not None
-            else config.get("sdpa_t_fracture_w_only", False),
-            target_height=target_height,
-            target_width=target_width,
-            t_chunk_size=decoder_t_chunk_size,
-            num_frames=num_frames,
-        )
 
     def _prepare_text_encoder(self):
         cache.load_model(
@@ -705,17 +757,15 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
     def num_timesteps(self):
         return self._num_timesteps
 
+    DEFAULT_NEGATIVE_PROMPT = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
+
     @torch.no_grad()
     def __call__(
         self,
-        prompt: Union[str, List[str]] = None,
-        negative_prompt: Union[
-            str, List[str]
-        ] = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
+        *,
+        prompts: list[str],
+        negative_prompts: list[str] | None = None,
         image_prompt=None,
-        height: int = 480,
-        width: int = 832,
-        num_frames: int = 81,
         num_inference_steps: int = 40,
         guidance_scale: float = 4.0,
         guidance_scale_2: Optional[float] = 3.0,
@@ -787,10 +837,24 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                 indicating whether the corresponding generated image contains "not-safe-for-work" (nsfw) content.
         """
 
+        negative_prompts = (
+            negative_prompts if negative_prompts is not None else [self.DEFAULT_NEGATIVE_PROMPT] * len(prompts)
+        )
+        height = self._height
+        width = self._width
+        num_frames = self._num_frames
+
+        if guidance_scale > 1 and not self._cfg_enabled:
+            msg = "guidance_scale > 1 requires CFG to be enabled"
+            raise ValueError(msg)
+        if guidance_scale_2 is not None and guidance_scale_2 > 1 and not self._cfg_enabled:
+            msg = "guidance_scale_2 > 1 requires CFG to be enabled"
+            raise ValueError(msg)
+
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
-            prompt,
-            negative_prompt,
+            prompts,
+            negative_prompts,
             height,
             width,
             prompt_embeds,
@@ -815,10 +879,8 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         device = "cpu"
 
         # 2. Define call parameters
-        if prompt is not None and isinstance(prompt, str):
-            batch_size = 1
-        elif prompt is not None and isinstance(prompt, list):
-            batch_size = len(prompt)
+        if prompts is not None:
+            batch_size = len(prompts)
         else:
             batch_size = prompt_embeds.shape[0]
 
@@ -826,8 +888,8 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         with profiler("encoder", profiler_iteration) if profiler else nullcontext():
             self._prepare_text_encoder()
             prompt_embeds, negative_prompt_embeds = self.encode_prompt(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
+                prompt=prompts,
+                negative_prompt=negative_prompts,
                 do_classifier_free_guidance=self.do_classifier_free_guidance,
                 num_videos_per_prompt=num_videos_per_prompt,
                 prompt_embeds=prompt_embeds,
@@ -1040,8 +1102,30 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
 
         return WanPipelineOutput(frames=video)
 
-    def run_single_prompt(self, *args, **kwargs):
-        return self.__call__(*args, **kwargs).frames
+    def run_single_prompt(
+        self,
+        *,
+        prompt: str,
+        negative_prompt: str | None = None,
+        num_inference_steps: int = 40,
+        guidance_scale: float = 4.0,
+        guidance_scale_2: float | None = 3.0,
+        seed: int | None = None,
+        traced: bool = False,
+        profiler: BenchmarkProfiler | None = None,
+        profiler_iteration: int = 0,
+    ):
+        return self(
+            prompts=[prompt],
+            negative_prompts=[negative_prompt] if negative_prompt is not None else None,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            guidance_scale_2=guidance_scale_2,
+            seed=seed,
+            traced=traced,
+            profiler=profiler,
+            profiler_iteration=profiler_iteration,
+        ).frames
 
     def synchronize_devices(self):
         ttnn.synchronize_device(self.mesh_device)

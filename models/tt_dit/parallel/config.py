@@ -48,11 +48,32 @@ class VaeHWParallelConfig(NamedTuple):
     height_parallel: ParallelFactor
     width_parallel: ParallelFactor
 
+    @classmethod
+    def from_tuples(cls, *, height: tuple[int, int], width: tuple[int, int]) -> VaeHWParallelConfig:
+        return cls(
+            height_parallel=ParallelFactor(*height),
+            width_parallel=ParallelFactor(*width),
+        )
+
 
 class MochiVAEParallelConfig(NamedTuple):
     time_parallel: ParallelFactor
     h_parallel: ParallelFactor
     w_parallel: ParallelFactor
+
+    @classmethod
+    def from_tuples(
+        cls,
+        *,
+        time: tuple[int, int],
+        h: tuple[int, int],
+        w: tuple[int, int],
+    ) -> MochiVAEParallelConfig:
+        return cls(
+            time_parallel=ParallelFactor(*time),
+            h_parallel=ParallelFactor(*h),
+            w_parallel=ParallelFactor(*w),
+        )
 
 
 class OldParallelConfig(NamedTuple):

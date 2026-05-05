@@ -2,7 +2,9 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
@@ -18,11 +20,139 @@ from models.perf.benchmarking_utils import BenchmarkProfiler
 
 from ...models.transformers.transformer_mochi import MochiCheckpoint
 from ...models.vae.vae_mochi import MochiVAEDecoder
-from ...parallel.config import DiTParallelConfig, MochiVAEParallelConfig, ParallelFactor
+from ...parallel.config import DiTParallelConfig, MochiVAEParallelConfig
 from ...parallel.manager import CCLManager
 from ...solvers import EulerSolver, schedules
 from ...utils import cache
 from ...utils.tracing import Tracer
+
+_DEFAULT_CHECKPOINT = "genmo/mochi-1-preview"
+
+_PRESETS_WH: dict[tuple[int, ...], dict] = {
+    (2, 4): {
+        "sp": (2, 0),
+        "tp": (4, 1),
+        "vae_mesh_shape": (1, 8),
+        "vae_sp_axis": 0,
+        "vae_tp_axis": 1,
+        "num_links": 1,
+        "reload_dit_model": True,
+    },
+    (4, 8): {
+        "sp": (8, 1),
+        "tp": (4, 0),
+        "vae_mesh_shape": (4, 8),
+        "vae_sp_axis": 0,
+        "vae_tp_axis": 1,
+        "num_links": 4,
+        "reload_dit_model": False,
+    },
+}
+
+_PRESETS_BH: dict[tuple[int, ...], dict] = {
+    (2, 2): {
+        "sp": (2, 0),
+        "tp": (2, 1),
+        "vae_mesh_shape": (1, 4),
+        "vae_sp_axis": 0,
+        "vae_tp_axis": 1,
+        "num_links": 2,
+        "reload_dit_model": True,
+    },
+    (2, 4): {
+        "sp": (2, 0),
+        "tp": (4, 1),
+        "vae_mesh_shape": (2, 4),
+        "vae_sp_axis": 0,
+        "vae_tp_axis": 1,
+        "num_links": 2,
+        "reload_dit_model": False,
+    },
+    (4, 8): {
+        "sp": (8, 1),
+        "tp": (4, 0),
+        "vae_mesh_shape": (4, 8),
+        "vae_sp_axis": 0,
+        "vae_tp_axis": 1,
+        "num_links": 2,
+        "reload_dit_model": False,
+    },
+}
+
+
+@dataclass(frozen=True, kw_only=True)
+class MochiPipelineConfig:
+    topology: ttnn.Topology
+    num_links: int
+
+    dit_parallel_config: DiTParallelConfig
+    vae_parallel_config: MochiVAEParallelConfig
+    vae_mesh_shape: tuple[int, ...]
+
+    use_reference_vae: bool
+    force_zeros_for_empty_prompt: bool
+    reload_dit_model: bool
+
+    height: int
+    width: int
+    num_frames: int
+    cfg_enabled: bool
+
+    checkpoint_name: str
+
+    @classmethod
+    def default(
+        cls,
+        *,
+        mesh_shape: ttnn.MeshShape,
+        topology: ttnn.Topology = ttnn.Topology.Linear,
+        num_links: int | None = None,
+        dit_parallel_config: DiTParallelConfig | None = None,
+        vae_parallel_config: MochiVAEParallelConfig | None = None,
+        vae_mesh_shape: tuple[int, ...] | None = None,
+        use_reference_vae: bool = False,
+        force_zeros_for_empty_prompt: bool = False,
+        reload_dit_model: bool | None = None,
+        height: int = 480,
+        width: int = 848,
+        num_frames: int = 168,
+        cfg_enabled: bool = True,
+        checkpoint_name: str = _DEFAULT_CHECKPOINT,
+    ) -> MochiPipelineConfig:
+        preset_dict = _PRESETS_BH if ttnn.device.is_blackhole() else _PRESETS_WH
+        preset = preset_dict.get(tuple(mesh_shape), {})
+
+        if dit_parallel_config is None:
+            dit_parallel_config = DiTParallelConfig.from_tuples(cfg=(1, 0), sp=preset["sp"], tp=preset["tp"])
+
+        if vae_mesh_shape is None:
+            vae_mesh_shape = preset["vae_mesh_shape"]
+
+        if vae_parallel_config is None:
+            vae_sp_axis = preset["vae_sp_axis"]
+            vae_tp_axis = preset["vae_tp_axis"]
+            w_factor = 1 if vae_mesh_shape[vae_sp_axis] == 1 else 2
+            vae_parallel_config = MochiVAEParallelConfig.from_tuples(
+                time=(vae_mesh_shape[vae_tp_axis], vae_tp_axis),
+                h=(vae_mesh_shape[vae_sp_axis] // w_factor, vae_sp_axis),
+                w=(w_factor, vae_sp_axis),
+            )
+
+        return cls(
+            topology=topology,
+            num_links=num_links if num_links is not None else preset["num_links"],
+            dit_parallel_config=dit_parallel_config,
+            vae_parallel_config=vae_parallel_config,
+            vae_mesh_shape=tuple(vae_mesh_shape),
+            use_reference_vae=use_reference_vae,
+            force_zeros_for_empty_prompt=force_zeros_for_empty_prompt,
+            reload_dit_model=reload_dit_model if reload_dit_model is not None else preset["reload_dit_model"],
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            cfg_enabled=cfg_enabled,
+            checkpoint_name=checkpoint_name,
+        )
 
 
 class MochiPipeline(DiffusionPipeline):
@@ -51,18 +181,33 @@ class MochiPipeline(DiffusionPipeline):
     _optional_components = []
     _callback_tensor_inputs = ["latents", "prompt_embeds", "negative_prompt_embeds"]
 
+    @classmethod
+    def create_pipeline(
+        cls,
+        *,
+        mesh_device: ttnn.MeshDevice,
+        height: int = 480,
+        width: int = 848,
+        num_frames: int = 168,
+        cfg_enabled: bool = True,
+        checkpoint_name: str = _DEFAULT_CHECKPOINT,
+    ) -> MochiPipeline:
+        config = MochiPipelineConfig.default(
+            mesh_shape=mesh_device.shape,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            cfg_enabled=cfg_enabled,
+            checkpoint_name=checkpoint_name,
+        )
+        return cls(device=mesh_device, config=config)
+
     def __init__(
         self,
-        mesh_device: ttnn.MeshDevice,
-        vae_mesh_shape: tuple,
-        parallel_config: DiTParallelConfig,
-        vae_parallel_config: MochiVAEParallelConfig,
-        num_links: int,
-        use_reference_vae: bool = False,
-        model_name: str = "genmo/mochi-1-preview",
-        force_zeros_for_empty_prompt: bool = False,
-        reload_dit_model: bool = None,
-    ):
+        *,
+        device: ttnn.MeshDevice,
+        config: MochiPipelineConfig,
+    ) -> None:
         super().__init__()
 
         # TODO: determine these scaling factors from model parameters
@@ -71,18 +216,19 @@ class MochiPipeline(DiffusionPipeline):
         self.patch_size = 2
 
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_spatial_scale_factor)
-        self.default_height = 480
-        self.default_width = 848
-        self.register_to_config(force_zeros_for_empty_prompt=force_zeros_for_empty_prompt)
+        self.register_to_config(force_zeros_for_empty_prompt=config.force_zeros_for_empty_prompt)
 
-        # Store device and config for model initialization
-        self.mesh_device = mesh_device
-        self.dit_mesh_shape = tuple(mesh_device.shape)
-        self.vae_mesh_shape = vae_mesh_shape
-        self.parallel_config = parallel_config
-        self.vae_parallel_config = vae_parallel_config
-        self.num_links = num_links
-        self.reload_dit_model = reload_dit_model  # Only required if VAE is memory-constrained.
+        self.mesh_device = device
+        self.dit_mesh_shape = tuple(device.shape)
+        self.vae_mesh_shape = config.vae_mesh_shape
+        self.parallel_config = config.dit_parallel_config
+        self.vae_parallel_config = config.vae_parallel_config
+        self.num_links = config.num_links
+        self.reload_dit_model = config.reload_dit_model  # Only required if VAE is memory-constrained.
+        self._height = config.height
+        self._width = config.width
+        self._num_frames = config.num_frames
+        self._cfg_enabled = config.cfg_enabled
 
         if self.reload_dit_model and not cache.cache_dir_is_set():
             msg = (
@@ -93,17 +239,17 @@ class MochiPipeline(DiffusionPipeline):
 
         # Create CCL manager
         self.ccl_manager = CCLManager(
-            mesh_device=mesh_device,
-            num_links=num_links,
-            topology=ttnn.Topology.Linear,
+            mesh_device=device,
+            num_links=config.num_links,
+            topology=config.topology,
         )
 
         # Create VAE CCL manager using the VAE mesh shape.
         if tuple(self.mesh_device.shape) != self.vae_mesh_shape:
             self.mesh_device.reshape(ttnn.MeshShape(self.vae_mesh_shape))
         self.vae_ccl_manager = CCLManager(
-            mesh_device=mesh_device,
-            num_links=num_links,
+            mesh_device=device,
+            num_links=config.num_links,
             topology=ttnn.Topology.Linear,
         )
         if tuple(self.mesh_device.shape) != self.dit_mesh_shape:
@@ -112,20 +258,21 @@ class MochiPipeline(DiffusionPipeline):
         self._solver = EulerSolver()
 
         # Load pretrained T5 text encoder and tokenizer (Torch)
+        checkpoint_name = config.checkpoint_name
         self.text_encoder = T5EncoderModel.from_pretrained(
-            model_name, subfolder="text_encoder", torch_dtype=torch.float32
+            checkpoint_name, subfolder="text_encoder", torch_dtype=torch.float32
         )
-        self.tokenizer = T5TokenizerFast.from_pretrained(model_name, subfolder="tokenizer")
+        self.tokenizer = T5TokenizerFast.from_pretrained(checkpoint_name, subfolder="tokenizer")
 
         # Load pretrained Mochi Transformer (TT)
-        self._checkpoint = MochiCheckpoint(model_name)
+        self._checkpoint = MochiCheckpoint(checkpoint_name)
 
         self.transformer = self._checkpoint.build(
             ccl_manager=self.ccl_manager,
-            parallel_config=parallel_config,
+            parallel_config=self.parallel_config,
             is_fsdp=True,
         )
-        self._transformer_tracer = Tracer(self.transformer.forward, device=mesh_device, prep_run=False)
+        self._transformer_tracer = Tracer(self.transformer.forward, device=device, prep_run=False)
 
         self._checkpoint.load(
             self.transformer,
@@ -134,8 +281,8 @@ class MochiPipeline(DiffusionPipeline):
         )
 
         # Load pretrained VAE (Torch)
-        torch_vae = AutoencoderKLMochi.from_pretrained(model_name, subfolder="vae", torch_dtype=torch.float32)
-        if use_reference_vae:
+        torch_vae = AutoencoderKLMochi.from_pretrained(checkpoint_name, subfolder="vae", torch_dtype=torch.float32)
+        if config.use_reference_vae:
             self.vae = torch_vae
             self._vae_decoder_tracer = None
         else:
@@ -145,7 +292,7 @@ class MochiPipeline(DiffusionPipeline):
 
             self.vae = MochiVAEDecoder(
                 mesh_device=self.mesh_device,
-                parallel_config=vae_parallel_config,
+                parallel_config=self.vae_parallel_config,
                 ccl_manager=self.vae_ccl_manager,
                 out_channels=torch_vae.config.out_channels,
                 base_channels=torch_vae.config.decoder_block_out_channels[0],
@@ -182,141 +329,14 @@ class MochiPipeline(DiffusionPipeline):
             vae=self.vae,
         )
 
-        self._allocate_persistent_buffers()
-
-    def _allocate_persistent_buffers(self) -> None:
-        """Allocate persistent buffers by running a pipeline pass without tracing.
-
-        This is important so they do not get allocated after trace capture, which would lead to
-        them being overwritten during trace execution.
-        """
         logger.info("Pipeline allocation run...")
-        self.run_single_prompt(prompt="", num_inference_steps=2, num_frames=168, seed=0, traced=False)
-
-    @staticmethod
-    def create_pipeline(
-        mesh_device,
-        checkpoint_name,
-        sp_axis=None,
-        tp_axis=None,
-        vae_sp_axis=None,
-        vae_tp_axis=None,
-        vae_mesh_shape=None,
-        num_links=None,
-        use_reference_vae=False,
-        force_zeros_for_empty_prompt=False,
-        reload_dit_model=None,
-    ):
-        if ttnn.device.is_blackhole():
-            if tuple(mesh_device.shape) != (2, 2):
-                logger.warning(
-                    f"Mochi has only been successfully tested on 2x2 configuration for Blackhole. Proceeding with the requested {tuple(mesh_device.shape)} configuration."
-                )
-
-            default_config = {
-                (2, 2): {
-                    "sp_axis": 0,
-                    "tp_axis": 1,
-                    "num_links": 2,
-                    "vae_mesh_shape": (1, 4),
-                    "vae_sp_axis": 0,
-                    "vae_tp_axis": 1,
-                    "reload_dit_model": True,
-                },
-                (2, 4): {  # Hangs on BH
-                    "sp_axis": 0,
-                    "tp_axis": 1,
-                    "num_links": 2,
-                    "vae_mesh_shape": (2, 4),
-                    "vae_sp_axis": 0,
-                    "vae_tp_axis": 1,
-                    "reload_dit_model": False,
-                },
-                (4, 8): {  # Untested.
-                    "sp_axis": 1,
-                    "tp_axis": 0,
-                    "num_links": 2,
-                    "vae_mesh_shape": (4, 8),
-                    "vae_sp_axis": 0,
-                    "vae_tp_axis": 1,
-                    "reload_dit_model": False,
-                },
-            }
-        else:
-            assert tuple(mesh_device.shape) != (
-                2,
-                2,
-            ), "Mochi 2x2 is only supported on Blackhole. Wormhole does not have enough memory for this configuration."
-            default_config = {
-                (2, 4): {
-                    "sp_axis": 0,
-                    "tp_axis": 1,
-                    "vae_mesh_shape": (1, 8),
-                    "vae_sp_axis": 0,
-                    "vae_tp_axis": 1,
-                    "num_links": 1,
-                    "reload_dit_model": True,
-                },
-                (4, 8): {
-                    "sp_axis": 1,
-                    "tp_axis": 0,
-                    "vae_mesh_shape": (4, 8),
-                    "vae_sp_axis": 0,
-                    "vae_tp_axis": 1,
-                    "num_links": 4,
-                    "reload_dit_model": False,
-                },
-            }
-
-        mesh_shape = tuple(mesh_device.shape)
-
-        sp_axis = sp_axis or default_config[mesh_shape]["sp_axis"]
-        tp_axis = tp_axis or default_config[mesh_shape]["tp_axis"]
-        vae_sp_axis = vae_sp_axis or default_config[mesh_shape]["vae_sp_axis"]
-        vae_tp_axis = vae_tp_axis or default_config[mesh_shape]["vae_tp_axis"]
-        vae_mesh_shape = vae_mesh_shape or default_config[mesh_shape]["vae_mesh_shape"]
-        num_links = num_links or default_config[mesh_shape]["num_links"]
-        reload_dit_model = reload_dit_model or default_config[mesh_shape]["reload_dit_model"]
-
-        sp_factor = mesh_device.shape[sp_axis]
-        tp_factor = mesh_device.shape[tp_axis]
-
-        # Create parallel config
-        parallel_config = DiTParallelConfig(
-            cfg_parallel=ParallelFactor(factor=1, mesh_axis=0),
-            tensor_parallel=ParallelFactor(factor=tp_factor, mesh_axis=tp_axis),
-            sequence_parallel=ParallelFactor(factor=sp_factor, mesh_axis=sp_axis),
+        self(
+            prompts=[""],
+            num_inference_steps=2,
+            seed=0,
+            guidance_scale=2 if config.cfg_enabled else 1,
+            traced=False,
         )
-
-        if vae_mesh_shape[vae_sp_axis] == 1:
-            w_parallel_factor = 1
-        else:
-            w_parallel_factor = 2
-
-        vae_parallel_config = MochiVAEParallelConfig(
-            time_parallel=ParallelFactor(factor=vae_mesh_shape[vae_tp_axis], mesh_axis=vae_tp_axis),
-            w_parallel=ParallelFactor(factor=w_parallel_factor, mesh_axis=vae_sp_axis),
-            h_parallel=ParallelFactor(factor=vae_mesh_shape[vae_sp_axis] // w_parallel_factor, mesh_axis=vae_sp_axis),
-        )
-        assert (
-            vae_parallel_config.h_parallel.factor * vae_parallel_config.w_parallel.factor == vae_mesh_shape[vae_sp_axis]
-        )
-        assert vae_parallel_config.h_parallel.mesh_axis == vae_parallel_config.w_parallel.mesh_axis
-
-        # Create the TT Mochi pipeline
-        pipeline = MochiPipeline(
-            mesh_device=mesh_device,
-            vae_mesh_shape=vae_mesh_shape,
-            parallel_config=parallel_config,
-            vae_parallel_config=vae_parallel_config,
-            num_links=num_links,
-            use_reference_vae=use_reference_vae,
-            model_name=checkpoint_name,
-            force_zeros_for_empty_prompt=force_zeros_for_empty_prompt,
-            reload_dit_model=reload_dit_model,
-        )
-
-        return pipeline
 
     def _get_t5_prompt_embeds(
         self,
@@ -569,11 +589,9 @@ class MochiPipeline(DiffusionPipeline):
     @torch.no_grad()
     def __call__(
         self,
-        prompt: Union[str, List[str]] = None,
-        negative_prompt: Optional[Union[str, List[str]]] = None,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
-        num_frames: int = 19,
+        *,
+        prompts: list[str],
+        negative_prompts: list[str] | None = None,
         num_inference_steps: int = 64,
         timesteps: List[int] = None,
         guidance_scale: float = 4.5,
@@ -596,14 +614,21 @@ class MochiPipeline(DiffusionPipeline):
         profiler: BenchmarkProfiler = None,
         profiler_iteration: int = 0,
     ):
+        negative_prompts = negative_prompts if negative_prompts is not None else [""] * len(prompts)
+
         vae_traced = vae_traced if vae_traced is not None else traced
         encoder_traced = encoder_traced if encoder_traced is not None else traced
-        height = height or self.default_height
-        width = width or self.default_width
+        height = self._height
+        width = self._width
+        num_frames = self._num_frames
+
+        if guidance_scale > 1 and not self._cfg_enabled:
+            msg = "guidance_scale > 1 requires CFG to be enabled"
+            raise ValueError(msg)
 
         # 1. Check inputs. Raise error if not correct
         self.check_inputs(
-            prompt=prompt,
+            prompt=prompts,
             height=height,
             width=width,
             callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
@@ -619,10 +644,8 @@ class MochiPipeline(DiffusionPipeline):
         self._interrupt = False
 
         # 2. Define call parameters
-        if prompt is not None and isinstance(prompt, str):
-            batch_size = 1
-        elif prompt is not None and isinstance(prompt, list):
-            batch_size = len(prompt)
+        if prompts is not None:
+            batch_size = len(prompts)
         else:
             batch_size = prompt_embeds.shape[0]
 
@@ -636,8 +659,8 @@ class MochiPipeline(DiffusionPipeline):
             negative_prompt_embeds,
             negative_prompt_attention_mask,
         ) = self.encode_prompt(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
+            prompt=prompts,
+            negative_prompt=negative_prompts,
             do_classifier_free_guidance=self.do_classifier_free_guidance,
             num_videos_per_prompt=num_videos_per_prompt,
             prompt_embeds=prompt_embeds,
@@ -830,8 +853,28 @@ class MochiPipeline(DiffusionPipeline):
 
         return MochiPipelineOutput(frames=video)
 
-    def run_single_prompt(self, *args, **kwargs):
-        return self.__call__(*args, **kwargs).frames
+    def run_single_prompt(
+        self,
+        *,
+        prompt: str,
+        negative_prompt: str = "",
+        num_inference_steps: int = 64,
+        guidance_scale: float = 4.5,
+        seed: int | None = None,
+        traced: bool = False,
+        profiler: BenchmarkProfiler | None = None,
+        profiler_iteration: int = 0,
+    ):
+        return self(
+            prompts=[prompt],
+            negative_prompts=[negative_prompt],
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            seed=seed,
+            traced=traced,
+            profiler=profiler,
+            profiler_iteration=profiler_iteration,
+        ).frames
 
     def synchronize_devices(self):
         ttnn.synchronize_device(self.mesh_device)

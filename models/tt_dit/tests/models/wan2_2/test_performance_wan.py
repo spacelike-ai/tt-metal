@@ -220,17 +220,34 @@ def test_pipeline_performance(
         mesh_device, width, height, model_type, topology
     )
 
-    pipeline = pipeline_cls.create_pipeline(
-        mesh_device=mesh_device,
-        sp_axis=sp_axis,
-        tp_axis=tp_axis,
-        num_links=num_links,
-        dynamic_load=dynamic_load,
-        topology=topology,
-        is_fsdp=is_fsdp,
-        target_height=height,
-        target_width=width,
-        num_frames=num_frames,
+    from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VaeHWParallelConfig
+    from models.tt_dit.pipelines.wan.pipeline_wan import WanPipelineConfig
+
+    h_factor = tuple(mesh_device.shape)[tp_axis]
+    w_factor = tuple(mesh_device.shape)[sp_axis]
+    parallel_config = DiTParallelConfig.from_tuples(cfg=(1, 0), sp=(w_factor, sp_axis), tp=(h_factor, tp_axis))
+    vae_parallel_config = VaeHWParallelConfig.from_tuples(height=(h_factor, tp_axis), width=(w_factor, sp_axis))
+    encoder_parallel_config = EncoderParallelConfig.from_tuple((h_factor, tp_axis))
+
+    pipeline = pipeline_cls(
+        device=mesh_device,
+        config=WanPipelineConfig.default(
+            mesh_shape=mesh_device.shape,
+            dit_parallel_config=parallel_config,
+            vae_parallel_config=vae_parallel_config,
+            encoder_parallel_config=encoder_parallel_config,
+            num_links=num_links,
+            dynamic_load=dynamic_load,
+            topology=topology,
+            is_fsdp=is_fsdp,
+            model_type=model_type,
+            checkpoint_name=(
+                "Wan-AI/Wan2.2-I2V-A14B-Diffusers" if model_type == "i2v" else "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+            ),
+            height=height,
+            width=width,
+            num_frames=num_frames,
+        ),
     )
 
     # Warmup run (not timed)
@@ -240,11 +257,8 @@ def test_pipeline_performance(
         if traced:
             with torch.no_grad():
                 pipeline(
-                    prompt=prompts[0],
+                    prompts=[prompts[0]],
                     image_prompt=image_prompt,
-                    height=height,
-                    width=width,
-                    num_frames=num_frames,
                     num_inference_steps=2,  # Small number of steps to reduce test time.
                     traced=traced,
                 )
@@ -266,11 +280,8 @@ def test_pipeline_performance(
         with benchmark_profiler("run", iteration=i):
             with torch.no_grad():
                 result = pipeline(
-                    prompt=prompts[prompt_idx],
+                    prompts=[prompts[prompt_idx]],
                     image_prompt=image_prompt,
-                    height=height,
-                    width=width,
-                    num_frames=num_frames,
                     num_inference_steps=num_inference_steps,
                     profiler=benchmark_profiler,
                     profiler_iteration=i,
