@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, List
 import torch
 import tqdm
 from diffusers.image_processor import VaeImageProcessor
-from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
 from loguru import logger
 from PIL import Image
 
@@ -19,7 +18,7 @@ import ttnn
 
 # NOTE: SD35Transformer is the new tt-dit implementation
 from models.tt_dit.models.transformers.transformer_sd35 import SD35Checkpoint
-from models.tt_dit.models.vae.vae_sd35 import VAEDecoder
+from models.tt_dit.models.vae.vae_sd35 import VAEDecoderAdapter
 from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
@@ -35,6 +34,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 TILE_SIZE = 32
+
+_VAE_SCALE_FACTOR = 8
 
 _DEFAULT_CHECKPOINT = "stabilityai/stable-diffusion-3.5-large"
 
@@ -174,12 +175,8 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         self.vae_device = vae_device
         self.vae_submesh_idx = vae_submesh_idx
 
-        logger.info("loading models...")
-        checkpoint_name = config.checkpoint_name
-        self._torch_vae = AutoencoderKL.from_pretrained(checkpoint_name, subfolder="vae")
-        assert isinstance(self._torch_vae, AutoencoderKL)
-
         logger.info("creating TT-NN transformer...")
+        checkpoint_name = config.checkpoint_name
 
         checkpoint = SD35Checkpoint(checkpoint_name)
         self.transformers = [
@@ -197,12 +194,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         self._joint_attention_dim = checkpoint.joint_attention_dim
         self.patch_size = checkpoint.patch_size
 
-        self._block_out_channels = self._torch_vae.config.block_out_channels
-        self._torch_vae_scaling_factor = self._torch_vae.config.scaling_factor
-        self._torch_vae_shift_factor = self._torch_vae.config.shift_factor
-
-        self._torch_vae_scale_factor = 2 ** (len(self._block_out_channels) - 1)
-        self._image_processor = VaeImageProcessor(vae_scale_factor=self._torch_vae_scale_factor)
+        self._image_processor = VaeImageProcessor(vae_scale_factor=_VAE_SCALE_FACTOR)
 
         with reshape_device(self.encoder_device, self.encoder_mesh_shape):
             logger.info("creating text encoder...")
@@ -215,19 +207,15 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
                 joint_attention_dim=self._joint_attention_dim,
             )
 
-            self._vae_decoder = VAEDecoder.from_torch(
-                torch_ref=self._torch_vae.decoder,
-                mesh_device=self.vae_device,
+            logger.info("creating VAE decoder...")
+            self._vae = VAEDecoderAdapter(
+                checkpoint_name=checkpoint_name,
                 parallel_config=self.vae_parallel_config,
                 ccl_manager=self.ccl_managers[vae_submesh_idx],
+                use_torch=False,
             )
 
-        # intermediate buffers for safe tracing
-        self._vae_input_latents = None
-
         ttnn.synchronize_device(self.encoder_device)
-
-        self._vae_decoder_tracer = Tracer(self._vae_decoder.forward, device=self.vae_device, prep_run=False)
 
         logger.info("Pipeline allocation run...")
         self(
@@ -275,8 +263,8 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
             width = self._width
             height = self._height
 
-            assert height % (self._torch_vae_scale_factor * self.patch_size) == 0
-            assert width % (self._torch_vae_scale_factor * self.patch_size) == 0
+            assert height % (_VAE_SCALE_FACTOR * self.patch_size) == 0
+            assert width % (_VAE_SCALE_FACTOR * self.patch_size) == 0
             assert max_t5_sequence_length <= 512  # noqa: PLR2004
 
             do_classifier_free_guidance = guidance_scale > 1
@@ -284,8 +272,8 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
             patch_size = 2
             latents_shape = (
                 batch_size * num_images_per_prompt,
-                height // self._torch_vae_scale_factor,
-                width // self._torch_vae_scale_factor,
+                height // _VAE_SCALE_FACTOR,
+                width // _VAE_SCALE_FACTOR,
                 self._num_channels_latents,
             )
 
@@ -467,24 +455,15 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         )
 
         torch_latents = ttnn.to_torch(ttnn.get_device_tensors(tt_latents)[0])
-        torch_latents = (torch_latents / self._torch_vae_scaling_factor) + self._torch_vae_shift_factor
         torch_latents = self.transformers[0].unpatchify(
             torch_latents,
-            width=width // self._torch_vae_scale_factor,
-            height=height // self._torch_vae_scale_factor,
+            width=width // _VAE_SCALE_FACTOR,
+            height=height // _VAE_SCALE_FACTOR,
         )
 
         # Upload + VAE forward + extract-to-host run under the encoder/VAE shape.
         with reshape_device(self.encoder_device, self.encoder_mesh_shape):
-            tt_latents = tensor.from_torch(torch_latents)
-            if self._vae_input_latents is None:
-                self._vae_input_latents = tt_latents.to(self.vae_device)
-            else:
-                ttnn.copy_host_to_device_tensor(tt_latents, self._vae_input_latents)
-
-            vae_decode = self._vae_decoder_tracer if traced else self._vae_decoder.forward
-            decoded_output = vae_decode(self._vae_input_latents)
-            return ttnn.to_torch(ttnn.get_device_tensors(decoded_output)[0]).permute(0, 3, 1, 2)
+            return self._vae.decode(torch_latents, traced=traced)
 
     def synchronize_devices(self):
         for submesh_device in self.submesh_devices:

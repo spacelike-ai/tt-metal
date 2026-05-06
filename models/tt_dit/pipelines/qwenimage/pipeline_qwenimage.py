@@ -12,13 +12,12 @@ from typing import TYPE_CHECKING
 import torch
 import tqdm
 from diffusers.image_processor import VaeImageProcessor
-from diffusers.models.autoencoders.autoencoder_kl_qwenimage import AutoencoderKLQwenImage
 from loguru import logger
 
 import ttnn
 
 from models.tt_dit.models.transformers.transformer_qwenimage import QwenImageCheckpoint
-from models.tt_dit.models.vae.vae_qwenimage import QwenImageVaeDecoder
+from models.tt_dit.models.vae.vae_qwenimage import QwenImageVAEDecoderAdapter
 from models.tt_dit.parallel.config import (
     DiTParallelConfig,
     EncoderParallelConfig,
@@ -245,11 +244,6 @@ class QwenImagePipeline(PipelineAPIMixin):
 
         self._checkpoint = QwenImageCheckpoint(self._checkpoint_name)
 
-        self._torch_vae = AutoencoderKLQwenImage.from_pretrained(self._checkpoint_name, subfolder="vae")
-        assert isinstance(self._torch_vae, AutoencoderKLQwenImage)
-        # Store VAE state dict for loading/reloading
-        self._vae_state_dict = self._torch_vae.state_dict()
-
         self._num_channels_latents = 16
         self._patch_size = self._checkpoint.patch_size
         self._vae_scale_factor = 8
@@ -292,35 +286,23 @@ class QwenImagePipeline(PipelineAPIMixin):
         # Always load transformers for vae since it comes before VAE
         self._load_transformers(self.vae_submesh_idx)
 
-        self._latents_scaling = 1.0 / torch.tensor(self._torch_vae.config.latents_std)
-        self._latents_shift = torch.tensor(self._torch_vae.config.latents_mean)
-
         self._image_processor = VaeImageProcessor(vae_scale_factor=2 * self._vae_scale_factor)
 
         self._use_torch_vae_decoder = config.use_torch_vae_decoder
 
-        if config.use_torch_vae_decoder:
-            self._vae_decoder = None
-            self._vae_decoder_tracer = None
-        else:
-            with reshape_device(self.vae_device, self.vae_mesh_shape):
-                logger.info("creating TT-NN VAE decoder...")
-                self._vae_decoder = QwenImageVaeDecoder(
-                    base_dim=self._torch_vae.config.base_dim,
-                    z_dim=self._torch_vae.config.z_dim,
-                    dim_mult=self._torch_vae.config.dim_mult,
-                    num_res_blocks=self._torch_vae.config.num_res_blocks,
-                    temperal_downsample=self._torch_vae.config.temperal_downsample,
-                    device=self.vae_device,
-                    parallel_config=self._wan_vae_parallel_config,
-                    ccl_manager=self._ccl_managers[self.vae_submesh_idx],
-                )
-                self._vae_decoder_tracer = Tracer(self._vae_decoder.forward, device=self.vae_device, prep_run=False)
-            ttnn.synchronize_device(self.vae_device)
+        with reshape_device(self.vae_device, self.vae_mesh_shape):
+            logger.info("creating VAE decoder...")
+            self._vae = QwenImageVAEDecoderAdapter(
+                checkpoint_name=self._checkpoint_name,
+                parallel_config=self._wan_vae_parallel_config,
+                ccl_manager=self._ccl_managers[self.vae_submesh_idx],
+                use_torch=config.use_torch_vae_decoder,
+            )
+        ttnn.synchronize_device(self.vae_device)
 
-            # Load VAE weights based on configuration
-            if not config.dynamic_load_vae:
-                self._vae_decoder.load_torch_state_dict(self._vae_state_dict)
+        # Load VAE weights based on configuration
+        if not config.use_torch_vae_decoder and not config.dynamic_load_vae:
+            self._vae.reload_weights()
 
         logger.info("Pipeline allocation run...")
         self(
@@ -356,21 +338,21 @@ class QwenImagePipeline(PipelineAPIMixin):
 
     def _deallocate_vae(self) -> None:
         """Deallocate VAE decoder weights from device to free memory."""
-        if self._use_torch_vae_decoder or not self._vae_decoder.is_loaded():
+        if self._use_torch_vae_decoder or not self._vae.is_loaded():
             return
 
         logger.info("deallocating VAE decoder weights to free memory...")
-        self._vae_decoder.deallocate_weights()
+        self._vae.deallocate_weights()
         ttnn.synchronize_device(self.vae_device)
 
     def _reload_vae(self) -> None:
         """Load or reload VAE decoder weights to device."""
-        if self._use_torch_vae_decoder or self._vae_decoder.is_loaded():
+        if self._use_torch_vae_decoder or self._vae.is_loaded():
             return
 
         with reshape_device(self.vae_device, self.vae_mesh_shape):
             logger.info("loading VAE decoder weights to device...")
-            self._vae_decoder.load_torch_state_dict(self._vae_state_dict)
+            self._vae.reload_weights()
         ttnn.synchronize_device(self.vae_device)
 
     @staticmethod
@@ -410,7 +392,7 @@ class QwenImagePipeline(PipelineAPIMixin):
             self._load_transformers(self.vae_submesh_idx)
 
     def prepare_vae(self) -> None:
-        if not self._vae_decoder.is_loaded():
+        if not self._vae.is_loaded():
             self._deallocate_transformers(self.vae_submesh_idx)
             with reshape_device(self.vae_device, self.vae_mesh_shape):
                 self._reload_vae()
@@ -590,20 +572,10 @@ class QwenImagePipeline(PipelineAPIMixin):
                     width=latents_width,
                 )
 
-                torch_latents = torch_latents / self._latents_scaling + self._latents_shift
-
-                if self._vae_decoder is None:
-                    torch_latents = torch_latents.permute(0, 3, 1, 2).unsqueeze(2)
-                    with torch.no_grad():
-                        decoded_output = self._torch_vae.decode(torch_latents).sample[:, :, 0]
-                else:
+                if not self._use_torch_vae_decoder:
                     self.prepare_vae()
-
-                    with reshape_device(self.vae_device, self.vae_mesh_shape):
-                        tt_latents, logical_h = self._vae_decoder.prepare_input(torch_latents)
-                        vae_decode = self._vae_decoder_tracer if vae_traced else self._vae_decoder.forward
-                        tt_decoded_output, logical_h = vae_decode(tt_latents, logical_h)
-                        decoded_output = self._vae_decoder.postprocess_output(tt_decoded_output, logical_h)
+                with reshape_device(self.vae_device, self.vae_mesh_shape):
+                    decoded_output = self._vae.decode(torch_latents, traced=vae_traced)
 
                 image = self._image_processor.postprocess(decoded_output, output_type="pt")
                 assert isinstance(image, torch.Tensor)

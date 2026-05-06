@@ -11,14 +11,13 @@ from typing import TYPE_CHECKING
 
 import torch
 import tqdm
-from diffusers import AutoencoderKL
 from diffusers.image_processor import VaeImageProcessor
 from loguru import logger
 
 import ttnn
 from models.common.utility_functions import is_blackhole
 from models.tt_dit.models.transformers.transformer_flux1 import Flux1Checkpoint
-from models.tt_dit.models.vae.vae_sd35 import VAEDecoder
+from models.tt_dit.models.vae.vae_sd35 import VAEDecoderAdapter
 from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
@@ -31,6 +30,8 @@ from models.tt_dit.utils.tracing import Tracer
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+_VAE_SCALE_FACTOR = 16
 
 _PRESETS_WH: dict[tuple[int, ...], dict] = {
     (1, 4): {"sp": (1, 0), "tp": (4, 1), "encoder_tp": (4, 1), "vae_tp": (4, 1), "num_links": 1},
@@ -162,11 +163,8 @@ class Flux1Pipeline(PipelineAPIMixin):
         self.encoder_submesh_idx = 0  # Use submesh 0 for encoder
         self.vae_submesh_idx = 0  # Use submesh 0 for VAE
 
-        logger.info("loading models...")
-        checkpoint_name = config.checkpoint_name
-        self._torch_vae = AutoencoderKL.from_pretrained(checkpoint_name, subfolder="vae")
-
         logger.info("creating TT-NN transformer...")
+        checkpoint_name = config.checkpoint_name
 
         checkpoint = Flux1Checkpoint(checkpoint_name)
         self.transformers = [
@@ -186,12 +184,7 @@ class Flux1Pipeline(PipelineAPIMixin):
         self._patch_size = checkpoint.patch_size
         self._with_guidance_embeds = checkpoint.with_guidance_embeds
 
-        self._block_out_channels = self._torch_vae.config.block_out_channels
-        self._latents_scaling = self._torch_vae.config.scaling_factor
-        self._latents_shift = self._torch_vae.config.shift_factor
-
-        self._vae_scale_factor = 2 ** len(self._block_out_channels)
-        self._image_processor = VaeImageProcessor(vae_scale_factor=self._vae_scale_factor)
+        self._image_processor = VaeImageProcessor(vae_scale_factor=_VAE_SCALE_FACTOR)
 
         logger.info("creating text encoder...")
         self._text_encoder = TextEncoder(
@@ -207,13 +200,13 @@ class Flux1Pipeline(PipelineAPIMixin):
 
         ttnn.synchronize_device(self.encoder_device)
 
-        self._vae_decoder = VAEDecoder.from_torch(
-            torch_ref=self._torch_vae.decoder,
-            mesh_device=self.vae_device,
+        logger.info("creating VAE decoder...")
+        self._vae = VAEDecoderAdapter(
+            checkpoint_name=checkpoint_name,
             parallel_config=self._vae_parallel_config,
             ccl_manager=self._ccl_managers[self.vae_submesh_idx],
+            use_torch=False,
         )
-        self._vae_decoder_tracer = Tracer(self._vae_decoder.forward, device=self.vae_device, prep_run=False)
 
         logger.info("Pipeline allocation run...")
         self(
@@ -264,14 +257,14 @@ class Flux1Pipeline(PipelineAPIMixin):
 
         on_event(SectionStart("total"))
         with nullcontext():
-            assert height % (self._vae_scale_factor * self._patch_size) == 0
-            assert width % (self._vae_scale_factor * self._patch_size) == 0
+            assert height % (_VAE_SCALE_FACTOR * self._patch_size) == 0
+            assert width % (_VAE_SCALE_FACTOR * self._patch_size) == 0
 
             cfg_enabled = cfg_scale > 1
             assert not cfg_enabled, "CFG is not supported"
 
-            latents_height = height // self._vae_scale_factor
-            latents_width = width // self._vae_scale_factor
+            latents_height = height // _VAE_SCALE_FACTOR
+            latents_width = width // _VAE_SCALE_FACTOR
             spatial_sequence_length = latents_height * latents_width
 
             logger.info("encoding prompts...")
@@ -423,19 +416,11 @@ class Flux1Pipeline(PipelineAPIMixin):
                 )
 
                 torch_latents = ttnn.to_torch(ttnn.get_device_tensors(tt_latents)[0])
-                torch_latents = (torch_latents / self._latents_scaling) + self._latents_shift
-                torch_latents = _unpack_latents(torch_latents, height, width, self._vae_scale_factor)
+                torch_latents = _unpack_latents(torch_latents, height, width, _VAE_SCALE_FACTOR)
+                # The adapter expects NHWC; _unpack_latents produces BCHW.
+                torch_latents = torch_latents.permute(0, 2, 3, 1)
 
-                tt_latents = ttnn.from_torch(
-                    torch_latents.permute(0, 2, 3, 1),
-                    layout=ttnn.TILE_LAYOUT,
-                    dtype=ttnn.bfloat16,
-                    device=self.vae_device,
-                    mesh_mapper=ttnn.ReplicateTensorToMesh(self.vae_device),
-                )
-                vae_decode = self._vae_decoder_tracer if vae_traced else self._vae_decoder.forward
-                tt_decoded_output = vae_decode(tt_latents)
-                decoded_output = ttnn.to_torch(ttnn.get_device_tensors(tt_decoded_output)[0]).permute(0, 3, 1, 2)
+                decoded_output = self._vae.decode(torch_latents, traced=vae_traced)
 
                 image = self._image_processor.postprocess(decoded_output, output_type="pt")
                 assert isinstance(image, torch.Tensor)
