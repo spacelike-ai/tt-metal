@@ -21,8 +21,8 @@ from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribut
 from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
 from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
 from models.tt_dit.solvers import EulerSolver
-from models.tt_dit.utils import tensor
 from models.tt_dit.utils.mesh import reshape_device
+from models.tt_dit.utils.tensor import from_torch_to_devices
 from models.tt_dit.utils.tracing import Tracer
 
 from .text_encoder import TextEncoder
@@ -380,7 +380,7 @@ class MotifPipeline(PipelineAPIMixin):
         latents = torch.randn(shape, dtype=torch.float32).to(dtype=torch.bfloat16).permute(0, 2, 3, 1)
         latents = self._transformers[0].patchify(latents)
 
-        return [tensor.from_torch(latents, device=d, mesh_axes=[None, self._sp_axis, None]) for d in self._devices]
+        return from_torch_to_devices(latents, devices=self._devices, mesh_axes=[None, self._sp_axis, None])
 
     def _decode_latents(self, tt_latents: ttnn.Tensor, *, traced: bool) -> list[Image.Image]:
         # Sync because we don't pass a persistent buffer or a barrier semaphore.

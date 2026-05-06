@@ -25,7 +25,7 @@ from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, Se
 from models.tt_dit.pipelines.flux1.text_encoder import TextEncoder
 from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
 from models.tt_dit.solvers import EulerSolver, schedules
-from models.tt_dit.utils import tensor
+from models.tt_dit.utils.tensor import from_torch_to_devices
 from models.tt_dit.utils.tracing import Tracer
 
 if TYPE_CHECKING:
@@ -331,33 +331,26 @@ class Flux1Pipeline(PipelineAPIMixin):
             tt_pooled_prompt_embeds_list = distribute_cfg(
                 pooled_prompt_embeds, devices=self._submesh_devices, on_host=False
             )
-            tt_latents_step_list = []
-            tt_guidance_list = []
-            tt_spatial_rope_cos_list = []
-            tt_spatial_rope_sin_list = []
-            tt_prompt_rope_cos_list = []
-            tt_prompt_rope_sin_list = []
-            for i, submesh_device in enumerate(self._submesh_devices):
-                tt_initial_latents = tensor.from_torch(latents, device=submesh_device, mesh_axes=[None, sp_axis, None])
-                tt_guidance = (
-                    tensor.from_torch(guidance.unsqueeze(-1), device=submesh_device) if guidance is not None else None
-                )
-                tt_spatial_rope_cos = tensor.from_torch(
-                    rope_cos[prompt_sequence_length:], device=submesh_device, mesh_axes=[sp_axis, None]
-                )
-                tt_spatial_rope_sin = tensor.from_torch(
-                    rope_sin[prompt_sequence_length:], device=submesh_device, mesh_axes=[sp_axis, None]
-                )
-                tt_prompt_rope_cos = tensor.from_torch(rope_cos[:prompt_sequence_length], device=submesh_device)
-                tt_prompt_rope_sin = tensor.from_torch(rope_sin[:prompt_sequence_length], device=submesh_device)
-
-                tt_latents_step_list.append(tt_initial_latents)
-                del tt_initial_latents
-                tt_guidance_list.append(tt_guidance)
-                tt_spatial_rope_cos_list.append(tt_spatial_rope_cos)
-                tt_spatial_rope_sin_list.append(tt_spatial_rope_sin)
-                tt_prompt_rope_cos_list.append(tt_prompt_rope_cos)
-                tt_prompt_rope_sin_list.append(tt_prompt_rope_sin)
+            tt_latents_step_list = from_torch_to_devices(
+                latents, devices=self._submesh_devices, mesh_axes=[None, sp_axis, None]
+            )
+            tt_guidance_list = (
+                from_torch_to_devices(guidance.unsqueeze(-1), devices=self._submesh_devices)
+                if guidance is not None
+                else None
+            )
+            tt_spatial_rope_cos_list = from_torch_to_devices(
+                rope_cos[prompt_sequence_length:], devices=self._submesh_devices, mesh_axes=[sp_axis, None]
+            )
+            tt_spatial_rope_sin_list = from_torch_to_devices(
+                rope_sin[prompt_sequence_length:], devices=self._submesh_devices, mesh_axes=[sp_axis, None]
+            )
+            tt_prompt_rope_cos_list = from_torch_to_devices(
+                rope_cos[:prompt_sequence_length], devices=self._submesh_devices
+            )
+            tt_prompt_rope_sin_list = from_torch_to_devices(
+                rope_sin[:prompt_sequence_length], devices=self._submesh_devices
+            )
 
             logger.info("denoising...")
 
@@ -366,24 +359,11 @@ class Flux1Pipeline(PipelineAPIMixin):
                 for i, t in enumerate(tqdm.tqdm(timesteps)):
                     on_event(SectionStart(f"denoising_step_{i}"))
                     with nullcontext():
-                        tt_timestep_list = []
-                        for submesh_device in self._submesh_devices:
-                            # Allocation on device is fine, because timesteps are not used after
-                            # trace execution, and can be overwritten during trace execution.
-                            tt_timestep = ttnn.full(
-                                [1, 1],
-                                fill_value=t,
-                                layout=ttnn.TILE_LAYOUT,
-                                dtype=ttnn.float32,
-                                device=submesh_device,
-                            )
-                            tt_timestep_list.append(tt_timestep)
-
                         reuse_tensors = i > 0 and traced
 
                         tt_latents_step_list = self._step(
                             step_index=i,
-                            timestep=tt_timestep_list,
+                            t=t,
                             latents=tt_latents_step_list,
                             cfg_enabled=cfg_enabled,
                             prompt_embeds=None if reuse_tensors else tt_prompt_embeds_list,
@@ -481,7 +461,7 @@ class Flux1Pipeline(PipelineAPIMixin):
         cfg_scale: float,
         step_index: int,
         latents: list[ttnn.Tensor],
-        timestep: list[ttnn.Tensor],
+        t: float,
         pooled_prompt_embeds: list[ttnn.Tensor] | None,
         prompt_embeds: list[ttnn.Tensor] | None,
         guidance: list[ttnn.Tensor | None] | None,
@@ -494,13 +474,21 @@ class Flux1Pipeline(PipelineAPIMixin):
         traced: bool,
     ) -> list[ttnn.Tensor]:
         latents = list(latents)
-        for idx in range(len(self._submesh_devices)):
+        for idx, submesh_device in enumerate(self._submesh_devices):
+            timestep = ttnn.full(
+                [1, 1],
+                fill_value=t,
+                layout=ttnn.TILE_LAYOUT,
+                dtype=ttnn.float32,
+                device=submesh_device,
+            )
+
             latent, noise_pred = self._predict_tracers[idx](
                 cfg_enabled=cfg_enabled,
                 latent=latents[idx],
                 prompt=prompt_embeds[idx] if prompt_embeds is not None else None,
                 pooled=pooled_prompt_embeds[idx] if pooled_prompt_embeds is not None else None,
-                timestep=timestep[idx],
+                timestep=timestep,
                 guidance=guidance[idx] if guidance is not None else None,
                 spatial_rope_cos=spatial_rope_cos[idx] if spatial_rope_cos is not None else None,
                 spatial_rope_sin=spatial_rope_sin[idx] if spatial_rope_sin is not None else None,

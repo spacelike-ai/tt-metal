@@ -26,8 +26,8 @@ from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, Se
 from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
 from models.tt_dit.pipelines.stable_diffusion_35_large.text_encoder import TextEncoder
 from models.tt_dit.solvers import EulerSolver, schedules
-from models.tt_dit.utils import tensor
 from models.tt_dit.utils.mesh import reshape_device
+from models.tt_dit.utils.tensor import from_torch_to_devices
 from models.tt_dit.utils.tracing import Tracer
 
 if TYPE_CHECKING:
@@ -317,15 +317,11 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
             tt_pooled_prompt_embeds_list = distribute_cfg(
                 pooled_prompt_embeds.unsqueeze(1).unsqueeze(1), devices=self.submesh_devices, on_host=False
             )
-            tt_latents_step_list = []
-            for submesh_device in self.submesh_devices:
-                tt_initial_latents = tensor.from_torch(
-                    latents,
-                    device=submesh_device,
-                    mesh_axes=[None, None, self.dit_parallel_config.sequence_parallel.mesh_axis, None],
-                )
-                tt_latents_step_list.append(tt_initial_latents)
-                del tt_initial_latents
+            tt_latents_step_list = from_torch_to_devices(
+                latents,
+                devices=self.submesh_devices,
+                mesh_axes=[None, None, self.dit_parallel_config.sequence_parallel.mesh_axis, None],
+            )
 
             logger.info("denoising...")
 
@@ -334,23 +330,10 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
                 for i, t in enumerate(tqdm.tqdm(timesteps)):
                     on_event(SectionStart(f"denoising_step_{i}"))
                     with nullcontext():
-                        tt_timestep_list = []
-                        for submesh_device in self.submesh_devices:
-                            # Allocation on device is fine, because timesteps are not used after
-                            # trace execution, and can be overwritten during trace execution.
-                            tt_timestep = ttnn.full(
-                                [1, 1, 1, 1],
-                                fill_value=t,
-                                layout=ttnn.TILE_LAYOUT,
-                                dtype=ttnn.float32,
-                                device=submesh_device,
-                            )
-                            tt_timestep_list.append(tt_timestep)
-
                         reuse_tensors = traced and i > 0
 
                         tt_latents_step_list = self._step(
-                            timestep=tt_timestep_list,
+                            t=t,
                             latents=tt_latents_step_list,
                             do_classifier_free_guidance=do_classifier_free_guidance,
                             prompt_embeds=None if reuse_tensors else tt_prompt_embeds_list,
@@ -420,7 +403,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         do_classifier_free_guidance: bool,
         guidance_scale: float,
         latents: list[ttnn.Tensor],
-        timestep: list[ttnn.Tensor],
+        t: float,
         pooled_prompt_embeds: list[ttnn.Tensor] | None,
         prompt_embeds: list[ttnn.Tensor] | None,
         step_index: int,
@@ -429,13 +412,21 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         traced: bool,
     ) -> list[ttnn.Tensor]:
         latents = list(latents)
-        for idx in range(len(self.submesh_devices)):
+        for idx, submesh_device in enumerate(self.submesh_devices):
+            timestep = ttnn.full(
+                [1, 1, 1, 1],
+                fill_value=t,
+                layout=ttnn.TILE_LAYOUT,
+                dtype=ttnn.float32,
+                device=submesh_device,
+            )
+
             latent, noise_pred = self._predict_tracers[idx](
                 cfg_enabled=do_classifier_free_guidance,
                 latent=latents[idx],
                 prompt=prompt_embeds[idx] if prompt_embeds is not None else None,
                 pooled=pooled_prompt_embeds[idx] if pooled_prompt_embeds is not None else None,
-                timestep=timestep[idx],
+                timestep=timestep,
                 submesh_id=idx,
                 spatial_sequence_length=spatial_sequence_length,
                 prompt_sequence_length=prompt_sequence_length,
@@ -471,4 +462,3 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
 
     def t5_enabled(self) -> bool:
         return self._text_encoder.t5_enabled
-

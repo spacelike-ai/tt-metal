@@ -31,8 +31,9 @@ from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, Se
 from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
 from models.tt_dit.pipelines.qwenimage.text_encoder import TextEncoder
 from models.tt_dit.solvers import EulerSolver, schedules
-from models.tt_dit.utils import cache, tensor
+from models.tt_dit.utils import cache
 from models.tt_dit.utils.mesh import reshape_device
+from models.tt_dit.utils.tensor import from_torch_to_devices
 from models.tt_dit.utils.tracing import Tracer
 
 if TYPE_CHECKING:
@@ -490,24 +491,17 @@ class QwenImagePipeline(PipelineAPIMixin):
             prompt_rope_sin = prompt_rope.imag.repeat_interleave(2, dim=-1)
 
             tt_prompt_embeds_list = distribute_cfg(prompt_embeds, devices=self._submesh_devices, on_host=False)
-            tt_latents_step_list = []
-            tt_spatial_rope_cos_list = []
-            tt_spatial_rope_sin_list = []
-            tt_prompt_rope_cos_list = []
-            tt_prompt_rope_sin_list = []
-
-            for i, submesh_device in enumerate(self._submesh_devices):
-                tt_latents_step_list.append(
-                    tensor.from_torch(latents, device=submesh_device, mesh_axes=[None, sp_axis, None])
-                )
-                tt_spatial_rope_cos_list.append(
-                    tensor.from_torch(spatial_rope_cos, device=submesh_device, mesh_axes=[sp_axis, None])
-                )
-                tt_spatial_rope_sin_list.append(
-                    tensor.from_torch(spatial_rope_sin, device=submesh_device, mesh_axes=[sp_axis, None])
-                )
-                tt_prompt_rope_cos_list.append(tensor.from_torch(prompt_rope_cos, device=submesh_device))
-                tt_prompt_rope_sin_list.append(tensor.from_torch(prompt_rope_sin, device=submesh_device))
+            tt_latents_step_list = from_torch_to_devices(
+                latents, devices=self._submesh_devices, mesh_axes=[None, sp_axis, None]
+            )
+            tt_spatial_rope_cos_list = from_torch_to_devices(
+                spatial_rope_cos, devices=self._submesh_devices, mesh_axes=[sp_axis, None]
+            )
+            tt_spatial_rope_sin_list = from_torch_to_devices(
+                spatial_rope_sin, devices=self._submesh_devices, mesh_axes=[sp_axis, None]
+            )
+            tt_prompt_rope_cos_list = from_torch_to_devices(prompt_rope_cos, devices=self._submesh_devices)
+            tt_prompt_rope_sin_list = from_torch_to_devices(prompt_rope_sin, devices=self._submesh_devices)
 
             logger.info("denoising...")
 
@@ -516,24 +510,11 @@ class QwenImagePipeline(PipelineAPIMixin):
                 for i, t in enumerate(tqdm.tqdm(timesteps)):
                     on_event(SectionStart(f"denoising_step_{i}"))
                     with nullcontext():
-                        # Allocation on device is fine, because timesteps are not used after
-                        # trace execution, and can be overwritten during trace execution.
-                        tt_timestep_list = [
-                            ttnn.full(
-                                [1, 1],
-                                fill_value=t,
-                                layout=ttnn.TILE_LAYOUT,
-                                dtype=ttnn.float32,
-                                device=submesh_device,
-                            )
-                            for submesh_device in self._submesh_devices
-                        ]
-
                         reuse_tensors = i > 0 and traced
 
                         tt_latents_step_list = self._step(
                             step_index=i,
-                            timestep=tt_timestep_list,
+                            t=t,
                             latents=tt_latents_step_list,
                             prompt_embeds=None if reuse_tensors else tt_prompt_embeds_list,
                             spatial_rope_cos=None if reuse_tensors else tt_spatial_rope_cos_list,
@@ -623,7 +604,7 @@ class QwenImagePipeline(PipelineAPIMixin):
         self,
         *,
         step_index: int,
-        timestep: list[ttnn.Tensor],
+        t: float,
         latents: list[ttnn.Tensor],
         prompt_embeds: list[ttnn.Tensor] | None,
         spatial_rope_cos: list[ttnn.Tensor] | None,
@@ -638,10 +619,17 @@ class QwenImagePipeline(PipelineAPIMixin):
         traced: bool,
     ) -> list[ttnn.Tensor]:
         latents = list(latents)
-        for idx in range(len(self._submesh_devices)):
+        for idx, submesh_device in enumerate(self._submesh_devices):
+            timestep = ttnn.full(
+                [1, 1],
+                fill_value=t,
+                layout=ttnn.TILE_LAYOUT,
+                dtype=ttnn.float32,
+                device=submesh_device,
+            )
             latent, noise_pred = self._predict_tracers[idx](
                 cfg_enabled=cfg_enabled,
-                timestep=timestep[idx],
+                timestep=timestep,
                 latent=latents[idx],
                 prompt=prompt_embeds[idx] if prompt_embeds is not None else None,
                 spatial_rope_cos=spatial_rope_cos[idx] if spatial_rope_cos is not None else None,
