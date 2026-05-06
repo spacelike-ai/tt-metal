@@ -6,34 +6,30 @@
 
 from __future__ import annotations
 
-import html
 import os
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING, Optional
 
-import ftfy
-import regex as re
 import torch
 import tqdm
 from diffusers.models import AutoencoderKLWan
 from diffusers.video_processor import VideoProcessor
 from loguru import logger
-from transformers import AutoTokenizer, UMT5EncoderModel
 
 import ttnn
 
-from ...encoders.umt5.model_umt5 import UMT5Config, UMT5Encoder
-from ...models.transformers.wan2_2.transformer_wan import WanCheckpoint, WanTransformer3DModel
-from ...models.vae.vae_wan2_1 import WanDecoder
-from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, VaeHWParallelConfig
-from ...parallel.manager import CCLManager
-from ...pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
-from ...pipelines.pipeline_api import PipelineAPIMixin
-from ...solvers import UniPCSolver, UniPCVariant, schedules
-from ...utils import cache, tensor
-from ...utils.conv3d import conv3d_blocking_hash
-from ...utils.tensor import (
+from models.tt_dit.models.transformers.wan2_2.transformer_wan import WanCheckpoint, WanTransformer3DModel
+from models.tt_dit.models.vae.vae_wan2_1 import WanDecoder
+from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VaeHWParallelConfig
+from models.tt_dit.parallel.manager import CCLManager
+from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
+from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
+from models.tt_dit.pipelines.wan.text_encoder import TextEncoder
+from models.tt_dit.solvers import UniPCSolver, UniPCVariant, schedules
+from models.tt_dit.utils import cache, tensor
+from models.tt_dit.utils.conv3d import conv3d_blocking_hash
+from models.tt_dit.utils.tensor import (
     fast_device_to_host,
     float32_tensor,
     float_to_uint8,
@@ -247,23 +243,6 @@ EXAMPLE_DOC_STRING = """
 """
 
 
-def basic_clean(text):
-    text = ftfy.fix_text(text)
-    text = html.unescape(html.unescape(text))
-    return text.strip()
-
-
-def whitespace_clean(text):
-    text = re.sub(r"\s+", " ", text)
-    text = text.strip()
-    return text
-
-
-def prompt_clean(text):
-    text = whitespace_clean(basic_clean(text))
-    return text
-
-
 @dataclass
 class TransformerState:
     model: WanTransformer3DModel
@@ -351,12 +330,6 @@ class WanPipeline(PipelineAPIMixin):
         self._width = config.width
         self._num_frames = config.num_frames
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            config.checkpoint_name, subfolder="tokenizer", trust_remote_code=True
-        )
-        self.text_encoder = UMT5EncoderModel.from_pretrained(
-            config.checkpoint_name, subfolder="text_encoder", trust_remote_code=True
-        )
         self.vae = AutoencoderKLWan.from_pretrained(config.checkpoint_name, subfolder="vae", trust_remote_code=True)
         self._flow_shift = config.flow_shift
         self._checkpoint = WanCheckpoint(config.checkpoint_name, subfolder="transformer")
@@ -383,25 +356,12 @@ class WanPipeline(PipelineAPIMixin):
         self.mesh_device = device
         self.dynamic_load = config.dynamic_load
 
-        # Load TT text encoder
-        umt5_config = UMT5Config(
-            vocab_size=self.text_encoder.config.vocab_size,
-            embed_dim=self.text_encoder.config.d_model,
-            ff_dim=self.text_encoder.config.d_ff,
-            kv_dim=self.text_encoder.config.d_kv,
-            num_heads=self.text_encoder.config.num_heads,
-            num_hidden_layers=self.text_encoder.config.num_layers,
-            max_prompt_length=512,  # TODO: Consider removing
-            layer_norm_eps=self.text_encoder.config.layer_norm_epsilon,
-            relative_attention_num_buckets=self.text_encoder.config.relative_attention_num_buckets,
-            relative_attention_max_distance=self.text_encoder.config.relative_attention_max_distance,
-        )
-
-        self.tt_umt5_encoder = UMT5Encoder(
-            config=umt5_config,
-            mesh_device=self.mesh_device,
+        self._text_encoder = TextEncoder(
+            checkpoint_name=config.checkpoint_name,
+            device=self.mesh_device,
             ccl_manager=self.encoder_ccl_manager,
-            parallel_config=self.encoder_parallel_config,
+            encoder_parallel_config=self.encoder_parallel_config,
+            dit_parallel_config=self.parallel_config,
         )
 
         self.transformer = self._checkpoint.build(
@@ -499,14 +459,7 @@ class WanPipeline(PipelineAPIMixin):
         return buffer
 
     def _prepare_text_encoder(self):
-        cache.load_model(
-            self.tt_umt5_encoder,
-            model_name=os.path.basename(self.checkpoint_name),
-            subfolder="text_encoder",
-            parallel_config=self.encoder_parallel_config,
-            mesh_shape=tuple(self.mesh_device.shape),
-            get_torch_state_dict=lambda: self.text_encoder.state_dict(),
-        )
+        self._text_encoder.prepare()
 
     def _prepare_transformer(self, idx: int):
         state = self.transformer_states[idx]
@@ -528,153 +481,6 @@ class WanPipeline(PipelineAPIMixin):
             mesh_shape=tuple(self.mesh_device.shape),
             get_torch_state_dict=lambda: self.vae.state_dict(),
         )
-
-    def _get_t5_prompt_embeds(
-        self,
-        prompt: Union[str, List[str]] = None,
-        num_videos_per_prompt: int = 1,
-        max_sequence_length: int = 512,
-    ):
-        prompt = [prompt] if isinstance(prompt, str) else prompt
-        prompt = [prompt_clean(u) for u in prompt]
-        batch_size = len(prompt)
-
-        # NOTE: while the reference impl does not pad to max_sequence_length, for some reason this seems to be necessary for correctness in this pipeline.
-        # TODO: investigate
-        text_inputs = self.tokenizer(
-            prompt,
-            padding="max_length",
-            max_length=max_sequence_length,
-            truncation=True,
-            add_special_tokens=True,
-            return_attention_mask=True,
-            return_tensors="pt",
-        )
-        text_input_ids, mask = text_inputs.input_ids, text_inputs.attention_mask
-        seq_lens = mask.gt(0).sum(dim=1).long()
-
-        # Shard on batch dimension. On non TP axis
-        dims = [None, None]
-        DP_axis = 1 - self.parallel_config.tensor_parallel.mesh_axis
-        dims[DP_axis] = 0
-        mesh_mapper = ttnn.ShardTensor2dMesh(self.mesh_device, mesh_shape=tuple(self.mesh_device.shape), dims=dims)
-        tt_prompt = ttnn.from_torch(
-            text_input_ids,
-            layout=ttnn.TILE_LAYOUT,
-            device=self.mesh_device,
-            mesh_mapper=mesh_mapper,
-        )
-
-        tt_mask = ttnn.from_torch(
-            mask,
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            device=self.mesh_device,
-            mesh_mapper=mesh_mapper,
-        )
-
-        prompt_embeds = self.tt_umt5_encoder(tt_prompt, attention_mask=tt_mask)[-1]
-
-        # use the mask to zero out the padding tokens.
-        prompt_embeds = prompt_embeds * ttnn.unsqueeze(tt_mask, -1)
-
-        prompt_embeds = self.encoder_ccl_manager.all_gather(
-            prompt_embeds, dim=0, mesh_axis=DP_axis, use_hyperparams=True
-        )
-
-        # duplicate text embeddings for each generation per prompt, using mps friendly method
-        _, seq_len, _ = prompt_embeds.shape
-        prompt_embeds = ttnn.repeat(prompt_embeds, (1, num_videos_per_prompt, 1))
-        prompt_embeds_1BLP = ttnn.view(prompt_embeds, (1, batch_size * num_videos_per_prompt, seq_len, -1))
-        return prompt_embeds_1BLP
-
-    def encode_prompt(
-        self,
-        prompt: Union[str, List[str]],
-        negative_prompt: Optional[Union[str, List[str]]] = None,
-        do_classifier_free_guidance: bool = True,
-        num_videos_per_prompt: int = 1,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        negative_prompt_embeds: Optional[torch.Tensor] = None,
-        max_sequence_length: int = 512,
-    ):
-        r"""
-        Batch encodes the prompt and negative prompt into text encoder hidden states..
-
-        Args:
-            prompt (`str` or `List[str]`, *optional*):
-                prompt to be encoded
-            negative_prompt (`str` or `List[str]`, *optional*):
-                The prompt or prompts not to guide the image generation. If not defined, one has to pass
-                `negative_prompt_embeds` instead. Ignored when not using guidance (i.e., ignored if `guidance_scale` is
-                less than `1`).
-            do_classifier_free_guidance (`bool`, *optional*, defaults to `True`):
-                Whether to use classifier free guidance or not.
-            num_videos_per_prompt (`int`, *optional*, defaults to 1):
-                Number of videos that should be generated per prompt. torch device to place the resulting embeddings on
-            prompt_embeds (`torch.Tensor`, *optional*):
-                Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
-                provided, text embeddings will be generated from `prompt` input argument.
-            negative_prompt_embeds (`torch.Tensor`, *optional*):
-                Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
-                weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
-                argument.
-        """
-        prompt = [prompt] if isinstance(prompt, str) else prompt
-        if prompt is not None:
-            batch_size = len(prompt)
-        else:
-            batch_size = prompt_embeds.shape[0]
-
-        # Setup batching variables
-        all_input_prompts = []
-        pos_prompt_end_idx = 0
-        neg_prompt_end_idx = 0
-
-        if prompt_embeds is None:
-            all_input_prompts += prompt
-            pos_prompt_end_idx = batch_size * num_videos_per_prompt
-
-        if do_classifier_free_guidance and negative_prompt_embeds is None:
-            negative_prompt = negative_prompt or ""
-            negative_prompt = batch_size * [negative_prompt] if isinstance(negative_prompt, str) else negative_prompt
-
-            if prompt is not None and type(prompt) is not type(negative_prompt):
-                raise TypeError(
-                    f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
-                    f" {type(prompt)}."
-                )
-            elif batch_size != len(negative_prompt):
-                raise ValueError(
-                    f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"
-                    f" {prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
-                    " the batch size of `prompt`."
-                )
-
-            all_input_prompts += negative_prompt
-            neg_prompt_end_idx = pos_prompt_end_idx + batch_size * num_videos_per_prompt
-
-        # Add data to pad for size of device on mesh axis to ensure proper shadding on batch dimension.
-        total_prompts = len(all_input_prompts)
-        num_devices = self.mesh_device.shape[1 - self.parallel_config.tensor_parallel.mesh_axis]
-
-        # Pad batch list of prompts to ensure proper sharding on batch dimension.
-        all_input_prompts += [" "] * ((num_devices - (total_prompts % num_devices)) % num_devices)
-        all_prompt_embeds = self._get_t5_prompt_embeds(
-            prompt=all_input_prompts,
-            num_videos_per_prompt=num_videos_per_prompt,
-            max_sequence_length=max_sequence_length,
-        )
-
-        # When CFG is enabled, we should be able to leave the shards on device.
-        prompt_embeds = all_prompt_embeds[:, :pos_prompt_end_idx] if pos_prompt_end_idx > 0 else prompt_embeds
-        negative_prompt_embeds = (
-            all_prompt_embeds[:, pos_prompt_end_idx:neg_prompt_end_idx]
-            if neg_prompt_end_idx > 0
-            else negative_prompt_embeds
-        )
-
-        return prompt_embeds, negative_prompt_embeds
 
     def check_inputs(
         self,
@@ -877,17 +683,17 @@ class WanPipeline(PipelineAPIMixin):
 
         # 3. Encode input prompt
         on_event(SectionStart("encoder"))
-        with nullcontext():
-            self._prepare_text_encoder()
-            prompt_embeds, negative_prompt_embeds = self.encode_prompt(
-                prompt=prompts,
-                negative_prompt=negative_prompts,
-                do_classifier_free_guidance=self.do_classifier_free_guidance,
-                num_videos_per_prompt=num_videos_per_prompt,
-                prompt_embeds=prompt_embeds,
-                negative_prompt_embeds=negative_prompt_embeds,
-                max_sequence_length=max_sequence_length,
-            )
+        self._prepare_text_encoder()
+        prompt_embeds, negative_prompt_embeds = self._text_encoder.encode_cfg(
+            prompts,
+            negative_prompts,
+            cfg_enabled=self.do_classifier_free_guidance,
+            num_videos_per_prompt=num_videos_per_prompt,
+            max_sequence_length=max_sequence_length,
+            prompt_embeds=prompt_embeds,
+            negative_prompt_embeds=negative_prompt_embeds,
+            on_event=on_event,
+        )
         on_event(SectionEnd("encoder"))
 
         # 4. Prepare schedule

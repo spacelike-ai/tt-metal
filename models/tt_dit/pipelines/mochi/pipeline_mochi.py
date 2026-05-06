@@ -5,27 +5,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 import torch
 import tqdm
 from diffusers.models import AutoencoderKLMochi
 from diffusers.video_processor import VideoProcessor
 from loguru import logger
-from transformers import T5EncoderModel, T5TokenizerFast
 
 import ttnn
 
-from ...models.transformers.transformer_mochi import MochiCheckpoint
-from ...models.vae.vae_mochi import MochiVAEDecoder
-from ...parallel.config import DiTParallelConfig, MochiVAEParallelConfig
-from ...parallel.manager import CCLManager
-from ...pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
-from ...pipelines.pipeline_api import PipelineAPIMixin
-from ...solvers import EulerSolver, schedules
-from ...utils import cache
-from ...utils.mesh import reshape_device
-from ...utils.tracing import Tracer
+from models.tt_dit.models.transformers.transformer_mochi import MochiCheckpoint
+from models.tt_dit.models.vae.vae_mochi import MochiVAEDecoder
+from models.tt_dit.parallel.config import DiTParallelConfig, MochiVAEParallelConfig
+from models.tt_dit.parallel.manager import CCLManager
+from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
+from models.tt_dit.pipelines.mochi.text_encoder import TextEncoder
+from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
+from models.tt_dit.solvers import EulerSolver, schedules
+from models.tt_dit.utils import cache
+from models.tt_dit.utils.mesh import reshape_device
+from models.tt_dit.utils.tracing import Tracer
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -218,7 +218,6 @@ class MochiPipeline(PipelineAPIMixin):
         self.patch_size = 2
 
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_spatial_scale_factor)
-        self._force_zeros_for_empty_prompt = config.force_zeros_for_empty_prompt
 
         self.mesh_device = device
         self.vae_mesh_shape = config.vae_mesh_shape
@@ -257,10 +256,10 @@ class MochiPipeline(PipelineAPIMixin):
 
         # Load pretrained T5 text encoder and tokenizer (Torch)
         checkpoint_name = config.checkpoint_name
-        self.text_encoder = T5EncoderModel.from_pretrained(
-            checkpoint_name, subfolder="text_encoder", torch_dtype=torch.float32
+        self._text_encoder = TextEncoder(
+            checkpoint_name=checkpoint_name,
+            force_zeros_for_empty_prompt=config.force_zeros_for_empty_prompt,
         )
-        self.tokenizer = T5TokenizerFast.from_pretrained(checkpoint_name, subfolder="tokenizer")
 
         # Load pretrained Mochi Transformer (TT)
         self._checkpoint = MochiCheckpoint(checkpoint_name)
@@ -309,9 +308,6 @@ class MochiPipeline(PipelineAPIMixin):
                 self.vae.load_torch_state_dict(torch_vae.decoder.state_dict())
             self._vae_decoder_tracer = Tracer(self.vae.forward, device=self.mesh_device, prep_run=False)
 
-        # Update tokenizer max length
-        self.tokenizer_max_length = self.tokenizer.model_max_length if self.tokenizer is not None else 256
-
         logger.info("Pipeline allocation run...")
         self(
             prompts=[""],
@@ -320,153 +316,6 @@ class MochiPipeline(PipelineAPIMixin):
             guidance_scale=2 if config.cfg_enabled else 1,
             traced=False,
         )
-
-    def _get_t5_prompt_embeds(
-        self,
-        prompt: Union[str, List[str]] = None,
-        num_videos_per_prompt: int = 1,
-        max_sequence_length: int = 256,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
-        disable_attention_mask: bool = False,
-    ):
-        device = "cpu"
-        dtype = dtype or self.text_encoder.dtype
-
-        prompt = [prompt] if isinstance(prompt, str) else prompt
-        batch_size = len(prompt)
-
-        text_inputs = self.tokenizer(
-            prompt,
-            padding="max_length",
-            max_length=max_sequence_length,
-            truncation=True,
-            add_special_tokens=True,
-            return_tensors="pt",
-        )
-
-        text_input_ids = text_inputs.input_ids
-        prompt_attention_mask = text_inputs.attention_mask
-        prompt_attention_mask = prompt_attention_mask.bool().to(device)
-
-        if disable_attention_mask:
-            prompt_attention_mask.fill_(value=True)
-
-        # The original Mochi implementation zeros out empty negative prompts
-        # but this can lead to overflow when placing the entire pipeline under the autocast context
-        # adding this here so that we can enable zeroing prompts if necessary
-        if self._force_zeros_for_empty_prompt and (prompt == "" or prompt[-1] == ""):
-            text_input_ids = torch.zeros_like(text_input_ids, device=device)
-            prompt_attention_mask = torch.zeros_like(prompt_attention_mask, dtype=torch.bool, device=device)
-
-        untruncated_ids = self.tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
-
-        if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(text_input_ids, untruncated_ids):
-            removed_text = self.tokenizer.batch_decode(untruncated_ids[:, max_sequence_length - 1 : -1])
-            logger.warning(
-                "The following part of your input was truncated because `max_sequence_length` is set to "
-                f" {max_sequence_length} tokens: {removed_text}"
-            )
-
-        prompt_embeds = self.text_encoder(text_input_ids.to(device), attention_mask=prompt_attention_mask)[0]
-        prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
-
-        # duplicate text embeddings for each generation per prompt, using mps friendly method
-        _, seq_len, _ = prompt_embeds.shape
-        prompt_embeds = prompt_embeds.repeat(1, num_videos_per_prompt, 1)
-        prompt_embeds = prompt_embeds.view(batch_size * num_videos_per_prompt, seq_len, -1)
-
-        prompt_attention_mask = prompt_attention_mask.view(batch_size, -1)
-        prompt_attention_mask = prompt_attention_mask.repeat(num_videos_per_prompt, 1)
-
-        return prompt_embeds, prompt_attention_mask
-
-    # Adapted from diffusers.pipelines.cogvideo.pipeline_cogvideox.CogVideoXPipeline.encode_prompt
-    def encode_prompt(
-        self,
-        prompt: Union[str, List[str]],
-        negative_prompt: Optional[Union[str, List[str]]] = None,
-        do_classifier_free_guidance: bool = True,
-        num_videos_per_prompt: int = 1,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        negative_prompt_embeds: Optional[torch.Tensor] = None,
-        prompt_attention_mask: Optional[torch.Tensor] = None,
-        negative_prompt_attention_mask: Optional[torch.Tensor] = None,
-        max_sequence_length: int = 256,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
-        disable_attention_mask: bool = False,
-    ):
-        r"""
-        Encodes the prompt into text encoder hidden states.
-
-        Args:
-            prompt (`str` or `List[str]`, *optional*):
-                prompt to be encoded
-            negative_prompt (`str` or `List[str]`, *optional*):
-                The prompt or prompts not to guide the image generation. If not defined, one has to pass
-                `negative_prompt_embeds` instead. Ignored when not using guidance (i.e., ignored if `guidance_scale` is
-                less than `1`).
-            do_classifier_free_guidance (`bool`, *optional*, defaults to `True`):
-                Whether to use classifier free guidance or not.
-            num_videos_per_prompt (`int`, *optional*, defaults to 1):
-                Number of videos that should be generated per prompt. torch device to place the resulting embeddings on
-            prompt_embeds (`torch.Tensor`, *optional*):
-                Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
-                provided, text embeddings will be generated from `prompt` input argument.
-            negative_prompt_embeds (`torch.Tensor`, *optional*):
-                Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
-                weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
-                argument.
-            device: (`torch.device`, *optional*):
-                torch device
-            dtype: (`torch.dtype`, *optional*):
-                torch dtype
-        """
-        device = "cpu"
-
-        prompt = [prompt] if isinstance(prompt, str) else prompt
-        if prompt is not None:
-            batch_size = len(prompt)
-        else:
-            batch_size = prompt_embeds.shape[0]
-
-        if prompt_embeds is None:
-            prompt_embeds, prompt_attention_mask = self._get_t5_prompt_embeds(
-                prompt=prompt,
-                num_videos_per_prompt=num_videos_per_prompt,
-                max_sequence_length=max_sequence_length,
-                device=device,
-                dtype=dtype,
-                disable_attention_mask=disable_attention_mask,
-            )
-
-        if do_classifier_free_guidance and negative_prompt_embeds is None:
-            negative_prompt = negative_prompt or ""
-            negative_prompt = batch_size * [negative_prompt] if isinstance(negative_prompt, str) else negative_prompt
-
-            if prompt is not None and type(prompt) is not type(negative_prompt):
-                raise TypeError(
-                    f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
-                    f" {type(prompt)}."
-                )
-            elif batch_size != len(negative_prompt):
-                raise ValueError(
-                    f"`negative_prompt`: {negative_prompt} has batch size {len(negative_prompt)}, but `prompt`:"
-                    f" {prompt} has batch size {batch_size}. Please make sure that passed `negative_prompt` matches"
-                    " the batch size of `prompt`."
-                )
-
-            negative_prompt_embeds, negative_prompt_attention_mask = self._get_t5_prompt_embeds(
-                prompt=negative_prompt,
-                num_videos_per_prompt=num_videos_per_prompt,
-                max_sequence_length=max_sequence_length,
-                device=device,
-                dtype=dtype,
-                disable_attention_mask=disable_attention_mask,
-            )
-
-        return prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask
 
     def check_inputs(
         self,
@@ -631,7 +480,6 @@ class MochiPipeline(PipelineAPIMixin):
         else:
             batch_size = prompt_embeds.shape[0]
 
-        device = "cpu"
         # 3. Prepare text embeddings
         on_event(SectionStart("encoder"))
         (
@@ -639,18 +487,18 @@ class MochiPipeline(PipelineAPIMixin):
             prompt_attention_mask,
             negative_prompt_embeds,
             negative_prompt_attention_mask,
-        ) = self.encode_prompt(
-            prompt=prompts,
-            negative_prompt=negative_prompts,
-            do_classifier_free_guidance=self.do_classifier_free_guidance,
+        ) = self._text_encoder.encode_cfg(
+            prompts,
+            negative_prompts,
+            cfg_enabled=self.do_classifier_free_guidance,
             num_videos_per_prompt=num_videos_per_prompt,
-            prompt_embeds=prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds,
-            prompt_attention_mask=prompt_attention_mask,
-            negative_prompt_attention_mask=negative_prompt_attention_mask,
             max_sequence_length=max_sequence_length,
-            device=device,
             disable_attention_mask=traced,
+            prompt_embeds=prompt_embeds,
+            prompt_attention_mask=prompt_attention_mask,
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_prompt_attention_mask=negative_prompt_attention_mask,
+            on_event=on_event,
         )
         on_event(SectionEnd("encoder"))
 

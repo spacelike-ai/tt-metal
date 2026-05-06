@@ -17,7 +17,6 @@ from loguru import logger
 
 import ttnn
 
-from models.tt_dit.encoders.qwen25vl.encoder_pair import Qwen25VlTokenizerEncoderPair
 from models.tt_dit.models.transformers.transformer_qwenimage import QwenImageCheckpoint
 from models.tt_dit.models.vae.vae_qwenimage import QwenImageVaeDecoder
 from models.tt_dit.parallel.config import (
@@ -31,6 +30,7 @@ from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
 from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
 from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
+from models.tt_dit.pipelines.qwenimage.text_encoder import TextEncoder
 from models.tt_dit.solvers import EulerSolver, schedules
 from models.tt_dit.utils import cache, tensor
 from models.tt_dit.utils.mesh import reshape_device
@@ -40,9 +40,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from PIL import Image
-
-PROMPT_TEMPLATE = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
-PROMPT_DROP_IDX = 34
 
 _DEFAULT_CHECKPOINT = "Qwen/Qwen-Image"
 
@@ -276,16 +273,13 @@ class QwenImagePipeline(PipelineAPIMixin):
         # initialize text encoder. This will load the weights
         self._use_torch_text_encoder = config.use_torch_text_encoder
         with reshape_device(self.encoder_device, self.encoder_mesh_shape):
-            logger.info("creating TT-NN text encoder (loading before transformers for memory efficiency)...")
-            self._text_encoder = Qwen25VlTokenizerEncoderPair(
-                self._checkpoint_name,
-                tokenizer_subfolder="tokenizer",
-                encoder_subfolder="text_encoder",
+            logger.info("creating text encoder (loading before transformers for memory efficiency)...")
+            self._text_encoder = TextEncoder(
+                checkpoint_name=self._checkpoint_name,
                 device=self._submesh_devices[self.encoder_submesh_idx],
                 ccl_manager=self._ccl_managers[self.encoder_submesh_idx],
                 parallel_config=self._encoder_parallel_config,
                 use_torch=config.use_torch_text_encoder,
-                is_fsdp=True,  # Best configuration for wh t3k and galaxy
             )
         ttnn.synchronize_device(self.encoder_device)
 
@@ -463,16 +457,15 @@ class QwenImagePipeline(PipelineAPIMixin):
             self.prepare_encoder()
 
             on_event(SectionStart("encoder"))
-            with nullcontext():
-                with reshape_device(self.encoder_device, self.encoder_mesh_shape):
-                    prompt_embeds, prompt_mask = self._encode_prompts(
-                        prompts=prompts,
-                        negative_prompts=negative_prompts,
-                        num_images_per_prompt=num_images_per_prompt,
-                        cfg_enabled=cfg_enabled,
-                        on_event=on_event,
-                        traced=encoder_traced,
-                    )
+            with reshape_device(self.encoder_device, self.encoder_mesh_shape):
+                prompt_embeds, prompt_mask = self._text_encoder.encode_cfg(
+                    prompts,
+                    negative_prompts,
+                    num_images_per_prompt=num_images_per_prompt,
+                    cfg_enabled=cfg_enabled,
+                    on_event=on_event,
+                    traced=encoder_traced,
+                )
             on_event(SectionEnd("encoder"))
             _, prompt_sequence_length, _ = prompt_embeds.shape
 
@@ -706,34 +699,6 @@ class QwenImagePipeline(PipelineAPIMixin):
             )
 
         return latents_out
-
-    def _encode_prompts(
-        self,
-        *,
-        prompts: Sequence[str],
-        negative_prompts: Sequence[str],
-        num_images_per_prompt: int,
-        cfg_enabled: bool,
-        on_event: PipelineEventCallback = null_callback,
-        traced: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert len(prompts) == len(negative_prompts), "prompts and negative_prompts must have the same length"
-
-        if cfg_enabled:
-            prompts = [*negative_prompts, *prompts]
-
-        prompts = [PROMPT_TEMPLATE.format(e) for e in prompts]
-
-        embeds, mask = self._text_encoder.encode(
-            prompts,
-            num_images_per_prompt=num_images_per_prompt,
-            sequence_length=512 + PROMPT_DROP_IDX,
-            enable_tracing=traced,
-        )
-
-        embeds[torch.logical_not(mask)] = 0.0
-
-        return embeds[:, PROMPT_DROP_IDX:], mask[:, PROMPT_DROP_IDX:]
 
     def synchronize_devices(self):
         for device in self._submesh_devices:
