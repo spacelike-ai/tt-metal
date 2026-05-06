@@ -862,66 +862,74 @@ class WanPipeline(PipelineAPIMixin):
         )
 
         on_event(SectionEnd("denoising"))
+
+        if output_type == "latent":
+            return latents
+
+        return self._decode_latents(latents, output_type=output_type, on_event=on_event)
+
+    def _decode_latents(
+        self,
+        latents: torch.Tensor,
+        *,
+        output_type: str,
+        on_event: PipelineEventCallback,
+    ) -> torch.Tensor:
         on_event(SectionStart("vae"))
+        latents = latents.to(self.vae.dtype)
+        latents = latents * self._vae_latents_std + self._vae_latents_mean
 
-        if not output_type == "latent":
-            latents = latents.to(self.vae.dtype)
-            latents = latents * self._vae_latents_std + self._vae_latents_mean
+        tt_latents_BTHWC, logical_h = self.tt_vae.prepare_input(latents)
 
-            tt_latents_BTHWC, logical_h = self.tt_vae.prepare_input(latents)
+        tt_latents_BTHWC = typed_tensor_2dshard(
+            tt_latents_BTHWC,
+            self.mesh_device,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
+            shard_mapping={
+                self.vae_parallel_config.height_parallel.mesh_axis: 2,
+                self.vae_parallel_config.width_parallel.mesh_axis: 3,
+            },
+            dtype=self.tt_vae.dtype,
+        )
+        self._prepare_vae()
+        tt_video_BCTHW, new_logical_h = self.tt_vae(tt_latents_BTHWC, logical_h, t_chunk_size=self.vae_t_chunk_size)
 
-            tt_latents_BTHWC = typed_tensor_2dshard(
-                tt_latents_BTHWC,
-                self.mesh_device,
-                layout=ttnn.ROW_MAJOR_LAYOUT,
-                shard_mapping={
-                    self.vae_parallel_config.height_parallel.mesh_axis: 2,
-                    self.vae_parallel_config.width_parallel.mesh_axis: 3,
-                },
-                dtype=self.tt_vae.dtype,
-            )
-            self._prepare_vae()
-            tt_video_BCTHW, new_logical_h = self.tt_vae(tt_latents_BTHWC, logical_h, t_chunk_size=self.vae_t_chunk_size)
+        concat_dims = [None, None]
+        concat_dims[self.vae_parallel_config.height_parallel.mesh_axis] = 3
+        concat_dims[self.vae_parallel_config.width_parallel.mesh_axis] = 4
+        d2h_permute = (0, 2, 3, 4, 1) if output_type in ("np", "uint8") else None
 
-            concat_dims = [None, None]
-            concat_dims[self.vae_parallel_config.height_parallel.mesh_axis] = 3
-            concat_dims[self.vae_parallel_config.width_parallel.mesh_axis] = 4
-            d2h_permute = (0, 2, 3, 4, 1) if output_type in ("np", "uint8") else None
-
-            if output_type == "uint8":
-                pre_fn = float_to_uint8
-            elif output_type == "np":
-                pre_fn = float_to_unit_range
-            else:
-                pre_fn = None
-
-            video_torch = fast_device_to_host(
-                tt_video_BCTHW,
-                self.mesh_device,
-                concat_dims,
-                ccl_manager=self.vae_ccl_manager,
-                pre_transfer_fn=pre_fn,
-                permute=d2h_permute,
-            )
-
-            if d2h_permute is not None:
-                # Output is (B, T, H, W, C) — trim height in dim 2.
-                video_torch = video_torch[:, :, :new_logical_h, :, :]
-            else:
-                # Output is (B, C, T, H, W) — trim height in dim 3.
-                video_torch = video_torch[:, :, :, :new_logical_h, :]
-
-            if output_type == "uint8":
-                video = video_torch.numpy()
-            elif output_type == "np":
-                video = video_torch.float().numpy()
-            else:
-                video = self.video_processor.postprocess_video(video_torch, output_type=output_type)
+        if output_type == "uint8":
+            pre_fn = float_to_uint8
+        elif output_type == "np":
+            pre_fn = float_to_unit_range
         else:
-            video = latents
+            pre_fn = None
+
+        video_torch = fast_device_to_host(
+            tt_video_BCTHW,
+            self.mesh_device,
+            concat_dims,
+            ccl_manager=self.vae_ccl_manager,
+            pre_transfer_fn=pre_fn,
+            permute=d2h_permute,
+        )
+
+        if d2h_permute is not None:
+            # Output is (B, T, H, W, C) — trim height in dim 2.
+            video_torch = video_torch[:, :, :new_logical_h, :, :]
+        else:
+            # Output is (B, C, T, H, W) — trim height in dim 3.
+            video_torch = video_torch[:, :, :, :new_logical_h, :]
+
+        if output_type == "uint8":
+            video = video_torch.numpy()
+        elif output_type == "np":
+            video = video_torch.float().numpy()
+        else:
+            video = self.video_processor.postprocess_video(video_torch, output_type=output_type)
 
         on_event(SectionEnd("vae"))
-
         return video
 
     def synchronize_devices(self):

@@ -31,6 +31,8 @@ from models.tt_dit.utils.tracing import Tracer
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from PIL import Image
+
 _VAE_SCALE_FACTOR = 16
 
 _PRESETS_WH: dict[tuple[int, ...], dict] = {
@@ -303,25 +305,6 @@ class Flux1Pipeline(PipelineAPIMixin):
 
             logger.info("preparing latents...")
 
-            if seed is not None:
-                torch.manual_seed(seed)
-
-            # We let randn generate a permuted latent tensor, so that the generated noise matches the
-            # reference implementation.
-            shape = [
-                prompt_count * num_images_per_prompt,
-                self._num_channels_latents,
-                latents_height * 2,
-                latents_width * 2,
-            ]
-            latents = _pack_latents(
-                torch.randn(shape, dtype=torch.bfloat16),
-                prompt_count * num_images_per_prompt,
-                self._num_channels_latents,
-                latents_height,
-                latents_width,
-            )
-
             text_ids = torch.zeros([prompt_sequence_length, 3])
             image_ids = _latent_image_ids(height=latents_height, width=latents_width)
             ids = torch.cat((text_ids, image_ids), dim=0)
@@ -331,8 +314,8 @@ class Flux1Pipeline(PipelineAPIMixin):
             tt_pooled_prompt_embeds_list = distribute_cfg(
                 pooled_prompt_embeds, devices=self._submesh_devices, on_host=False
             )
-            tt_latents_step_list = from_torch_to_devices(
-                latents, devices=self._submesh_devices, mesh_axes=[None, sp_axis, None]
+            tt_latents_step_list = self._random_latents(
+                batch_size=prompt_count * num_images_per_prompt, seed=seed
             )
             tt_guidance_list = (
                 from_torch_to_devices(guidance.unsqueeze(-1), devices=self._submesh_devices)
@@ -384,28 +367,7 @@ class Flux1Pipeline(PipelineAPIMixin):
             logger.info("decoding image...")
 
             on_event(SectionStart("vae"))
-            with nullcontext():
-                # Sync because we don't pass a persistent buffer or a barrier semaphore.
-                ttnn.synchronize_device(self.vae_device)
-
-                tt_latents = self._ccl_managers[self.vae_submesh_idx].all_gather_persistent_buffer(
-                    tt_latents_step_list[self.vae_submesh_idx],
-                    dim=1,
-                    mesh_axis=sp_axis,
-                    use_hyperparams=True,
-                )
-
-                torch_latents = ttnn.to_torch(ttnn.get_device_tensors(tt_latents)[0])
-                torch_latents = _unpack_latents(torch_latents, height, width, _VAE_SCALE_FACTOR)
-                # The adapter expects NHWC; _unpack_latents produces BCHW.
-                torch_latents = torch_latents.permute(0, 2, 3, 1)
-
-                decoded_output = self._vae.decode(torch_latents, traced=vae_traced)
-
-                image = self._image_processor.postprocess(decoded_output, output_type="pt")
-                assert isinstance(image, torch.Tensor)
-
-                output = self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
+            output = self._decode_latents(tt_latents_step_list[self.vae_submesh_idx], traced=vae_traced)
             on_event(SectionEnd("vae"))
         on_event(SectionEnd("total"))
 
@@ -414,6 +376,48 @@ class Flux1Pipeline(PipelineAPIMixin):
     def synchronize_devices(self):
         for device in self._submesh_devices:
             ttnn.synchronize_device(device)
+
+    def _random_latents(self, *, batch_size: int, seed: int | None) -> list[ttnn.Tensor]:
+        if seed is not None:
+            torch.manual_seed(seed)
+
+        latents_height = self._height // _VAE_SCALE_FACTOR
+        latents_width = self._width // _VAE_SCALE_FACTOR
+        # We let randn generate a permuted latent tensor, so that the generated noise matches the
+        # reference implementation.
+        shape = [batch_size, self._num_channels_latents, latents_height * 2, latents_width * 2]
+        latents = _pack_latents(
+            torch.randn(shape, dtype=torch.bfloat16),
+            batch_size,
+            self._num_channels_latents,
+            latents_height,
+            latents_width,
+        )
+        sp_axis = self._parallel_config.sequence_parallel.mesh_axis
+        return from_torch_to_devices(latents, devices=self._submesh_devices, mesh_axes=[None, sp_axis, None])
+
+    def _decode_latents(self, tt_latents: ttnn.Tensor, *, traced: bool) -> list[Image.Image]:
+        # Sync because we don't pass a persistent buffer or a barrier semaphore.
+        ttnn.synchronize_device(self.vae_device)
+
+        sp_axis = self._parallel_config.sequence_parallel.mesh_axis
+        tt_latents = self._ccl_managers[self.vae_submesh_idx].all_gather_persistent_buffer(
+            tt_latents,
+            dim=1,
+            mesh_axis=sp_axis,
+            use_hyperparams=True,
+        )
+
+        torch_latents = ttnn.to_torch(ttnn.get_device_tensors(tt_latents)[0])
+        torch_latents = _unpack_latents(torch_latents, self._height, self._width, _VAE_SCALE_FACTOR)
+        # The adapter expects NHWC; _unpack_latents produces BCHW.
+        torch_latents = torch_latents.permute(0, 2, 3, 1)
+
+        decoded_output = self._vae.decode(torch_latents, traced=traced)
+
+        image = self._image_processor.postprocess(decoded_output, output_type="pt")
+        assert isinstance(image, torch.Tensor)
+        return self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
 
     def _predict(
         self,

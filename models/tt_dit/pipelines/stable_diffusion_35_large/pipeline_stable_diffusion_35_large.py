@@ -270,14 +270,6 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
             do_classifier_free_guidance = guidance_scale > 1
             # TODO: pass the patch_size value
             patch_size = 2
-            latents_shape = (
-                batch_size * num_images_per_prompt,
-                height // _VAE_SCALE_FACTOR,
-                width // _VAE_SCALE_FACTOR,
-                self._num_channels_latents,
-            )
-
-            print(f"Latents shape: {latents_shape}")
 
             logger.info("encoding prompts...")
 
@@ -306,21 +298,14 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
 
             logger.info("preparing latents...")
 
-            if seed is not None:
-                torch.manual_seed(seed)
-            latents = torch.randn(latents_shape, dtype=prompt_embeds.dtype)  # .permute([0, 2, 3, 1])
-            latents = self.transformers[0].patchify(latents)
-
             tt_prompt_embeds_list = distribute_cfg(
                 prompt_embeds.unsqueeze(1), devices=self.submesh_devices, on_host=False
             )
             tt_pooled_prompt_embeds_list = distribute_cfg(
                 pooled_prompt_embeds.unsqueeze(1).unsqueeze(1), devices=self.submesh_devices, on_host=False
             )
-            tt_latents_step_list = from_torch_to_devices(
-                latents,
-                devices=self.submesh_devices,
-                mesh_axes=[None, None, self.dit_parallel_config.sequence_parallel.mesh_axis, None],
+            tt_latents_step_list = self._random_latents(
+                batch_size=batch_size * num_images_per_prompt, dtype=prompt_embeds.dtype, seed=seed
             )
 
             logger.info("denoising...")
@@ -350,17 +335,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
             logger.info("decoding image...")
 
             on_event(SectionStart("vae"))
-            with nullcontext():
-                decoded_output = self._vae_decode(
-                    tt_latents_step_list[self.vae_submesh_idx], width, height, traced=vae_traced
-                )
-
-                # image = self._torch_vae.decoder(tt_latents)
-                image = self._image_processor.postprocess(decoded_output, output_type="pt")
-                print(f"postprocessed image shape: {image.shape}")
-                assert isinstance(image, torch.Tensor)
-
-                output = self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
+            output = self._decode_latents(tt_latents_step_list[self.vae_submesh_idx], traced=vae_traced)
             on_event(SectionEnd("vae"))
         on_event(SectionEnd("total"))
 
@@ -438,7 +413,26 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
 
         return latents
 
-    def _vae_decode(self, tt_latents: ttnn.Tensor, width: int, height: int, *, traced: bool) -> torch.Tensor:
+    def _random_latents(self, *, batch_size: int, dtype: torch.dtype, seed: int | None) -> list[ttnn.Tensor]:
+        if seed is not None:
+            torch.manual_seed(seed)
+
+        latents_shape = (
+            batch_size,
+            self._height // _VAE_SCALE_FACTOR,
+            self._width // _VAE_SCALE_FACTOR,
+            self._num_channels_latents,
+        )
+
+        latents = torch.randn(latents_shape, dtype=dtype)
+        latents = self.transformers[0].patchify(latents)
+        return from_torch_to_devices(
+            latents,
+            devices=self.submesh_devices,
+            mesh_axes=[None, None, self.dit_parallel_config.sequence_parallel.mesh_axis, None],
+        )
+
+    def _decode_latents(self, tt_latents: ttnn.Tensor, *, traced: bool) -> list[Image.Image]:
         ttnn.synchronize_device(self.vae_device)
 
         tt_latents = self.ccl_managers[self.vae_submesh_idx].all_gather_persistent_buffer(
@@ -448,13 +442,18 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         torch_latents = ttnn.to_torch(ttnn.get_device_tensors(tt_latents)[0])
         torch_latents = self.transformers[0].unpatchify(
             torch_latents,
-            width=width // _VAE_SCALE_FACTOR,
-            height=height // _VAE_SCALE_FACTOR,
+            width=self._width // _VAE_SCALE_FACTOR,
+            height=self._height // _VAE_SCALE_FACTOR,
         )
 
         # Upload + VAE forward + extract-to-host run under the encoder/VAE shape.
         with reshape_device(self.encoder_device, self.encoder_mesh_shape):
-            return self._vae.decode(torch_latents, traced=traced)
+            decoded_output = self._vae.decode(torch_latents, traced=traced)
+
+        image = self._image_processor.postprocess(decoded_output, output_type="pt")
+
+        assert isinstance(image, torch.Tensor)
+        return self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
 
     def synchronize_devices(self):
         for submesh_device in self.submesh_devices:

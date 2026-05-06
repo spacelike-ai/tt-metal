@@ -593,47 +593,60 @@ class MochiPipeline(PipelineAPIMixin):
         self._current_timestep = None
 
         if output_type == "latent":
-            video = latents
-        else:
-            # unscale/denormalize the latents
-            # denormalize with the mean and std if available and not None
-            has_latents_mean = hasattr(self.vae.config, "latents_mean") and self.vae.config.latents_mean is not None
-            has_latents_std = hasattr(self.vae.config, "latents_std") and self.vae.config.latents_std is not None
-            if has_latents_mean and has_latents_std:
-                latents_mean = (
-                    torch.tensor(self.vae.config.latents_mean).view(1, 12, 1, 1, 1).to(latents.device, latents.dtype)
-                )
-                latents_std = (
-                    torch.tensor(self.vae.config.latents_std).view(1, 12, 1, 1, 1).to(latents.device, latents.dtype)
-                )
-                latents = latents * latents_std / self.vae.config.scaling_factor + latents_mean
-            else:
-                latents = latents / self.vae.config.scaling_factor
+            return latents
 
-            # If the VAE is memory-constrained, free the transformer.
-            if self.reload_dit_model:
-                logger.info("Freeing MochiTransformer3DModel")
-                self.transformer = None
-                self._transformer_tracer.release_trace()
-                self._transformer_tracer = None
-
-            on_event(SectionStart("vae"))
-            with reshape_device(self.mesh_device, self.vae_mesh_shape):
-                if isinstance(self.vae, MochiVAEDecoder):
-                    tt_latents = self.vae.prepare_input(latents)
-                    vae_forward = self._vae_decoder_tracer if vae_traced else self.vae.forward
-                    tt_output = vae_forward(tt_latents)
-                    video = self.vae.postprocess_output(tt_output, latents.shape)
-                else:
-                    video = self.vae.decode(latents, return_dict=False)[0]
-            on_event(SectionEnd("vae"))
-
-            video = self.video_processor.postprocess_video(video, output_type=output_type)
-
-        return video
+        return self._decode_latents(
+            latents,
+            output_type=output_type,
+            vae_traced=vae_traced,
+            on_event=on_event,
+        )
 
     def synchronize_devices(self):
         ttnn.synchronize_device(self.mesh_device)
+
+    def _decode_latents(
+        self,
+        latents: torch.Tensor,
+        *,
+        output_type: str,
+        vae_traced: bool,
+        on_event: PipelineEventCallback,
+    ) -> torch.Tensor:
+        # unscale/denormalize the latents
+        # denormalize with the mean and std if available and not None
+        has_latents_mean = hasattr(self.vae.config, "latents_mean") and self.vae.config.latents_mean is not None
+        has_latents_std = hasattr(self.vae.config, "latents_std") and self.vae.config.latents_std is not None
+        if has_latents_mean and has_latents_std:
+            latents_mean = (
+                torch.tensor(self.vae.config.latents_mean).view(1, 12, 1, 1, 1).to(latents.device, latents.dtype)
+            )
+            latents_std = (
+                torch.tensor(self.vae.config.latents_std).view(1, 12, 1, 1, 1).to(latents.device, latents.dtype)
+            )
+            latents = latents * latents_std / self.vae.config.scaling_factor + latents_mean
+        else:
+            latents = latents / self.vae.config.scaling_factor
+
+        # If the VAE is memory-constrained, free the transformer.
+        if self.reload_dit_model:
+            logger.info("Freeing MochiTransformer3DModel")
+            self.transformer = None
+            self._transformer_tracer.release_trace()
+            self._transformer_tracer = None
+
+        on_event(SectionStart("vae"))
+        with reshape_device(self.mesh_device, self.vae_mesh_shape):
+            if isinstance(self.vae, MochiVAEDecoder):
+                tt_latents = self.vae.prepare_input(latents)
+                vae_forward = self._vae_decoder_tracer if vae_traced else self.vae.forward
+                tt_output = vae_forward(tt_latents)
+                video = self.vae.postprocess_output(tt_output, latents.shape)
+            else:
+                video = self.vae.decode(latents, return_dict=False)[0]
+        on_event(SectionEnd("vae"))
+
+        return self.video_processor.postprocess_video(video, output_type=output_type)
 
     def _predict(
         self,
