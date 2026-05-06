@@ -567,49 +567,16 @@ class MochiPipeline(PipelineAPIMixin):
                 # Note: Mochi uses reversed timesteps. To ensure compatibility with methods like FasterCache, we need
                 # to make sure we're using the correct non-reversed timestep values.
                 self._current_timestep = 1000 - t
-                latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
-                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-                timestep = torch.tensor(t).expand(latent_model_input.shape[0]).to(latents.dtype)
 
-                print("Input to transformer:")
-                print(f"latent_model_input.shape: {latent_model_input.shape}")
-                print(f"prompt_embeds.shape: {prompt_embeds.shape}")
-                print(f"timestep.shape: {timestep.shape}")
-                print(f"prompt_attention_mask.shape: {prompt_attention_mask.shape}")
-                print(f"attention_kwargs: {attention_kwargs}")
-
-                noise_pred_uncond = self._transformer_forward(
-                    spatial=latent_model_input[:1],
-                    prompt=prompt_embeds[:1],
-                    timestep=timestep[:1],
-                    prompt_attention_mask=prompt_attention_mask[:1],
+                latents = self._step(
+                    step=i,
+                    t=t,
+                    latents=latents,
+                    prompt_embeds=prompt_embeds,
+                    prompt_attention_mask=prompt_attention_mask,
+                    cfg_enabled=self.do_classifier_free_guidance,
                     traced=traced,
                 )
-                noise_pred_text = self._transformer_forward(
-                    spatial=latent_model_input[1:],
-                    prompt=prompt_embeds[1:],
-                    timestep=timestep[1:],
-                    prompt_attention_mask=prompt_attention_mask[1:],
-                    traced=traced,
-                )
-                print(f"noise_pred_uncond.shape: {noise_pred_uncond.shape}")
-                print(f"noise_pred_text.shape: {noise_pred_text.shape}")
-                # Mochi CFG + Sampling runs in FP32
-
-                assert self.do_classifier_free_guidance == True
-                if self.do_classifier_free_guidance:
-                    # noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-                # compute the previous noisy sample x_t -> x_t-1
-                latents_dtype = latents.dtype
-                latents = self._solver.step(step=i, latent=latents.to(torch.float32), velocity_pred=noise_pred)
-                latents = latents.to(latents_dtype)
-
-                if latents.dtype != latents_dtype:
-                    if torch.backends.mps.is_available():
-                        # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
-                        latents = latents.to(latents_dtype)
 
                 if callback_on_step_end is not None:
                     callback_kwargs = {}
@@ -668,7 +635,7 @@ class MochiPipeline(PipelineAPIMixin):
     def synchronize_devices(self):
         ttnn.synchronize_device(self.mesh_device)
 
-    def _transformer_forward(
+    def _predict(
         self,
         *,
         spatial: torch.Tensor,
@@ -702,3 +669,48 @@ class MochiPipeline(PipelineAPIMixin):
 
         out = self.transformer.postprocess_spatial_output(proj_out_1BNI, T, H, W, N)
         return out.to(torch.float32)
+
+    def _step(
+        self,
+        *,
+        step: int,
+        t: float,
+        latents: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        prompt_attention_mask: torch.Tensor,
+        cfg_enabled: bool,
+        traced: bool,
+    ) -> torch.Tensor:
+        latent_model_input = torch.cat([latents] * 2) if cfg_enabled else latents
+        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+        timestep = torch.tensor(t).expand(latent_model_input.shape[0]).to(latents.dtype)
+
+        noise_pred_uncond = self._predict(
+            spatial=latent_model_input[:1],
+            prompt=prompt_embeds[:1],
+            timestep=timestep[:1],
+            prompt_attention_mask=prompt_attention_mask[:1],
+            traced=traced,
+        )
+        noise_pred_text = self._predict(
+            spatial=latent_model_input[1:],
+            prompt=prompt_embeds[1:],
+            timestep=timestep[1:],
+            prompt_attention_mask=prompt_attention_mask[1:],
+            traced=traced,
+        )
+
+        assert cfg_enabled
+        if cfg_enabled:
+            noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+        latents_dtype = latents.dtype
+        latents = self._solver.step(step=step, latent=latents.to(torch.float32), velocity_pred=noise_pred)
+        latents = latents.to(latents_dtype)
+
+        if latents.dtype != latents_dtype:
+            if torch.backends.mps.is_available():
+                # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
+                latents = latents.to(latents_dtype)
+
+        return latents

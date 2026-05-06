@@ -188,8 +188,8 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         for submesh_device in self.submesh_devices:
             ttnn.synchronize_device(submesh_device)
 
-        self._step_inner_tracers = [
-            Tracer(self._step_inner, device=submesh, prep_run=False) for submesh in self.submesh_devices
+        self._predict_tracers = [
+            Tracer(self._predict, device=submesh, prep_run=False) for submesh in self.submesh_devices
         ]
         self._solvers = [EulerSolver() for _ in self.submesh_devices]
 
@@ -395,7 +395,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
 
         return output
 
-    def _step_inner(
+    def _predict(
         self,
         *,
         cfg_enabled: bool,
@@ -440,35 +440,24 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         spatial_sequence_length: int,
         traced: bool,
     ) -> list[ttnn.Tensor]:
-        latents_out = []
-        noise_pred_list = []
-
-        for submesh_id in range(len(self.submesh_devices)):
-            inner = self._step_inner_tracers[submesh_id] if traced else self._step_inner
-
-            latent, noise_pred = inner(
+        latents = list(latents)
+        for idx in range(len(self.submesh_devices)):
+            latent, noise_pred = self._predict_tracers[idx](
                 cfg_enabled=do_classifier_free_guidance,
-                latent=latents[submesh_id],
-                prompt=prompt_embeds[submesh_id] if prompt_embeds is not None else None,
-                pooled=pooled_prompt_embeds[submesh_id] if pooled_prompt_embeds is not None else None,
-                timestep=timestep[submesh_id],
-                submesh_id=submesh_id,
+                latent=latents[idx],
+                prompt=prompt_embeds[idx] if prompt_embeds is not None else None,
+                pooled=pooled_prompt_embeds[idx] if pooled_prompt_embeds is not None else None,
+                timestep=timestep[idx],
+                submesh_id=idx,
                 spatial_sequence_length=spatial_sequence_length,
                 prompt_sequence_length=prompt_sequence_length,
+                traced=traced,
             )
-            latents_out.append(latent)
-            noise_pred_list.append(noise_pred)
+            if do_classifier_free_guidance:
+                noise_pred = self._cfg_combiner.combine(noise_pred, guidance_scale)
+            latents[idx] = self._solvers[idx].step(step=step_index, latent=latent, velocity_pred=noise_pred)
 
-        if do_classifier_free_guidance:
-            for i in range(len(noise_pred_list)):
-                noise_pred_list[i] = self._cfg_combiner.combine(noise_pred_list[i], guidance_scale)
-
-        for submesh_id in range(len(self.submesh_devices)):
-            latents_out[submesh_id] = self._solvers[submesh_id].step(
-                step=step_index, latent=latents_out[submesh_id], velocity_pred=noise_pred_list[submesh_id]
-            )
-
-        return latents_out
+        return latents
 
     def _vae_decode(self, tt_latents: ttnn.Tensor, width: int, height: int, *, traced: bool) -> torch.Tensor:
         ttnn.synchronize_device(self.vae_device)

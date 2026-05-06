@@ -175,8 +175,8 @@ class Flux1Pipeline(PipelineAPIMixin):
         for submesh_device in self._submesh_devices:
             ttnn.synchronize_device(submesh_device)
 
-        self._step_inner_tracers = [
-            Tracer(self._step_inner, device=device, prep_run=False) for device in self._submesh_devices
+        self._predict_tracers = [
+            Tracer(self._predict, device=device, prep_run=False) for device in self._submesh_devices
         ]
         self._solvers = [EulerSolver() for _ in self._submesh_devices]
 
@@ -450,7 +450,7 @@ class Flux1Pipeline(PipelineAPIMixin):
         for device in self._submesh_devices:
             ttnn.synchronize_device(device)
 
-    def _step_inner(
+    def _predict(
         self,
         *,
         cfg_enabled: bool,
@@ -508,42 +508,34 @@ class Flux1Pipeline(PipelineAPIMixin):
         prompt_sequence_length: int,
         traced: bool,
     ) -> list[ttnn.Tensor]:
-        latents_out = []
-        noise_pred_list = []
-
-        for submesh_id in range(len(self._submesh_devices)):
-            inner = self._step_inner_tracers[submesh_id] if traced else self._step_inner
-
-            latent, noise_pred = inner(
+        latents = list(latents)
+        for idx in range(len(self._submesh_devices)):
+            latent, noise_pred = self._predict_tracers[idx](
                 cfg_enabled=cfg_enabled,
-                latent=latents[submesh_id],
-                prompt=prompt_embeds[submesh_id] if prompt_embeds is not None else None,
-                pooled=pooled_prompt_embeds[submesh_id] if pooled_prompt_embeds is not None else None,
-                timestep=timestep[submesh_id],
-                guidance=guidance[submesh_id] if guidance is not None else None,
-                spatial_rope_cos=spatial_rope_cos[submesh_id] if spatial_rope_cos is not None else None,
-                spatial_rope_sin=spatial_rope_sin[submesh_id] if spatial_rope_sin is not None else None,
-                prompt_rope_cos=prompt_rope_cos[submesh_id] if prompt_rope_cos is not None else None,
-                prompt_rope_sin=prompt_rope_sin[submesh_id] if prompt_rope_sin is not None else None,
+                latent=latents[idx],
+                prompt=prompt_embeds[idx] if prompt_embeds is not None else None,
+                pooled=pooled_prompt_embeds[idx] if pooled_prompt_embeds is not None else None,
+                timestep=timestep[idx],
+                guidance=guidance[idx] if guidance is not None else None,
+                spatial_rope_cos=spatial_rope_cos[idx] if spatial_rope_cos is not None else None,
+                spatial_rope_sin=spatial_rope_sin[idx] if spatial_rope_sin is not None else None,
+                prompt_rope_cos=prompt_rope_cos[idx] if prompt_rope_cos is not None else None,
+                prompt_rope_sin=prompt_rope_sin[idx] if prompt_rope_sin is not None else None,
                 spatial_sequence_length=spatial_sequence_length,
                 prompt_sequence_length=prompt_sequence_length,
-                submesh_id=submesh_id,
+                submesh_id=idx,
+                traced=traced,
             )
 
-            latents_out.append(latent)
-            noise_pred_list.append(noise_pred)
+            if cfg_enabled:
+                noise_pred = self._cfg_combiner.combine(noise_pred, cfg_scale)
 
-        if cfg_enabled:
-            for i in range(len(noise_pred_list)):
-                noise_pred_list[i] = self._cfg_combiner.combine(noise_pred_list[i], cfg_scale)
+            latents[idx] = self._solvers[idx].step(step=step_index, latent=latent, velocity_pred=noise_pred)
 
-        for submesh_id, submesh_device in enumerate(self._submesh_devices):
+        for submesh_device in self._submesh_devices:
             ttnn.synchronize_device(submesh_device)  # Helps with accurate time profiling.
-            latents_out[submesh_id] = self._solvers[submesh_id].step(
-                step=step_index, latent=latents_out[submesh_id], velocity_pred=noise_pred_list[submesh_id]
-            )
 
-        return latents_out
+        return latents
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/flux/pipeline_flux.py

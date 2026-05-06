@@ -482,6 +482,55 @@ class WanPipeline(PipelineAPIMixin):
             get_torch_state_dict=lambda: self.vae.state_dict(),
         )
 
+    def _step(
+        self,
+        *,
+        step: int,
+        t: torch.Tensor,
+        ts: TransformerState,
+        permuted_latent_tt: ttnn.Tensor,
+        mask: torch.Tensor,
+        cond_latents,
+        rope_args: dict,
+        patchified_seqlen: int,
+        latents_batch_size: int,
+        traced: bool,
+    ) -> ttnn.Tensor:
+        if self._expand_timesteps:
+            # seq_len: num_latent_frames * latent_height//2 * latent_width//2
+            temp_ts = (mask[0][0][:, ::2, ::2] * t).flatten()
+            # batch_size, seq_len
+            timestep = temp_ts.unsqueeze(0).expand(latents_batch_size, -1)
+        else:
+            timestep = t.expand(latents_batch_size)
+
+        permuted_model_input = self.get_model_input(permuted_latent_tt, cond_latents)
+        permuted_model_input = ttnn.typecast(permuted_model_input, ttnn.bfloat16)
+
+        assert timestep.ndim == 1, "Wan2.2-T2V/I2V requires a 1D timestep tensor"
+        timestep = float32_tensor(
+            timestep.unsqueeze(1).unsqueeze(1).unsqueeze(1), device=(None if traced else self.mesh_device)
+        )
+
+        permuted_noise_pred_tt = ts.model.combined_step(
+            do_classifier_free_guidance=self.do_classifier_free_guidance,
+            spatial_1BNI=permuted_model_input,
+            prompt_1BLP=ts.prompt_buffer,
+            negative_prompt_1BLP=ts.negative_prompt_buffer,
+            N=patchified_seqlen,
+            timestep=timestep,
+            **rope_args,
+            guidance_scale=ts.guidance_scale,
+            traced=traced,
+            gather_output=False,
+        )
+
+        return self._solver.step(
+            step=step,
+            latent=permuted_latent_tt,
+            velocity_pred=permuted_noise_pred_tt,
+        )
+
     def check_inputs(
         self,
         prompt,
@@ -784,39 +833,17 @@ class WanPipeline(PipelineAPIMixin):
                         dtype=ttnn.float32,
                     )
 
-                if self._expand_timesteps:
-                    # seq_len: num_latent_frames * latent_height//2 * latent_width//2
-                    temp_ts = (mask[0][0][:, ::2, ::2] * t).flatten()
-                    # batch_size, seq_len
-                    timestep = temp_ts.unsqueeze(0).expand(latents.shape[0], -1)
-                else:
-                    timestep = t.expand(latents.shape[0])
-
-                permuted_model_input = self.get_model_input(permuted_latent_tt, cond_latents)
-                permuted_model_input = ttnn.typecast(permuted_model_input, ttnn.bfloat16)
-
-                assert timestep.ndim == 1, "Wan2.2-T2V/I2V requires a 1D timestep tensor"
-                timestep = float32_tensor(
-                    timestep.unsqueeze(1).unsqueeze(1).unsqueeze(1), device=(None if traced else self.mesh_device)
-                )
-
-                permuted_noise_pred_tt = ts.model.combined_step(
-                    do_classifier_free_guidance=self.do_classifier_free_guidance,
-                    spatial_1BNI=permuted_model_input,
-                    prompt_1BLP=ts.prompt_buffer,
-                    negative_prompt_1BLP=ts.negative_prompt_buffer,
-                    N=patchified_seqlen,
-                    timestep=timestep,
-                    **rope_args,
-                    guidance_scale=ts.guidance_scale,
-                    traced=traced,
-                    gather_output=False,
-                )
-
-                permuted_latent_tt = self._solver.step(
+                permuted_latent_tt = self._step(
                     step=i,
-                    latent=permuted_latent_tt,
-                    velocity_pred=permuted_noise_pred_tt,
+                    t=t,
+                    ts=ts,
+                    permuted_latent_tt=permuted_latent_tt,
+                    mask=mask,
+                    cond_latents=cond_latents,
+                    rope_args=rope_args,
+                    patchified_seqlen=patchified_seqlen,
+                    latents_batch_size=latents.shape[0],
+                    traced=traced,
                 )
 
                 progress_bar.update()
