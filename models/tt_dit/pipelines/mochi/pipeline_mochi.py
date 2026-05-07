@@ -321,21 +321,13 @@ class MochiPipeline(PipelineAPIMixin):
         width,
         num_frames,
         dtype,
-        device,
-        latents=None,
     ):
         height = height // self.vae_spatial_scale_factor
         width = width // self.vae_spatial_scale_factor
         num_frames = (num_frames - 1) // self.vae_temporal_scale_factor + 1
 
         shape = (batch_size, num_channels_latents, num_frames, height, width)
-
-        if latents is not None:
-            return latents.to(device=device, dtype=dtype)
-
-        latents = torch.randn(shape, dtype=torch.float32, device=torch.device(device))
-        latents = latents.to(dtype)
-        return latents
+        return torch.randn(shape, dtype=torch.float32).to(dtype)
 
 
     @torch.no_grad()
@@ -348,12 +340,6 @@ class MochiPipeline(PipelineAPIMixin):
         guidance_scale: float = 4.5,
         num_videos_per_prompt: Optional[int] = 1,
         seed: Optional[int] = None,
-        latents: Optional[torch.Tensor] = None,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        prompt_attention_mask: Optional[torch.Tensor] = None,
-        negative_prompt_embeds: Optional[torch.Tensor] = None,
-        negative_prompt_attention_mask: Optional[torch.Tensor] = None,
-        output_type: Optional[str] = "pil",
         max_sequence_length: int = 256,
         traced: bool = False,
         vae_traced: bool | None = None,
@@ -375,12 +361,7 @@ class MochiPipeline(PipelineAPIMixin):
             raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
 
         cfg_enabled = guidance_scale > 1.0
-
-        # 2. Define call parameters
-        if prompts is not None:
-            batch_size = len(prompts)
-        else:
-            batch_size = prompt_embeds.shape[0]
+        batch_size = len(prompts)
 
         # 3. Prepare text embeddings
         on_event(SectionStart("encoder"))
@@ -396,10 +377,6 @@ class MochiPipeline(PipelineAPIMixin):
             num_videos_per_prompt=num_videos_per_prompt,
             max_sequence_length=max_sequence_length,
             disable_attention_mask=traced,
-            prompt_embeds=prompt_embeds,
-            prompt_attention_mask=prompt_attention_mask,
-            negative_prompt_embeds=negative_prompt_embeds,
-            negative_prompt_attention_mask=negative_prompt_attention_mask,
             on_event=on_event,
         )
         on_event(SectionEnd("encoder"))
@@ -440,8 +417,6 @@ class MochiPipeline(PipelineAPIMixin):
             width,
             num_frames,
             prompt_embeds.dtype,
-            "cpu",
-            latents,
         )
         print(f"preparing latents with H: {height}, W: {width}, num_frames: {num_frames}")
         print(f"latents.shape: {latents.shape}")
@@ -475,12 +450,8 @@ class MochiPipeline(PipelineAPIMixin):
                 progress_bar.update()
         on_event(SectionEnd("denoising"))
 
-        if output_type == "latent":
-            return latents
-
         return self._decode_latents(
             latents,
-            output_type=output_type,
             vae_traced=vae_traced,
             on_event=on_event,
         )
@@ -492,7 +463,6 @@ class MochiPipeline(PipelineAPIMixin):
         self,
         latents: torch.Tensor,
         *,
-        output_type: str,
         vae_traced: bool,
         on_event: PipelineEventCallback,
     ) -> torch.Tensor:
@@ -529,7 +499,7 @@ class MochiPipeline(PipelineAPIMixin):
                 video = self.vae.decode(latents, return_dict=False)[0]
         on_event(SectionEnd("vae"))
 
-        return self.video_processor.postprocess_video(video, output_type=output_type)
+        return self.video_processor.postprocess_video(video, output_type="pil")
 
     def _predict(
         self,

@@ -497,7 +497,6 @@ class QwenImagePipeline(PipelineAPIMixin):
                             prompt_sequence_length=prompt_sequence_length,
                             cfg_scale=cfg_scale,
                             cfg_enabled=cfg_enabled,
-                            on_event=on_event,
                             traced=traced,
                         )
                     on_event(SectionEnd(f"denoising_step_{i}"))

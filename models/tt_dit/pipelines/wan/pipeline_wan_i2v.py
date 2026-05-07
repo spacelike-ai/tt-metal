@@ -94,7 +94,6 @@ class WanPipelineI2V(WanPipeline):
         num_frames: int = 81,
         dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
-        latents: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert batch_size == 1, "Only batch size 1 is currently supported for I2V"
 
@@ -111,7 +110,6 @@ class WanPipelineI2V(WanPipeline):
             num_frames=num_frames,
             dtype=dtype,
             device=device,
-            latents=latents,
         )
 
         latent_shape = latents.shape

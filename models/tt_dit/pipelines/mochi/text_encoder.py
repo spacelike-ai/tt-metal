@@ -39,22 +39,18 @@ class TextEncoder:
         num_videos_per_prompt: int = 1,
         max_sequence_length: int = 256,
         disable_attention_mask: bool = False,
-        prompt_embeds: torch.Tensor | None = None,
-        prompt_attention_mask: torch.Tensor | None = None,
-        negative_prompt_embeds: torch.Tensor | None = None,
-        negative_prompt_attention_mask: torch.Tensor | None = None,
         on_event: PipelineEventCallback = null_callback,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         on_event(SectionStart("t5_encoding"))
-        if prompt_embeds is None:
-            prompt_embeds, prompt_attention_mask = self._get_t5_prompt_embeds(
-                prompt=list(prompts),
-                num_videos_per_prompt=num_videos_per_prompt,
-                max_sequence_length=max_sequence_length,
-                disable_attention_mask=disable_attention_mask,
-            )
+        prompt_embeds, prompt_attention_mask = self._get_t5_prompt_embeds(
+            prompt=list(prompts),
+            num_videos_per_prompt=num_videos_per_prompt,
+            max_sequence_length=max_sequence_length,
+            disable_attention_mask=disable_attention_mask,
+        )
 
-        if cfg_enabled and negative_prompt_embeds is None:
+        negative_prompt_embeds, negative_prompt_attention_mask = None, None
+        if cfg_enabled:
             negative_prompt_embeds, negative_prompt_attention_mask = self._get_t5_prompt_embeds(
                 prompt=list(negative_prompts),
                 num_videos_per_prompt=num_videos_per_prompt,

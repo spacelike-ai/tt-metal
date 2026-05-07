@@ -98,8 +98,6 @@ class TextEncoder:
         cfg_enabled: bool,
         num_videos_per_prompt: int = 1,
         max_sequence_length: int = 512,
-        prompt_embeds: object | None = None,
-        negative_prompt_embeds: object | None = None,
         on_event: PipelineEventCallback = null_callback,
     ) -> tuple[object, object]:
         on_event(SectionStart("t5_encoding"))
@@ -107,15 +105,11 @@ class TextEncoder:
         prompts_list = list(prompts)
         batch_size = len(prompts_list)
 
-        all_input_prompts: list[str] = []
-        pos_prompt_end_idx = 0
-        neg_prompt_end_idx = 0
+        all_input_prompts: list[str] = list(prompts_list)
+        pos_prompt_end_idx = batch_size * num_videos_per_prompt
+        neg_prompt_end_idx = pos_prompt_end_idx
 
-        if prompt_embeds is None:
-            all_input_prompts += prompts_list
-            pos_prompt_end_idx = batch_size * num_videos_per_prompt
-
-        if cfg_enabled and negative_prompt_embeds is None:
+        if cfg_enabled:
             negative_prompts_list = list(negative_prompts)
             assert batch_size == len(
                 negative_prompts_list
@@ -134,12 +128,8 @@ class TextEncoder:
             max_sequence_length=max_sequence_length,
         )
 
-        prompt_embeds = all_prompt_embeds[:, :pos_prompt_end_idx] if pos_prompt_end_idx > 0 else prompt_embeds
-        negative_prompt_embeds = (
-            all_prompt_embeds[:, pos_prompt_end_idx:neg_prompt_end_idx]
-            if neg_prompt_end_idx > 0
-            else negative_prompt_embeds
-        )
+        prompt_embeds = all_prompt_embeds[:, :pos_prompt_end_idx]
+        negative_prompt_embeds = all_prompt_embeds[:, pos_prompt_end_idx:neg_prompt_end_idx] if cfg_enabled else None
 
         on_event(SectionEnd("t5_encoding"))
         return prompt_embeds, negative_prompt_embeds
