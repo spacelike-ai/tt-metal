@@ -52,7 +52,7 @@ class _CombinerSingle:
         split_pos = n // 2
         uncond = prediction[0:split_pos]
         cond = prediction[split_pos:]
-        return ttnn.lerp(uncond, cond, cfg_scale)
+        return uncond + cfg_scale * (cond - uncond)
 
 
 class _CombinerParallel:
@@ -78,7 +78,7 @@ class _CombinerParallel:
             ttnn.experimental.send_async(local_pred, self._sockets[1].tx)
 
         uncond, cond = (local_pred, remote_pred) if idx == 0 else (remote_pred, local_pred)
-        return ttnn.lerp(uncond, cond, cfg_scale)
+        return uncond + cfg_scale * (cond - uncond)
 
 
 @dataclass
