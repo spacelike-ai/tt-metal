@@ -494,6 +494,7 @@ class WanPipeline(PipelineAPIMixin):
         rope_args: dict,
         patchified_seqlen: int,
         latents_batch_size: int,
+        cfg_enabled: bool,
         traced: bool,
     ) -> ttnn.Tensor:
         if self._expand_timesteps:
@@ -513,7 +514,7 @@ class WanPipeline(PipelineAPIMixin):
         )
 
         permuted_noise_pred_tt = ts.model.combined_step(
-            do_classifier_free_guidance=self.do_classifier_free_guidance,
+            do_classifier_free_guidance=cfg_enabled,
             spatial_1BNI=permuted_model_input,
             prompt_1BLP=ts.prompt_buffer,
             negative_prompt_1BLP=ts.negative_prompt_buffer,
@@ -600,14 +601,6 @@ class WanPipeline(PipelineAPIMixin):
 
         latents = torch.randn(shape, dtype=torch.float32, device=torch.device(device))
         return latents, None
-
-    @property
-    def do_classifier_free_guidance(self):
-        return self.transformer_states[0].guidance_scale > 1.0
-
-    @property
-    def num_timesteps(self):
-        return self._num_timesteps
 
     DEFAULT_NEGATIVE_PROMPT = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
 
@@ -720,6 +713,7 @@ class WanPipeline(PipelineAPIMixin):
 
         self.transformer_states[0].guidance_scale = guidance_scale
         self.transformer_states[1].guidance_scale = guidance_scale_2
+        cfg_enabled = guidance_scale > 1.0
 
         # device = self._execution_device
         device = "cpu"
@@ -736,7 +730,7 @@ class WanPipeline(PipelineAPIMixin):
         prompt_embeds, negative_prompt_embeds = self._text_encoder.encode_cfg(
             prompts,
             negative_prompts,
-            cfg_enabled=self.do_classifier_free_guidance,
+            cfg_enabled=cfg_enabled,
             num_videos_per_prompt=num_videos_per_prompt,
             max_sequence_length=max_sequence_length,
             prompt_embeds=prompt_embeds,
@@ -780,8 +774,6 @@ class WanPipeline(PipelineAPIMixin):
         mask = torch.ones(latents.shape, dtype=torch.float32, device=device)
 
         # 6. Denoising loop
-        self._num_timesteps = len(timesteps)
-
         if self._boundary_ratio is not None:
             boundary_timestep = self._boundary_ratio * 1000
         else:
@@ -843,6 +835,7 @@ class WanPipeline(PipelineAPIMixin):
                     rope_args=rope_args,
                     patchified_seqlen=patchified_seqlen,
                     latents_batch_size=latents.shape[0],
+                    cfg_enabled=cfg_enabled,
                     traced=traced,
                 )
 

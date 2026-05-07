@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 import tqdm
@@ -181,10 +181,6 @@ class MochiPipeline(PipelineAPIMixin):
             [T5TokenizerFast](https://huggingface.co/docs/transformers/en/model_doc/t5#transformers.T5TokenizerFast).
     """
 
-    model_cpu_offload_seq = "text_encoder->transformer->vae"
-    _optional_components = []
-    _callback_tensor_inputs = ["latents", "prompt_embeds", "negative_prompt_embeds"]
-
     @classmethod
     def create_pipeline(
         cls,
@@ -322,7 +318,6 @@ class MochiPipeline(PipelineAPIMixin):
         prompt,
         height,
         width,
-        callback_on_step_end_tensor_inputs=None,
         prompt_embeds=None,
         negative_prompt_embeds=None,
         prompt_attention_mask=None,
@@ -330,13 +325,6 @@ class MochiPipeline(PipelineAPIMixin):
     ):
         if height % 8 != 0 or width % 8 != 0:
             raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
-
-        if callback_on_step_end_tensor_inputs is not None and not all(
-            k in self._callback_tensor_inputs for k in callback_on_step_end_tensor_inputs
-        ):
-            raise ValueError(
-                f"`callback_on_step_end_tensor_inputs` has to be in {self._callback_tensor_inputs}, but found {[k for k in callback_on_step_end_tensor_inputs if k not in self._callback_tensor_inputs]}"
-            )
 
         if prompt is not None and prompt_embeds is not None:
             raise ValueError(
@@ -394,29 +382,6 @@ class MochiPipeline(PipelineAPIMixin):
         latents = latents.to(dtype)
         return latents
 
-    @property
-    def guidance_scale(self):
-        return self._guidance_scale
-
-    @property
-    def do_classifier_free_guidance(self):
-        return self._guidance_scale > 1.0
-
-    @property
-    def num_timesteps(self):
-        return self._num_timesteps
-
-    @property
-    def attention_kwargs(self):
-        return self._attention_kwargs
-
-    @property
-    def current_timestep(self):
-        return self._current_timestep
-
-    @property
-    def interrupt(self):
-        return self._interrupt
 
     @torch.no_grad()
     def __call__(
@@ -425,7 +390,6 @@ class MochiPipeline(PipelineAPIMixin):
         prompts: Sequence[str],
         negative_prompts: Sequence[str] | None = None,
         num_inference_steps: int = 64,
-        timesteps: List[int] = None,
         guidance_scale: float = 4.5,
         num_videos_per_prompt: Optional[int] = 1,
         seed: Optional[int] = None,
@@ -435,20 +399,15 @@ class MochiPipeline(PipelineAPIMixin):
         negative_prompt_embeds: Optional[torch.Tensor] = None,
         negative_prompt_attention_mask: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pil",
-        attention_kwargs: Optional[Dict[str, Any]] = None,
-        callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
-        callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 256,
         traced: bool = False,
         vae_traced: bool | None = None,
-        encoder_traced: bool | None = None,
         on_event: PipelineEventCallback | None = None,
     ):
         on_event = on_event if on_event is not None else null_callback
         negative_prompts = negative_prompts if negative_prompts is not None else [""] * len(prompts)
 
         vae_traced = vae_traced if vae_traced is not None else traced
-        encoder_traced = encoder_traced if encoder_traced is not None else traced
         height = self._height
         width = self._width
         num_frames = self._num_frames
@@ -462,17 +421,13 @@ class MochiPipeline(PipelineAPIMixin):
             prompt=prompts,
             height=height,
             width=width,
-            callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
             prompt_embeds=prompt_embeds,
             negative_prompt_embeds=negative_prompt_embeds,
             prompt_attention_mask=prompt_attention_mask,
             negative_prompt_attention_mask=negative_prompt_attention_mask,
         )
 
-        self._guidance_scale = guidance_scale
-        self._attention_kwargs = attention_kwargs
-        self._current_timestep = None
-        self._interrupt = False
+        cfg_enabled = guidance_scale > 1.0
 
         # 2. Define call parameters
         if prompts is not None:
@@ -490,7 +445,7 @@ class MochiPipeline(PipelineAPIMixin):
         ) = self._text_encoder.encode_cfg(
             prompts,
             negative_prompts,
-            cfg_enabled=self.do_classifier_free_guidance,
+            cfg_enabled=cfg_enabled,
             num_videos_per_prompt=num_videos_per_prompt,
             max_sequence_length=max_sequence_length,
             disable_attention_mask=traced,
@@ -538,13 +493,13 @@ class MochiPipeline(PipelineAPIMixin):
             width,
             num_frames,
             prompt_embeds.dtype,
-            device,
+            "cpu",
             latents,
         )
         print(f"preparing latents with H: {height}, W: {width}, num_frames: {num_frames}")
         print(f"latents.shape: {latents.shape}")
 
-        if self.do_classifier_free_guidance:
+        if cfg_enabled:
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
             prompt_attention_mask = torch.cat([negative_prompt_attention_mask, prompt_attention_mask], dim=0)
 
@@ -555,42 +510,23 @@ class MochiPipeline(PipelineAPIMixin):
         self._solver.set_schedule(sigmas, alphas)
         timesteps = [s * 1000 for s in sigmas[:-1]]
 
-        self._num_timesteps = len(timesteps)
-
         # 6. Denoising loop
         on_event(SectionStart("denoising"))
         with tqdm.tqdm(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
-                if self.interrupt:
-                    continue
-
-                # Note: Mochi uses reversed timesteps. To ensure compatibility with methods like FasterCache, we need
-                # to make sure we're using the correct non-reversed timestep values.
-                self._current_timestep = 1000 - t
-
                 latents = self._step(
                     step=i,
                     t=t,
                     latents=latents,
                     prompt_embeds=prompt_embeds,
                     prompt_attention_mask=prompt_attention_mask,
-                    cfg_enabled=self.do_classifier_free_guidance,
+                    cfg_enabled=cfg_enabled,
+                    guidance_scale=guidance_scale,
                     traced=traced,
                 )
 
-                if callback_on_step_end is not None:
-                    callback_kwargs = {}
-                    for k in callback_on_step_end_tensor_inputs:
-                        callback_kwargs[k] = locals()[k]
-                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
-
-                    latents = callback_outputs.pop("latents", latents)
-                    prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-
                 progress_bar.update()
         on_event(SectionEnd("denoising"))
-
-        self._current_timestep = None
 
         if output_type == "latent":
             return latents
@@ -692,6 +628,7 @@ class MochiPipeline(PipelineAPIMixin):
         prompt_embeds: torch.Tensor,
         prompt_attention_mask: torch.Tensor,
         cfg_enabled: bool,
+        guidance_scale: float,
         traced: bool,
     ) -> torch.Tensor:
         latent_model_input = torch.cat([latents] * 2) if cfg_enabled else latents
@@ -715,7 +652,7 @@ class MochiPipeline(PipelineAPIMixin):
 
         assert cfg_enabled
         if cfg_enabled:
-            noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
         latents_dtype = latents.dtype
         latents = self._solver.step(step=step, latent=latents.to(torch.float32), velocity_pred=noise_pred)
