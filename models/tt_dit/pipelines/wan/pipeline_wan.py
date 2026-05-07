@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import os
-from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
@@ -532,43 +531,6 @@ class WanPipeline(PipelineAPIMixin):
             velocity_pred=permuted_noise_pred_tt,
         )
 
-    def check_inputs(
-        self,
-        prompt,
-        negative_prompt,
-        height,
-        width,
-        prompt_embeds=None,
-        negative_prompt_embeds=None,
-        guidance_scale_2=None,
-    ):
-        if height % 16 != 0 or width % 16 != 0:
-            raise ValueError(f"`height` and `width` have to be divisible by 16 but are {height} and {width}.")
-
-        if prompt is not None and prompt_embeds is not None:
-            raise ValueError(
-                f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
-                " only forward one of the two."
-            )
-        elif negative_prompt is not None and negative_prompt_embeds is not None:
-            raise ValueError(
-                f"Cannot forward both `negative_prompt`: {negative_prompt} and `negative_prompt_embeds`: {negative_prompt_embeds}. Please make sure to"
-                " only forward one of the two."
-            )
-        elif prompt is None and prompt_embeds is None:
-            raise ValueError(
-                "Provide either `prompt` or `prompt_embeds`. Cannot leave both `prompt` and `prompt_embeds` undefined."
-            )
-        elif prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
-            raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
-        elif negative_prompt is not None and (
-            not isinstance(negative_prompt, str) and not isinstance(negative_prompt, list)
-        ):
-            raise ValueError(f"`negative_prompt` has to be of type `str` or `list` but is {type(negative_prompt)}")
-
-        if self._boundary_ratio is None and guidance_scale_2 is not None:
-            raise ValueError("`guidance_scale_2` is only supported when the pipeline's `boundary_ratio` is not None.")
-
     def get_model_input(self, latents, cond_latents):
         """
         Adapter function to enable I2V. For base T2V, just return the latents.
@@ -690,16 +652,11 @@ class WanPipeline(PipelineAPIMixin):
             msg = "guidance_scale_2 > 1 requires CFG to be enabled"
             raise ValueError(msg)
 
-        # 1. Check inputs. Raise error if not correct
-        self.check_inputs(
-            prompts,
-            negative_prompts,
-            height,
-            width,
-            prompt_embeds,
-            negative_prompt_embeds,
-            guidance_scale_2,
-        )
+        if height % 16 != 0 or width % 16 != 0:
+            raise ValueError(f"`height` and `width` have to be divisible by 16 but are {height} and {width}.")
+
+        if self._boundary_ratio is None and guidance_scale_2 is not None:
+            raise ValueError("`guidance_scale_2` is only supported when the pipeline's `boundary_ratio` is not None.")
 
         if num_frames % self.vae_scale_factor_temporal != 1:
             logger.warning(
@@ -757,18 +714,17 @@ class WanPipeline(PipelineAPIMixin):
             torch.manual_seed(seed)
 
         on_event(SectionStart("prepare_latents"))
-        with nullcontext():
-            latents, cond_latents = self.prepare_latents(
-                batch_size=batch_size * num_videos_per_prompt,
-                image_prompt=image_prompt,
-                num_channels_latents=self.vae.config.z_dim,
-                height=height,
-                width=width,
-                num_frames=num_frames,
-                dtype=torch.float32,
-                device=device,
-                latents=latents,
-            )
+        latents, cond_latents = self.prepare_latents(
+            batch_size=batch_size * num_videos_per_prompt,
+            image_prompt=image_prompt,
+            num_channels_latents=self.vae.config.z_dim,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            dtype=torch.float32,
+            device=device,
+            latents=latents,
+        )
         on_event(SectionEnd("prepare_latents"))
 
         mask = torch.ones(latents.shape, dtype=torch.float32, device=device)

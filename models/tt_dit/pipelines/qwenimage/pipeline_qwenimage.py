@@ -337,25 +337,6 @@ class QwenImagePipeline(PipelineAPIMixin):
         self.transformers[idx].deallocate_weights()
         ttnn.synchronize_device(self._submesh_devices[idx])
 
-    def _deallocate_vae(self) -> None:
-        """Deallocate VAE decoder weights from device to free memory."""
-        if self._use_torch_vae_decoder or not self._vae.is_loaded():
-            return
-
-        logger.info("deallocating VAE decoder weights to free memory...")
-        self._vae.deallocate_weights()
-        ttnn.synchronize_device(self.vae_device)
-
-    def _reload_vae(self) -> None:
-        """Load or reload VAE decoder weights to device."""
-        if self._use_torch_vae_decoder or self._vae.is_loaded():
-            return
-
-        with reshape_device(self.vae_device, self.vae_mesh_shape):
-            logger.info("loading VAE decoder weights to device...")
-            self._vae.reload_weights()
-        ttnn.synchronize_device(self.vae_device)
-
     @staticmethod
     def get_mesh_shape(mesh_device, parallel_factor):
         mesh_shape = list(mesh_device.shape)
@@ -389,14 +370,20 @@ class QwenImagePipeline(PipelineAPIMixin):
             self._load_transformers(self.encoder_submesh_idx)
 
         if not self.transformers[self.vae_submesh_idx].is_loaded():
-            self._deallocate_vae()
+            if not self._use_torch_vae_decoder and self._vae.is_loaded():
+                logger.info("deallocating VAE decoder weights to free memory...")
+                self._vae.deallocate_weights()
+                ttnn.synchronize_device(self.vae_device)
             self._load_transformers(self.vae_submesh_idx)
 
     def prepare_vae(self) -> None:
-        if not self._vae.is_loaded():
-            self._deallocate_transformers(self.vae_submesh_idx)
-            with reshape_device(self.vae_device, self.vae_mesh_shape):
-                self._reload_vae()
+        if self._vae.is_loaded():
+            return
+        self._deallocate_transformers(self.vae_submesh_idx)
+        with reshape_device(self.vae_device, self.vae_mesh_shape):
+            logger.info("loading VAE decoder weights to device...")
+            self._vae.reload_weights()
+        ttnn.synchronize_device(self.vae_device)
 
     def __call__(
         self,
@@ -578,7 +565,6 @@ class QwenImagePipeline(PipelineAPIMixin):
         prompt_sequence_length: int,
         cfg_enabled: bool,
         cfg_scale: float,
-        on_event: PipelineEventCallback = null_callback,
         traced: bool,
     ) -> list[ttnn.Tensor]:
         latents = list(latents)
