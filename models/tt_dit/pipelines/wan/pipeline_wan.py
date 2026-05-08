@@ -6,35 +6,26 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 import torch
 import tqdm
-from diffusers.models import AutoencoderKLWan
 from diffusers.video_processor import VideoProcessor
 from loguru import logger
 
 import ttnn
 
 from models.tt_dit.models.transformers.wan2_2.transformer_wan import WanCheckpoint, WanTransformer3DModel
-from models.tt_dit.models.vae.vae_wan2_1 import WanDecoder
+from models.tt_dit.models.vae.vae_wan2_1 import WanVAEDecoderAdapter
 from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VaeHWParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
 from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
 from models.tt_dit.pipelines.wan.text_encoder import TextEncoder
 from models.tt_dit.solvers import UniPCSolver, UniPCVariant, schedules
-from models.tt_dit.utils import cache, tensor
-from models.tt_dit.utils.conv3d import conv3d_blocking_hash
-from models.tt_dit.utils.tensor import (
-    fast_device_to_host,
-    float32_tensor,
-    float_to_uint8,
-    float_to_unit_range,
-    typed_tensor_2dshard,
-)
+from models.tt_dit.utils import tensor
+from models.tt_dit.utils.tensor import float32_tensor
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -323,13 +314,11 @@ class WanPipeline(PipelineAPIMixin):
     ) -> None:
         self.checkpoint_name = config.checkpoint_name
         self.model_type = config.model_type
-        self.vae_t_chunk_size = config.vae_t_chunk_size
         self._cfg_enabled = config.cfg_enabled
         self._height = config.height
         self._width = config.width
         self._num_frames = config.num_frames
 
-        self.vae = AutoencoderKLWan.from_pretrained(config.checkpoint_name, subfolder="vae", trust_remote_code=True)
         self._flow_shift = config.flow_shift
         self._checkpoint = WanCheckpoint(config.checkpoint_name, subfolder="transformer")
         self._checkpoint_2 = WanCheckpoint(config.checkpoint_name, subfolder="transformer_2")
@@ -377,27 +366,16 @@ class WanPipeline(PipelineAPIMixin):
             model_type=self.model_type,
         )
 
-        full_latent_T = (config.num_frames - 1) // 4 + 1
-        decoder_t_chunk_size = full_latent_T if config.vae_t_chunk_size is None else config.vae_t_chunk_size
-
-        self.tt_vae = WanDecoder(
-            base_dim=self.vae.config.base_dim,
-            z_dim=self.vae.config.z_dim,
-            dim_mult=self.vae.config.dim_mult,
-            num_res_blocks=self.vae.config.num_res_blocks,
-            attn_scales=self.vae.config.attn_scales,
-            temperal_downsample=self.vae.config.temperal_downsample,
-            out_channels=self.vae.config.out_channels,
-            is_residual=self.vae.config.is_residual,
-            mesh_device=self.mesh_device,
-            ccl_manager=self.vae_ccl_manager,
+        self._vae = WanVAEDecoderAdapter(
+            checkpoint_name=config.checkpoint_name,
             parallel_config=self.vae_parallel_config,
-            dtype=config.vae_dtype,
-            sdpa_t_fracture_w_only=config.sdpa_t_fracture_w_only,
+            ccl_manager=self.vae_ccl_manager,
             target_height=config.height,
             target_width=config.width,
-            t_chunk_size=decoder_t_chunk_size,
-            cached=(config.vae_t_chunk_size is not None),
+            num_frames=config.num_frames,
+            vae_t_chunk_size=config.vae_t_chunk_size,
+            vae_dtype=config.vae_dtype,
+            sdpa_t_fracture_w_only=config.sdpa_t_fracture_w_only,
         )
 
         self.transformer_states = [
@@ -416,29 +394,21 @@ class WanPipeline(PipelineAPIMixin):
             else:
                 # WH T3K has tighter DRAM — include VAE in the unload chain so
                 # transformers and VAE never coexist in DRAM across pipeline runs.
-                self.transformer.register_coresident_exclusions(self.transformer_2, self.tt_vae)
-                self.transformer_2.register_coresident_exclusions(self.transformer, self.tt_vae)
-                self.tt_vae.register_coresident_exclusions(self.transformer, self.transformer_2)
+                self.transformer.register_coresident_exclusions(self.transformer_2, self._vae.decoder)
+                self.transformer_2.register_coresident_exclusions(self.transformer, self._vae.decoder)
+                self._vae.decoder.register_coresident_exclusions(self.transformer, self.transformer_2)
 
         # Cache warmup: Load in reverse order of use to ensure the earliest required models stay loaded before call.
         self._prepare_transformer(1)
         self._prepare_transformer(0)
         self._prepare_text_encoder()
-        self._prepare_vae()
+        self._vae.reload_weights()
 
         self._boundary_ratio = config.boundary_ratio
         self._expand_timesteps = config.expand_timesteps
-        self.vae_scale_factor_temporal = self.vae.config.scale_factor_temporal if getattr(self, "vae", None) else 4
-        self.vae_scale_factor_spatial = self.vae.config.scale_factor_spatial if getattr(self, "vae", None) else 8
+        self.vae_scale_factor_temporal = self._vae.config.scale_factor_temporal
+        self.vae_scale_factor_spatial = self._vae.config.scale_factor_spatial
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
-
-        # Precompute VAE latent normalization constants (avoids recreating every call)
-        self._vae_latents_mean = torch.tensor(self.vae.config.latents_mean, dtype=self.vae.dtype).view(
-            1, self.vae.config.z_dim, 1, 1, 1
-        )
-        self._vae_latents_std = torch.tensor(self.vae.config.latents_std, dtype=self.vae.dtype).view(
-            1, self.vae.config.z_dim, 1, 1, 1
-        )
 
         # TODO: Reset buffers for change in resolution. Also reinitialize trace
         logger.info("Pipeline allocation run...")
@@ -467,18 +437,6 @@ class WanPipeline(PipelineAPIMixin):
             mesh_device=self.mesh_device,
             parallel_config=self.parallel_config,
             is_fsdp=self.is_fsdp,
-        )
-
-    def _prepare_vae(self):
-        blocking_key = conv3d_blocking_hash(self.tt_vae)
-        subfolder = f"vae_{blocking_key}" if blocking_key else "vae"
-        cache.load_model(
-            self.tt_vae,
-            model_name=os.path.basename(self.checkpoint_name),
-            subfolder=subfolder,
-            parallel_config=self.vae_parallel_config,
-            mesh_shape=tuple(self.mesh_device.shape),
-            get_torch_state_dict=lambda: self.vae.state_dict(),
         )
 
     def _step(
@@ -654,7 +612,7 @@ class WanPipeline(PipelineAPIMixin):
         latents, cond_latents = self.prepare_latents(
             batch_size=batch_size * num_videos_per_prompt,
             image_prompt=image_prompt,
-            num_channels_latents=self.vae.config.z_dim,
+            num_channels_latents=self._vae.config.z_dim,
             height=height,
             width=width,
             num_frames=num_frames,
@@ -761,51 +719,7 @@ class WanPipeline(PipelineAPIMixin):
         on_event: PipelineEventCallback,
     ) -> torch.Tensor:
         on_event(SectionStart("vae"))
-        latents = latents.to(self.vae.dtype)
-        latents = latents * self._vae_latents_std + self._vae_latents_mean
-
-        tt_latents_BTHWC, logical_h = self.tt_vae.prepare_input(latents)
-
-        tt_latents_BTHWC = typed_tensor_2dshard(
-            tt_latents_BTHWC,
-            self.mesh_device,
-            layout=ttnn.ROW_MAJOR_LAYOUT,
-            shard_mapping={
-                self.vae_parallel_config.height_parallel.mesh_axis: 2,
-                self.vae_parallel_config.width_parallel.mesh_axis: 3,
-            },
-            dtype=self.tt_vae.dtype,
-        )
-        self._prepare_vae()
-        tt_video_BCTHW, new_logical_h = self.tt_vae(tt_latents_BTHWC, logical_h, t_chunk_size=self.vae_t_chunk_size)
-
-        concat_dims = [None, None]
-        concat_dims[self.vae_parallel_config.height_parallel.mesh_axis] = 3
-        concat_dims[self.vae_parallel_config.width_parallel.mesh_axis] = 4
-        d2h_permute = (0, 2, 3, 4, 1) if output_type in ("np", "uint8") else None
-
-        if output_type == "uint8":
-            pre_fn = float_to_uint8
-        elif output_type == "np":
-            pre_fn = float_to_unit_range
-        else:
-            pre_fn = None
-
-        video_torch = fast_device_to_host(
-            tt_video_BCTHW,
-            self.mesh_device,
-            concat_dims,
-            ccl_manager=self.vae_ccl_manager,
-            pre_transfer_fn=pre_fn,
-            permute=d2h_permute,
-        )
-
-        if d2h_permute is not None:
-            # Output is (B, T, H, W, C) — trim height in dim 2.
-            video_torch = video_torch[:, :, :new_logical_h, :, :]
-        else:
-            # Output is (B, C, T, H, W) — trim height in dim 3.
-            video_torch = video_torch[:, :, :, :new_logical_h, :]
+        video_torch = self._vae.decode(latents, output_type=output_type)
 
         if output_type == "uint8":
             video = video_torch.numpy()

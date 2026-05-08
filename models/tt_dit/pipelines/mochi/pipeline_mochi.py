@@ -9,14 +9,13 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 import tqdm
-from diffusers.models import AutoencoderKLMochi
 from diffusers.video_processor import VideoProcessor
 from loguru import logger
 
 import ttnn
 
 from models.tt_dit.models.transformers.transformer_mochi import MochiCheckpoint
-from models.tt_dit.models.vae.vae_mochi import MochiVAEDecoder
+from models.tt_dit.models.vae.vae_mochi import MochiVAEDecoderAdapter
 from models.tt_dit.parallel.config import DiTParallelConfig, MochiVAEParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
@@ -273,36 +272,15 @@ class MochiPipeline(PipelineAPIMixin):
             parallel_config=self.parallel_config,
         )
 
-        # Load pretrained VAE (Torch)
-        torch_vae = AutoencoderKLMochi.from_pretrained(checkpoint_name, subfolder="vae", torch_dtype=torch.float32)
-        if config.use_reference_vae:
-            self.vae = torch_vae
-            self._vae_decoder_tracer = None
-        else:
-            with reshape_device(self.mesh_device, self.vae_mesh_shape):
-                self.vae = MochiVAEDecoder(
-                    mesh_device=self.mesh_device,
-                    parallel_config=self.vae_parallel_config,
-                    ccl_manager=self.vae_ccl_manager,
-                    out_channels=torch_vae.config.out_channels,
-                    base_channels=torch_vae.config.decoder_block_out_channels[0],
-                    channel_multipliers=[
-                        x // torch_vae.config.decoder_block_out_channels[0]
-                        for x in torch_vae.config.decoder_block_out_channels
-                    ],
-                    temporal_expansions=torch_vae.config.temporal_expansions,
-                    spatial_expansions=torch_vae.config.spatial_expansions,
-                    num_res_blocks=torch_vae.config.layers_per_block,
-                    latent_dim=torch_vae.config.latent_channels,
-                    has_attention=[False, False, False, False, False],  # torch_vae.config.add_attention_block,
-                    nonlinearity=torch_vae.config.act_fn,
-                    output_nonlinearity=torch_vae.config.act_fn,
-                    latents_mean=torch_vae.config.latents_mean,
-                    latents_std=torch_vae.config.latents_std,
-                    scaling_factor=torch_vae.config.scaling_factor,
-                )
-                self.vae.load_torch_state_dict(torch_vae.decoder.state_dict())
-            self._vae_decoder_tracer = Tracer(self.vae.forward, device=self.mesh_device, prep_run=False)
+        with reshape_device(self.mesh_device, self.vae_mesh_shape):
+            self._vae = MochiVAEDecoderAdapter(
+                checkpoint_name=checkpoint_name,
+                parallel_config=self.vae_parallel_config,
+                ccl_manager=self.vae_ccl_manager,
+                use_torch=config.use_reference_vae,
+            )
+            if not config.use_reference_vae:
+                self._vae.reload_weights()
 
         logger.info("Pipeline allocation run...")
         self(
@@ -466,21 +444,6 @@ class MochiPipeline(PipelineAPIMixin):
         vae_traced: bool,
         on_event: PipelineEventCallback,
     ) -> torch.Tensor:
-        # unscale/denormalize the latents
-        # denormalize with the mean and std if available and not None
-        has_latents_mean = hasattr(self.vae.config, "latents_mean") and self.vae.config.latents_mean is not None
-        has_latents_std = hasattr(self.vae.config, "latents_std") and self.vae.config.latents_std is not None
-        if has_latents_mean and has_latents_std:
-            latents_mean = (
-                torch.tensor(self.vae.config.latents_mean).view(1, 12, 1, 1, 1).to(latents.device, latents.dtype)
-            )
-            latents_std = (
-                torch.tensor(self.vae.config.latents_std).view(1, 12, 1, 1, 1).to(latents.device, latents.dtype)
-            )
-            latents = latents * latents_std / self.vae.config.scaling_factor + latents_mean
-        else:
-            latents = latents / self.vae.config.scaling_factor
-
         # If the VAE is memory-constrained, free the transformer.
         if self.reload_dit_model:
             logger.info("Freeing MochiTransformer3DModel")
@@ -490,13 +453,7 @@ class MochiPipeline(PipelineAPIMixin):
 
         on_event(SectionStart("vae"))
         with reshape_device(self.mesh_device, self.vae_mesh_shape):
-            if isinstance(self.vae, MochiVAEDecoder):
-                tt_latents = self.vae.prepare_input(latents)
-                vae_forward = self._vae_decoder_tracer if vae_traced else self.vae.forward
-                tt_output = vae_forward(tt_latents)
-                video = self.vae.postprocess_output(tt_output, latents.shape)
-            else:
-                video = self.vae.decode(latents, return_dict=False)[0]
+            video = self._vae.decode(latents, traced=vae_traced)
         on_event(SectionEnd("vae"))
 
         return self.video_processor.postprocess_video(video, output_type="pil")

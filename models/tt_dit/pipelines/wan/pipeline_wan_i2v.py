@@ -31,20 +31,20 @@ class WanPipelineI2V(WanPipeline):
         super().__init__(device=device, config=config)
 
         self.tt_encoder = WanEncoder(
-            base_dim=self.vae.config.base_dim,
-            in_channels=self.vae.config.in_channels,
-            z_dim=self.vae.config.z_dim,
-            dim_mult=self.vae.config.dim_mult,
-            num_res_blocks=self.vae.config.num_res_blocks,
-            attn_scales=self.vae.config.attn_scales,
-            temperal_downsample=self.vae.config.temperal_downsample,
-            is_residual=self.vae.config.is_residual,
+            base_dim=self._vae.config.base_dim,
+            in_channels=self._vae.config.in_channels,
+            z_dim=self._vae.config.z_dim,
+            dim_mult=self._vae.config.dim_mult,
+            num_res_blocks=self._vae.config.num_res_blocks,
+            attn_scales=self._vae.config.attn_scales,
+            temperal_downsample=self._vae.config.temperal_downsample,
+            is_residual=self._vae.config.is_residual,
             mesh_device=self.mesh_device,
             ccl_manager=self.vae_ccl_manager,
             parallel_config=self.vae_parallel_config,
         )
 
-        self.tt_encoder.load_state_dict(self.vae.state_dict())
+        self.tt_encoder.load_state_dict(self._vae.torch_state_dict())
 
     @classmethod
     def create_pipeline(
@@ -77,8 +77,8 @@ class WanPipelineI2V(WanPipeline):
         # Reshape to make the channel last
         U, B, NPad, T_size = latents.shape
         # break out the channels for processing
-        latents = latents.reshape(U, B, NPad, T_size // self.vae.config.z_dim, -1)
-        cond_latents = cond_latents.reshape(U, B, NPad, T_size // self.vae.config.z_dim, -1)
+        latents = latents.reshape(U, B, NPad, T_size // self._vae.config.z_dim, -1)
+        cond_latents = cond_latents.reshape(U, B, NPad, T_size // self._vae.config.z_dim, -1)
 
         # concatenate the latents and cond_latents
         model_input = torch.cat([latents, cond_latents], dim=-1).reshape(U, B, NPad, -1)
@@ -169,11 +169,11 @@ class WanPipelineI2V(WanPipeline):
         encoded_video_torch = encoded_video_torch.to(dtype=dtype)
 
         latents_mean = (
-            torch.tensor(self.vae.config.latents_mean)
-            .view(1, self.vae.config.z_dim, 1, 1, 1)
+            torch.tensor(self._vae.config.latents_mean)
+            .view(1, self._vae.config.z_dim, 1, 1, 1)
             .to(encoded_video_torch.device, encoded_video_torch.dtype)
         )
-        latents_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(1, self.vae.config.z_dim, 1, 1, 1).to(
+        latents_std = 1.0 / torch.tensor(self._vae.config.latents_std).view(1, self._vae.config.z_dim, 1, 1, 1).to(
             encoded_video_torch.device, encoded_video_torch.dtype
         )
 
