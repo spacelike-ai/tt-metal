@@ -12,33 +12,33 @@ if TYPE_CHECKING:
     from .events import PipelineEventCallback
 
 
-_R = TypeVar("_R", covariant=True)
+_R_co = TypeVar("_R_co", covariant=True)
 
 
-class _Pipeline(Protocol[_R]):
+class _Pipeline(Protocol[_R_co]):
     def __call__(
         self,
         *,
         prompts: Sequence[str],
-        negative_prompts: Sequence[str] | None = None,
+        negative_prompts: Sequence[str] | None,
         num_inference_steps: int = ...,
-        seed: int | None = None,
-        traced: bool = ...,
-        on_event: PipelineEventCallback | None = None,
-    ) -> _R:
+        seed: int,
+        traced: bool,
+        on_event: PipelineEventCallback | None,
+    ) -> _R_co:
         ...
 
 
 class PipelineAPIMixin:
     def run_single_prompt(
-        self: _Pipeline[_R],
+        self: _Pipeline[_R_co],
         *,
         prompt: str,
         negative_prompt: str | None = None,
         num_inference_steps: int | None = None,
-        seed: int | None = None,
+        seed: int = 0,
         on_event: PipelineEventCallback | None = None,
-    ) -> _R:
+    ) -> _R_co:
         kwargs = {}
 
         if num_inference_steps is not None:
