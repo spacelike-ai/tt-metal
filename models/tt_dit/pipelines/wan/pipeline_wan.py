@@ -531,7 +531,7 @@ class WanPipeline(PipelineAPIMixin):
         guidance_scale: float = 4.0,
         guidance_scale_2: Optional[float] = 3.0,
         num_videos_per_prompt: Optional[int] = 1,
-        seed: Optional[int] = None,
+        seed: int = 0,
         output_type: Optional[str] = "np",
         max_sequence_length: int = 512,
         traced: bool = False,
@@ -605,8 +605,7 @@ class WanPipeline(PipelineAPIMixin):
         self._solver.set_schedule(sigmas, alphas)
 
         # 5. Prepare latent variables
-        if seed is not None:
-            torch.manual_seed(seed)
+        torch.manual_seed(seed)
 
         on_event(SectionStart("prepare_latents"))
         latents, cond_latents = self.prepare_latents(

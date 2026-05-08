@@ -108,7 +108,7 @@ def test_motif_pipeline_performance(
     logger.info("Running warmup iteration...")
 
     with benchmark_profiler("run", iteration=0):
-        images = pipeline.run_single_prompt(prompt=prompts[0], num_inference_steps=num_inference_steps, seed=0)
+        images = pipeline.run_single_prompt(prompt=prompts[0], num_inference_steps=num_inference_steps)
     images[0].save(f"motif_{image_w}_{image_h}_warmup.png")
 
     logger.info(f"Warmup completed in {benchmark_profiler.get_duration('run', 0):.2f}s")
@@ -138,7 +138,6 @@ def test_motif_pipeline_performance(
                 images = pipeline.run_single_prompt(
                     prompt=prompts[prompt_idx],
                     num_inference_steps=num_inference_steps,
-                    seed=0,
                     on_event=profiler_event_callback(benchmark_profiler, i),
                 )
             images[0].save(f"motif_{image_w}_{image_h}_perf_run{i}.png")

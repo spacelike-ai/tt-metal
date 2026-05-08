@@ -283,13 +283,7 @@ class MochiPipeline(PipelineAPIMixin):
                 self._vae.reload_weights()
 
         logger.info("Pipeline allocation run...")
-        self(
-            prompts=[""],
-            num_inference_steps=2,
-            seed=0,
-            guidance_scale=2 if config.cfg_enabled else 1,
-            traced=False,
-        )
+        self(prompts=[""], num_inference_steps=2, guidance_scale=2 if config.cfg_enabled else 1, traced=False)
 
     def prepare_latents(
         self,
@@ -317,7 +311,7 @@ class MochiPipeline(PipelineAPIMixin):
         num_inference_steps: int = 64,
         guidance_scale: float = 4.5,
         num_videos_per_prompt: Optional[int] = 1,
-        seed: Optional[int] = None,
+        seed: int = 0,
         max_sequence_length: int = 256,
         traced: bool = False,
         vae_traced: bool | None = None,
@@ -384,8 +378,7 @@ class MochiPipeline(PipelineAPIMixin):
             )
 
         # 4. Prepare latent variables
-        if seed is not None:
-            torch.manual_seed(seed)
+        torch.manual_seed(seed)
 
         num_channels_latents = self._checkpoint.in_channels
         latents = self.prepare_latents(

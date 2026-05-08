@@ -211,13 +211,7 @@ class Flux1Pipeline(PipelineAPIMixin):
         )
 
         logger.info("Pipeline allocation run...")
-        self(
-            prompts=[""],
-            num_inference_steps=2,
-            seed=0,
-            cfg_scale=2 if config.cfg_enabled else 1,
-            traced=False,
-        )
+        self(prompts=[""], num_inference_steps=2, cfg_scale=2 if config.cfg_enabled else 1, traced=False)
 
     def __call__(
         self,
@@ -230,7 +224,7 @@ class Flux1Pipeline(PipelineAPIMixin):
         negative_prompts: Sequence[str] | None = None,
         negative_prompts_2: Sequence[str] | None = None,
         num_inference_steps: int,
-        seed: int | None = None,
+        seed: int = 0,
         traced: bool = False,
         vae_traced: bool | None = None,
         encoder_traced: bool | None = None,
@@ -314,9 +308,7 @@ class Flux1Pipeline(PipelineAPIMixin):
             tt_pooled_prompt_embeds_list = distribute_cfg(
                 pooled_prompt_embeds, devices=self._submesh_devices, on_host=False
             )
-            tt_latents_step_list = self._random_latents(
-                batch_size=prompt_count * num_images_per_prompt, seed=seed
-            )
+            tt_latents_step_list = self._random_latents(batch_size=prompt_count * num_images_per_prompt, seed=seed)
             tt_guidance_list = (
                 from_torch_to_devices(guidance.unsqueeze(-1), devices=self._submesh_devices)
                 if guidance is not None
@@ -377,9 +369,8 @@ class Flux1Pipeline(PipelineAPIMixin):
         for device in self._submesh_devices:
             ttnn.synchronize_device(device)
 
-    def _random_latents(self, *, batch_size: int, seed: int | None) -> list[ttnn.Tensor]:
-        if seed is not None:
-            torch.manual_seed(seed)
+    def _random_latents(self, *, batch_size: int, seed: int) -> list[ttnn.Tensor]:
+        torch.manual_seed(seed)
 
         latents_height = self._height // _VAE_SCALE_FACTOR
         latents_width = self._width // _VAE_SCALE_FACTOR

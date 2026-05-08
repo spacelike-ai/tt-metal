@@ -122,7 +122,6 @@ def test_mochi_pipeline_performance(
             prompts=[prompts[0]],
             num_inference_steps=2,  # Small number of steps to reduce test time.
             guidance_scale=guidance_scale,
-            seed=0,  # Make deterministic
         )[0]
 
     logger.info(f"Warmup completed in {benchmark_profiler.get_duration('run', 0):.2f}s")
@@ -172,7 +171,6 @@ def test_mochi_pipeline_performance(
                     prompts=[prompts[prompt_idx]],
                     num_inference_steps=num_inference_steps,
                     guidance_scale=guidance_scale,
-                    seed=0,  # Make deterministic
                     on_event=profiler_event_callback(benchmark_profiler, i),
                 )[0]
 

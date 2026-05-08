@@ -306,13 +306,7 @@ class QwenImagePipeline(PipelineAPIMixin):
             self._vae.reload_weights()
 
         logger.info("Pipeline allocation run...")
-        self(
-            prompts=[""],
-            num_inference_steps=2,
-            seed=0,
-            cfg_scale=2 if config.cfg_enabled else 1,
-            traced=False,
-        )
+        self(prompts=[""], num_inference_steps=2, cfg_scale=2 if config.cfg_enabled else 1, traced=False)
 
     def _load_transformers(self, idx) -> None:
         """Load transformer weights to device. Called lazily for device encoder path."""
@@ -393,7 +387,7 @@ class QwenImagePipeline(PipelineAPIMixin):
         prompts: Sequence[str],
         negative_prompts: Sequence[str] | None = None,
         num_inference_steps: int,
-        seed: int | None = None,
+        seed: int = 0,
         traced: bool = False,
         vae_traced: bool | None = None,
         encoder_traced: bool | None = None,
@@ -602,9 +596,8 @@ class QwenImagePipeline(PipelineAPIMixin):
         for device in self._submesh_devices:
             ttnn.synchronize_device(device)
 
-    def _random_latents(self, *, batch_size: int, seed: int | None) -> list[ttnn.Tensor]:
-        if seed is not None:
-            torch.manual_seed(seed)
+    def _random_latents(self, *, batch_size: int, seed: int) -> list[ttnn.Tensor]:
+        torch.manual_seed(seed)
         shape = [
             batch_size,
             self._num_channels_latents,

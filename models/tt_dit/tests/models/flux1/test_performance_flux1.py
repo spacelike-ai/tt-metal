@@ -118,7 +118,6 @@ def test_flux1_pipeline_performance(
         images = pipeline.run_single_prompt(
             prompt=prompts[0],
             num_inference_steps=num_inference_steps,
-            seed=0,
         )
     images[0].save(f"flux1_dev_{image_w}_{image_h}_warmup.png")
 
@@ -149,7 +148,6 @@ def test_flux1_pipeline_performance(
                 images = pipeline.run_single_prompt(
                     prompt=prompts[prompt_idx],
                     num_inference_steps=num_inference_steps,
-                    seed=0,
                     on_event=profiler_event_callback(benchmark_profiler, i),
                 )
             images[0].save(f"flux1_dev_{image_w}_{image_h}_perf_run{i}.png")

@@ -217,7 +217,7 @@ class MotifPipeline(PipelineAPIMixin):
         negative_prompts_2: Sequence[str | None] | None = None,
         negative_prompts_3: Sequence[str | None] | None = None,
         num_inference_steps: int = 40,
-        seed: int | None = None,
+        seed: int = 0,
         num_images_per_prompt: int = 1,
         cfg_scale: float = 5.0,
         linear_quadratic_emulating_steps: int = 100,
@@ -369,9 +369,8 @@ class MotifPipeline(PipelineAPIMixin):
         # Make latents an output, because inputs may be overwritten during trace execution.
         return latents, pred
 
-    def _random_latents(self, batch_size: int, seed: int | None) -> list[ttnn.Tensor]:
-        if seed is not None:
-            torch.manual_seed(seed)
+    def _random_latents(self, batch_size: int, seed: int) -> list[ttnn.Tensor]:
+        torch.manual_seed(seed)
 
         shape = [batch_size, _LATENT_CHANNELS, self._height // _VAE_SCALE_FACTOR, self._width // _VAE_SCALE_FACTOR]
 

@@ -209,7 +209,6 @@ def test_tt_dit_accuracy(
             generated_images = pipeline.run_single_prompt(
                 prompt=prompt,
                 num_inference_steps=num_inference_steps,
-                seed=0,
                 on_event=profiler_event_callback(benchmark_profiler, i),
                 **model_metadata.get("extra_args", {}),
             )

@@ -213,7 +213,6 @@ def test_tt_mochi_pipeline(
         prompts=[prompt],
         num_inference_steps=50,
         guidance_scale=3.5,
-        seed=0,
         traced=traced,
     )[0]
 

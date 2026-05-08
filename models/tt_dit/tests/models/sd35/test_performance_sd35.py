@@ -138,7 +138,6 @@ def test_sd35_new_pipeline_performance(
             prompts=[prompts[0]],
             negative_prompts=[negative_prompt],
             num_inference_steps=num_inference_steps,
-            seed=0,
             traced=True,
         )
     images[0].save(f"sd35_new_{image_w}_{image_h}_warmup.png")
@@ -171,7 +170,6 @@ def test_sd35_new_pipeline_performance(
                     prompts=[prompts[prompt_idx]],
                     negative_prompts=[negative_prompt],
                     num_inference_steps=num_inference_steps,
-                    seed=0,  # Different seed for each run
                     traced=True,
                     on_event=profiler_event_callback(benchmark_profiler, i),
                 )

@@ -218,12 +218,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         ttnn.synchronize_device(self.encoder_device)
 
         logger.info("Pipeline allocation run...")
-        self(
-            prompts=[""],
-            num_inference_steps=2,
-            guidance_scale=2 if config.cfg_enabled else 1,
-            traced=False,
-        )
+        self(prompts=[""], num_inference_steps=2, guidance_scale=2 if config.cfg_enabled else 1, traced=False)
 
     def __call__(
         self,
@@ -235,7 +230,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         negative_prompts_2: Sequence[str] | None = None,
         negative_prompts_3: Sequence[str] | None = None,
         num_inference_steps: int = 40,
-        seed: int | None = None,
+        seed: int = 0,
         num_images_per_prompt: int = 1,
         guidance_scale: float = 3.5,
         max_t5_sequence_length: int = 256,
@@ -413,9 +408,8 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
 
         return latents
 
-    def _random_latents(self, *, batch_size: int, dtype: torch.dtype, seed: int | None) -> list[ttnn.Tensor]:
-        if seed is not None:
-            torch.manual_seed(seed)
+    def _random_latents(self, *, batch_size: int, dtype: torch.dtype, seed: int) -> list[ttnn.Tensor]:
+        torch.manual_seed(seed)
 
         latents_shape = (
             batch_size,
