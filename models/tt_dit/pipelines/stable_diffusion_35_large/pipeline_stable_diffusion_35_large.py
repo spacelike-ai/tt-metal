@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -186,9 +185,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         for submesh_device in self.submesh_devices:
             ttnn.synchronize_device(submesh_device)
 
-        self._tracers = [
-            Tracer(self._traced_step, device=submesh, prep_run=False) for submesh in self.submesh_devices
-        ]
+        self._tracers = [Tracer(self._traced_step, device=submesh, prep_run=False) for submesh in self.submesh_devices]
         self._solvers = [EulerSolver() for _ in self.submesh_devices]
 
         self._num_channels_latents = checkpoint.num_channels_latents
@@ -257,85 +254,78 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
             msg = "guidance_scale > 1 requires CFG to be enabled"
             raise ValueError(msg)
         on_event(SectionStart("total"))
-        with nullcontext():
-            batch_size = len(prompts)
-            width = self._width
-            height = self._height
+        batch_size = len(prompts)
+        width = self._width
+        height = self._height
 
-            assert height % (_VAE_SCALE_FACTOR * self.patch_size) == 0
-            assert width % (_VAE_SCALE_FACTOR * self.patch_size) == 0
-            assert max_t5_sequence_length <= 512  # noqa: PLR2004
+        assert height % (_VAE_SCALE_FACTOR * self.patch_size) == 0
+        assert width % (_VAE_SCALE_FACTOR * self.patch_size) == 0
+        assert max_t5_sequence_length <= 512  # noqa: PLR2004
 
-            cfg_enabled = guidance_scale > 1
-            # TODO: pass the patch_size value
-            patch_size = 2
+        cfg_enabled = guidance_scale > 1
+        # TODO: pass the patch_size value
+        patch_size = 2
 
-            logger.info("encoding prompts...")
+        logger.info("encoding prompts...")
 
-            on_event(SectionStart("encoder"))
-            with self._reshape_encoder():
-                context, pooled = self._text_encoder.encode_cfg(
-                    (prompts, prompts_2, prompts_3),
-                    (negative_prompts, negative_prompts_2, negative_prompts_3),
-                    num_images_per_prompt=num_images_per_prompt,
-                    max_t5_sequence_length=max_t5_sequence_length,
-                    cfg_enabled=cfg_enabled,
-                    clip_skip=clip_skip,
-                    traced=encoder_traced,
-                    on_event=on_event,
-                )
-            on_event(SectionEnd("encoder"))
-
-            logger.info("preparing timesteps...")
-
-            shift = 3.0
-            sigma_small = shift * 0.001 / (1 + (shift - 1) * 0.001)
-            sigmas, alphas = schedules.shifted_linear(num_inference_steps, shift=shift, sigma_small=sigma_small)
-            for solver in self._solvers:
-                solver.set_schedule(sigmas, alphas)
-            timesteps = [s * 1000 for s in sigmas[:-1]]
-
-            logger.info("preparing latents...")
-
-            tt_context_list = distribute_cfg(
-                context.unsqueeze(1), devices=self.submesh_devices, on_host=False
+        on_event(SectionStart("encoder"))
+        with self._reshape_encoder():
+            context, pooled = self._text_encoder.encode_cfg(
+                (prompts, prompts_2, prompts_3),
+                (negative_prompts, negative_prompts_2, negative_prompts_3),
+                num_images_per_prompt=num_images_per_prompt,
+                max_t5_sequence_length=max_t5_sequence_length,
+                cfg_enabled=cfg_enabled,
+                clip_skip=clip_skip,
+                traced=encoder_traced,
+                on_event=on_event,
             )
-            tt_pooled_list = distribute_cfg(
-                pooled.unsqueeze(1).unsqueeze(1), devices=self.submesh_devices, on_host=False
+        on_event(SectionEnd("encoder"))
+
+        logger.info("preparing timesteps...")
+
+        shift = 3.0
+        sigma_small = shift * 0.001 / (1 + (shift - 1) * 0.001)
+        sigmas, alphas = schedules.shifted_linear(num_inference_steps, shift=shift, sigma_small=sigma_small)
+        for solver in self._solvers:
+            solver.set_schedule(sigmas, alphas)
+        timesteps = [s * 1000 for s in sigmas[:-1]]
+
+        logger.info("preparing latents...")
+
+        tt_context_list = distribute_cfg(context.unsqueeze(1), devices=self.submesh_devices, on_host=False)
+        tt_pooled_list = distribute_cfg(pooled.unsqueeze(1).unsqueeze(1), devices=self.submesh_devices, on_host=False)
+        tt_latents_step_list = self._random_latents(
+            batch_size=batch_size * num_images_per_prompt, dtype=context.dtype, seed=seed
+        )
+
+        logger.info("denoising...")
+
+        on_event(SectionStart("denoising"))
+        for i, t in enumerate(tqdm.tqdm(timesteps)):
+            on_event(SectionStart(f"denoising_step_{i}"))
+            reuse_tensors = traced and i > 0
+
+            tt_latents_step_list = self._step(
+                t=t,
+                latents=tt_latents_step_list,
+                cfg_enabled=cfg_enabled,
+                context=None if reuse_tensors else tt_context_list,
+                pooled=None if reuse_tensors else tt_pooled_list,
+                cfg_scale=guidance_scale,
+                step=i,
+                prompt_sequence_length=333,
+                latents_sequence_length=4096,
+                traced=traced,
             )
-            tt_latents_step_list = self._random_latents(
-                batch_size=batch_size * num_images_per_prompt, dtype=context.dtype, seed=seed
-            )
+            on_event(SectionEnd(f"denoising_step_{i}"))
+        on_event(SectionEnd("denoising"))
 
-            logger.info("denoising...")
+        logger.info("decoding image...")
 
-            on_event(SectionStart("denoising"))
-            with nullcontext():
-                for i, t in enumerate(tqdm.tqdm(timesteps)):
-                    on_event(SectionStart(f"denoising_step_{i}"))
-                    with nullcontext():
-                        reuse_tensors = traced and i > 0
-
-                        tt_latents_step_list = self._step(
-                            t=t,
-                            latents=tt_latents_step_list,
-                            cfg_enabled=cfg_enabled,
-                            context=None if reuse_tensors else tt_context_list,
-                            pooled=None if reuse_tensors else tt_pooled_list,
-                            cfg_scale=guidance_scale,
-                            step=i,
-                            prompt_sequence_length=333,
-                            latents_sequence_length=4096,
-                            traced=traced,
-                        )
-                    on_event(SectionEnd(f"denoising_step_{i}"))
-            on_event(SectionEnd("denoising"))
-
-            logger.info("decoding image...")
-
-            on_event(SectionStart("vae"))
-            output = self._decode_latents(tt_latents_step_list[self.vae_submesh_idx], traced=vae_traced)
-            on_event(SectionEnd("vae"))
+        on_event(SectionStart("vae"))
+        output = self._decode_latents(tt_latents_step_list[self.vae_submesh_idx], traced=vae_traced)
+        on_event(SectionEnd("vae"))
         on_event(SectionEnd("total"))
 
         return output

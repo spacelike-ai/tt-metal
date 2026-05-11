@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import math
-from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -175,9 +174,7 @@ class Flux1Pipeline(PipelineAPIMixin):
         for submesh_device in self._submesh_devices:
             ttnn.synchronize_device(submesh_device)
 
-        self._tracers = [
-            Tracer(self._traced_step, device=device, prep_run=False) for device in self._submesh_devices
-        ]
+        self._tracers = [Tracer(self._traced_step, device=device, prep_run=False) for device in self._submesh_devices]
         self._solvers = [EulerSolver() for _ in self._submesh_devices]
 
         self._pos_embed = checkpoint.pos_embed
@@ -252,115 +249,110 @@ class Flux1Pipeline(PipelineAPIMixin):
             raise ValueError(msg)
 
         on_event(SectionStart("total"))
-        with nullcontext():
-            assert height % (_VAE_SCALE_FACTOR * self._patch_size) == 0
-            assert width % (_VAE_SCALE_FACTOR * self._patch_size) == 0
+        assert height % (_VAE_SCALE_FACTOR * self._patch_size) == 0
+        assert width % (_VAE_SCALE_FACTOR * self._patch_size) == 0
 
-            cfg_enabled = cfg_scale > 1
-            assert not cfg_enabled, "CFG is not supported"
+        cfg_enabled = cfg_scale > 1
+        assert not cfg_enabled, "CFG is not supported"
 
-            latents_height = height // _VAE_SCALE_FACTOR
-            latents_width = width // _VAE_SCALE_FACTOR
-            latents_sequence_length = latents_height * latents_width
+        latents_height = height // _VAE_SCALE_FACTOR
+        latents_width = width // _VAE_SCALE_FACTOR
+        latents_sequence_length = latents_height * latents_width
 
-            logger.info("encoding prompts...")
+        logger.info("encoding prompts...")
 
-            on_event(SectionStart("encoder"))
-            context, pooled = self._text_encoder.encode_cfg(
-                (prompts, prompts_2),
-                (negative_prompts, negative_prompts_2),
-                num_images_per_prompt=num_images_per_prompt,
+        on_event(SectionStart("encoder"))
+        context, pooled = self._text_encoder.encode_cfg(
+            (prompts, prompts_2),
+            (negative_prompts, negative_prompts_2),
+            num_images_per_prompt=num_images_per_prompt,
+            cfg_enabled=cfg_enabled,
+            clip_skip=clip_skip,
+            traced=encoder_traced,
+            on_event=on_event,
+        )
+        _, prompt_sequence_length, _ = context.shape
+        on_event(SectionEnd("encoder"))
+
+        logger.info("preparing timesteps...")
+
+        if self._with_guidance_embeds:  # FLUX.1 [dev]
+            mu = _calculate_shift(latents_sequence_length, 256, 4096, 0.5, 1.15)
+            sigmas, alphas = schedules.shifted_linear(
+                num_inference_steps, shift=math.exp(mu), sigma_small=1 / num_inference_steps
+            )
+        else:  # FLUX.1 [schnell]
+            sigmas, alphas = schedules.linear(num_inference_steps, sigma_small=1 / num_inference_steps)
+        for solver in self._solvers:
+            solver.set_schedule(sigmas, alphas)
+        timesteps = [s * 1000 for s in sigmas[:-1]]
+
+        guidance = (
+            torch.full([prompt_count * num_images_per_prompt], fill_value=guidance_scale)
+            if self._with_guidance_embeds
+            else None
+        )
+
+        logger.info("preparing latents...")
+
+        text_ids = torch.zeros([prompt_sequence_length, 3])
+        image_ids = _latent_image_ids(height=latents_height, width=latents_width)
+        ids = torch.cat((text_ids, image_ids), dim=0)
+        rope_cos, rope_sin = self._pos_embed.forward(ids)
+
+        tt_context_list = distribute_cfg(context, devices=self._submesh_devices, on_host=False)
+        tt_pooled_list = distribute_cfg(pooled, devices=self._submesh_devices, on_host=False)
+        tt_latents_step_list = self._random_latents(batch_size=prompt_count * num_images_per_prompt, seed=seed)
+        tt_guidance_list = (
+            from_torch_to_devices(guidance.unsqueeze(-1), devices=self._submesh_devices)
+            if guidance is not None
+            else None
+        )
+        tt_latents_rope_cos_list = from_torch_to_devices(
+            rope_cos[prompt_sequence_length:], devices=self._submesh_devices, mesh_axes=[sp_axis, None]
+        )
+        tt_latents_rope_sin_list = from_torch_to_devices(
+            rope_sin[prompt_sequence_length:], devices=self._submesh_devices, mesh_axes=[sp_axis, None]
+        )
+        tt_prompt_rope_cos_list = from_torch_to_devices(
+            rope_cos[:prompt_sequence_length], devices=self._submesh_devices
+        )
+        tt_prompt_rope_sin_list = from_torch_to_devices(
+            rope_sin[:prompt_sequence_length], devices=self._submesh_devices
+        )
+
+        logger.info("denoising...")
+
+        on_event(SectionStart("denoising"))
+        for i, t in enumerate(tqdm.tqdm(timesteps)):
+            on_event(SectionStart(f"denoising_step_{i}"))
+            reuse_tensors = i > 0 and traced
+
+            tt_latents_step_list = self._step(
+                step=i,
+                t=t,
+                latents=tt_latents_step_list,
                 cfg_enabled=cfg_enabled,
-                clip_skip=clip_skip,
-                traced=encoder_traced,
-                on_event=on_event,
+                context=None if reuse_tensors else tt_context_list,
+                pooled=None if reuse_tensors else tt_pooled_list,
+                cfg_scale=cfg_scale,
+                guidance=None if reuse_tensors else tt_guidance_list,
+                latents_rope_cos=None if reuse_tensors else tt_latents_rope_cos_list,
+                latents_rope_sin=None if reuse_tensors else tt_latents_rope_sin_list,
+                prompt_rope_cos=None if reuse_tensors else tt_prompt_rope_cos_list,
+                prompt_rope_sin=None if reuse_tensors else tt_prompt_rope_sin_list,
+                latents_sequence_length=latents_sequence_length,
+                prompt_sequence_length=prompt_sequence_length,
+                traced=traced,
             )
-            _, prompt_sequence_length, _ = context.shape
-            on_event(SectionEnd("encoder"))
+            on_event(SectionEnd(f"denoising_step_{i}"))
+        on_event(SectionEnd("denoising"))
 
-            logger.info("preparing timesteps...")
+        logger.info("decoding image...")
 
-            if self._with_guidance_embeds:  # FLUX.1 [dev]
-                mu = _calculate_shift(latents_sequence_length, 256, 4096, 0.5, 1.15)
-                sigmas, alphas = schedules.shifted_linear(
-                    num_inference_steps, shift=math.exp(mu), sigma_small=1 / num_inference_steps
-                )
-            else:  # FLUX.1 [schnell]
-                sigmas, alphas = schedules.linear(num_inference_steps, sigma_small=1 / num_inference_steps)
-            for solver in self._solvers:
-                solver.set_schedule(sigmas, alphas)
-            timesteps = [s * 1000 for s in sigmas[:-1]]
-
-            guidance = (
-                torch.full([prompt_count * num_images_per_prompt], fill_value=guidance_scale)
-                if self._with_guidance_embeds
-                else None
-            )
-
-            logger.info("preparing latents...")
-
-            text_ids = torch.zeros([prompt_sequence_length, 3])
-            image_ids = _latent_image_ids(height=latents_height, width=latents_width)
-            ids = torch.cat((text_ids, image_ids), dim=0)
-            rope_cos, rope_sin = self._pos_embed.forward(ids)
-
-            tt_context_list = distribute_cfg(context, devices=self._submesh_devices, on_host=False)
-            tt_pooled_list = distribute_cfg(
-                pooled, devices=self._submesh_devices, on_host=False
-            )
-            tt_latents_step_list = self._random_latents(batch_size=prompt_count * num_images_per_prompt, seed=seed)
-            tt_guidance_list = (
-                from_torch_to_devices(guidance.unsqueeze(-1), devices=self._submesh_devices)
-                if guidance is not None
-                else None
-            )
-            tt_latents_rope_cos_list = from_torch_to_devices(
-                rope_cos[prompt_sequence_length:], devices=self._submesh_devices, mesh_axes=[sp_axis, None]
-            )
-            tt_latents_rope_sin_list = from_torch_to_devices(
-                rope_sin[prompt_sequence_length:], devices=self._submesh_devices, mesh_axes=[sp_axis, None]
-            )
-            tt_prompt_rope_cos_list = from_torch_to_devices(
-                rope_cos[:prompt_sequence_length], devices=self._submesh_devices
-            )
-            tt_prompt_rope_sin_list = from_torch_to_devices(
-                rope_sin[:prompt_sequence_length], devices=self._submesh_devices
-            )
-
-            logger.info("denoising...")
-
-            on_event(SectionStart("denoising"))
-            with nullcontext():
-                for i, t in enumerate(tqdm.tqdm(timesteps)):
-                    on_event(SectionStart(f"denoising_step_{i}"))
-                    with nullcontext():
-                        reuse_tensors = i > 0 and traced
-
-                        tt_latents_step_list = self._step(
-                            step=i,
-                            t=t,
-                            latents=tt_latents_step_list,
-                            cfg_enabled=cfg_enabled,
-                            context=None if reuse_tensors else tt_context_list,
-                            pooled=None if reuse_tensors else tt_pooled_list,
-                            cfg_scale=cfg_scale,
-                            guidance=None if reuse_tensors else tt_guidance_list,
-                            latents_rope_cos=None if reuse_tensors else tt_latents_rope_cos_list,
-                            latents_rope_sin=None if reuse_tensors else tt_latents_rope_sin_list,
-                            prompt_rope_cos=None if reuse_tensors else tt_prompt_rope_cos_list,
-                            prompt_rope_sin=None if reuse_tensors else tt_prompt_rope_sin_list,
-                            latents_sequence_length=latents_sequence_length,
-                            prompt_sequence_length=prompt_sequence_length,
-                            traced=traced,
-                        )
-                    on_event(SectionEnd(f"denoising_step_{i}"))
-            on_event(SectionEnd("denoising"))
-
-            logger.info("decoding image...")
-
-            on_event(SectionStart("vae"))
-            output = self._decode_latents(tt_latents_step_list[self.vae_submesh_idx], traced=vae_traced)
-            on_event(SectionEnd("vae"))
+        on_event(SectionStart("vae"))
+        output = self._decode_latents(tt_latents_step_list[self.vae_submesh_idx], traced=vae_traced)
+        on_event(SectionEnd("vae"))
         on_event(SectionEnd("total"))
 
         return output

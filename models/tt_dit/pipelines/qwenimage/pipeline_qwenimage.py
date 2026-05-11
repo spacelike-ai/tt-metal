@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import math
-from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -260,9 +259,7 @@ class QwenImagePipeline(PipelineAPIMixin):
             )
             for mgr in self._ccl_managers
         ]
-        self._tracers = [
-            Tracer(self._traced_step, device=device, prep_run=False) for device in self._submesh_devices
-        ]
+        self._tracers = [Tracer(self._traced_step, device=device, prep_run=False) for device in self._submesh_devices]
         self._solvers = [EulerSolver() for _ in self._submesh_devices]
         self._transformers_loaded = False
 
@@ -421,98 +418,95 @@ class QwenImagePipeline(PipelineAPIMixin):
         latents_sequence_length = (latents_height // self._patch_size) * (latents_width // self._patch_size)
 
         on_event(SectionStart("total"))
-        with nullcontext():
-            cfg_enabled = cfg_scale > 1
-            logger.info("encoding prompts...")
+        cfg_enabled = cfg_scale > 1
+        logger.info("encoding prompts...")
 
-            self.prepare_encoder()
+        self.prepare_encoder()
 
-            on_event(SectionStart("encoder"))
-            with self._reshape_encoder():
-                context, prompt_mask = self._text_encoder.encode_cfg(
-                    prompts,
-                    negative_prompts,
-                    num_images_per_prompt=num_images_per_prompt,
-                    cfg_enabled=cfg_enabled,
-                    on_event=on_event,
-                    traced=encoder_traced,
-                )
-            on_event(SectionEnd("encoder"))
-            _, prompt_sequence_length, _ = context.shape
-
-            self.prepare_transformers()
-
-            logger.info("preparing timesteps...")
-
-            mu = _calculate_shift(latents_sequence_length, 256, 8192, 0.5, 0.9)
-            sigmas, _ = schedules.shifted_linear(
-                num_inference_steps, shift=math.exp(mu), sigma_small=1 / num_inference_steps
+        on_event(SectionStart("encoder"))
+        with self._reshape_encoder():
+            context, prompt_mask = self._text_encoder.encode_cfg(
+                prompts,
+                negative_prompts,
+                num_images_per_prompt=num_images_per_prompt,
+                cfg_enabled=cfg_enabled,
+                on_event=on_event,
+                traced=encoder_traced,
             )
-            sigmas, alphas = _stretch_to_terminal(sigmas, terminal=0.02)
-            for solver in self._solvers:
-                solver.set_schedule(sigmas, alphas)
-            timesteps = [s * 1000 for s in sigmas[:-1]]
+        on_event(SectionEnd("encoder"))
+        _, prompt_sequence_length, _ = context.shape
 
-            logger.info("preparing latents...")
+        self.prepare_transformers()
 
-            p = self._patch_size
-            img_shapes = [[(1, latents_height // p, latents_width // p)]] * transformer_batch_size
-            txt_seq_lens = [prompt_sequence_length] * transformer_batch_size
-            latents_rope, prompt_rope = self._pos_embed.forward(img_shapes, txt_seq_lens, "cpu")
+        logger.info("preparing timesteps...")
 
-            latents_rope_cos = latents_rope.real.repeat_interleave(2, dim=-1)
-            latents_rope_sin = latents_rope.imag.repeat_interleave(2, dim=-1)
-            prompt_rope_cos = prompt_rope.real.repeat_interleave(2, dim=-1)
-            prompt_rope_sin = prompt_rope.imag.repeat_interleave(2, dim=-1)
+        mu = _calculate_shift(latents_sequence_length, 256, 8192, 0.5, 0.9)
+        sigmas, _ = schedules.shifted_linear(
+            num_inference_steps, shift=math.exp(mu), sigma_small=1 / num_inference_steps
+        )
+        sigmas, alphas = _stretch_to_terminal(sigmas, terminal=0.02)
+        for solver in self._solvers:
+            solver.set_schedule(sigmas, alphas)
+        timesteps = [s * 1000 for s in sigmas[:-1]]
 
-            tt_context_list = distribute_cfg(context, devices=self._submesh_devices, on_host=False)
-            tt_latents_step_list = self._random_latents(batch_size=transformer_batch_size, seed=seed)
-            tt_latents_rope_cos_list = from_torch_to_devices(
-                latents_rope_cos, devices=self._submesh_devices, mesh_axes=[sp_axis, None]
+        logger.info("preparing latents...")
+
+        p = self._patch_size
+        img_shapes = [[(1, latents_height // p, latents_width // p)]] * transformer_batch_size
+        txt_seq_lens = [prompt_sequence_length] * transformer_batch_size
+        latents_rope, prompt_rope = self._pos_embed.forward(img_shapes, txt_seq_lens, "cpu")
+
+        latents_rope_cos = latents_rope.real.repeat_interleave(2, dim=-1)
+        latents_rope_sin = latents_rope.imag.repeat_interleave(2, dim=-1)
+        prompt_rope_cos = prompt_rope.real.repeat_interleave(2, dim=-1)
+        prompt_rope_sin = prompt_rope.imag.repeat_interleave(2, dim=-1)
+
+        tt_context_list = distribute_cfg(context, devices=self._submesh_devices, on_host=False)
+        tt_latents_step_list = self._random_latents(batch_size=transformer_batch_size, seed=seed)
+        tt_latents_rope_cos_list = from_torch_to_devices(
+            latents_rope_cos, devices=self._submesh_devices, mesh_axes=[sp_axis, None]
+        )
+        tt_latents_rope_sin_list = from_torch_to_devices(
+            latents_rope_sin, devices=self._submesh_devices, mesh_axes=[sp_axis, None]
+        )
+        tt_prompt_rope_cos_list = from_torch_to_devices(prompt_rope_cos, devices=self._submesh_devices)
+        tt_prompt_rope_sin_list = from_torch_to_devices(prompt_rope_sin, devices=self._submesh_devices)
+
+        logger.info("denoising...")
+
+        on_event(SectionStart("denoising"))
+        for i, t in enumerate(tqdm.tqdm(timesteps)):
+            on_event(SectionStart(f"denoising_step_{i}"))
+            reuse_tensors = i > 0 and traced
+
+            tt_latents_step_list = self._step(
+                step=i,
+                t=t,
+                latents=tt_latents_step_list,
+                context=None if reuse_tensors else tt_context_list,
+                latents_rope_cos=None if reuse_tensors else tt_latents_rope_cos_list,
+                latents_rope_sin=None if reuse_tensors else tt_latents_rope_sin_list,
+                prompt_rope_cos=None if reuse_tensors else tt_prompt_rope_cos_list,
+                prompt_rope_sin=None if reuse_tensors else tt_prompt_rope_sin_list,
+                latents_sequence_length=latents_sequence_length,
+                prompt_sequence_length=prompt_sequence_length,
+                cfg_scale=cfg_scale,
+                cfg_enabled=cfg_enabled,
+                traced=traced,
             )
-            tt_latents_rope_sin_list = from_torch_to_devices(
-                latents_rope_sin, devices=self._submesh_devices, mesh_axes=[sp_axis, None]
-            )
-            tt_prompt_rope_cos_list = from_torch_to_devices(prompt_rope_cos, devices=self._submesh_devices)
-            tt_prompt_rope_sin_list = from_torch_to_devices(prompt_rope_sin, devices=self._submesh_devices)
+            on_event(SectionEnd(f"denoising_step_{i}"))
+        on_event(SectionEnd("denoising"))
 
-            logger.info("denoising...")
+        logger.info("decoding image...")
 
-            on_event(SectionStart("denoising"))
-            with nullcontext():
-                for i, t in enumerate(tqdm.tqdm(timesteps)):
-                    on_event(SectionStart(f"denoising_step_{i}"))
-                    with nullcontext():
-                        reuse_tensors = i > 0 and traced
-
-                        tt_latents_step_list = self._step(
-                            step=i,
-                            t=t,
-                            latents=tt_latents_step_list,
-                            context=None if reuse_tensors else tt_context_list,
-                            latents_rope_cos=None if reuse_tensors else tt_latents_rope_cos_list,
-                            latents_rope_sin=None if reuse_tensors else tt_latents_rope_sin_list,
-                            prompt_rope_cos=None if reuse_tensors else tt_prompt_rope_cos_list,
-                            prompt_rope_sin=None if reuse_tensors else tt_prompt_rope_sin_list,
-                            latents_sequence_length=latents_sequence_length,
-                            prompt_sequence_length=prompt_sequence_length,
-                            cfg_scale=cfg_scale,
-                            cfg_enabled=cfg_enabled,
-                            traced=traced,
-                        )
-                    on_event(SectionEnd(f"denoising_step_{i}"))
-            on_event(SectionEnd("denoising"))
-
-            logger.info("decoding image...")
-
-            on_event(SectionStart("vae"))
-            output = self._decode_latents(
-                tt_latents_step_list[self.vae_submesh_idx],
-                latents_height=latents_height,
-                latents_width=latents_width,
-                traced=vae_traced,
-            )
-            on_event(SectionEnd("vae"))
+        on_event(SectionStart("vae"))
+        output = self._decode_latents(
+            tt_latents_step_list[self.vae_submesh_idx],
+            latents_height=latents_height,
+            latents_width=latents_width,
+            traced=vae_traced,
+        )
+        on_event(SectionEnd("vae"))
         on_event(SectionEnd("total"))
 
         return output
@@ -533,7 +527,9 @@ class QwenImagePipeline(PipelineAPIMixin):
         submesh_id: int,
     ) -> ttnn.Tensor:
         latent_input = (
-            ttnn.concat([latents, latents]) if cfg_enabled and self._parallel_config.cfg_parallel.factor == 1 else latents
+            ttnn.concat([latents, latents])
+            if cfg_enabled and self._parallel_config.cfg_parallel.factor == 1
+            else latents
         )
 
         velocity_pred = self.transformers[submesh_id].forward(
