@@ -230,7 +230,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         negative_prompts: Sequence[str] | None = None,
         negative_prompts_2: Sequence[str] | None = None,
         negative_prompts_3: Sequence[str] | None = None,
-        num_inference_steps: int = 40,
+        num_inference_steps: int,
         seed: int = 0,
         num_images_per_prompt: int = 1,
         guidance_scale: float = 3.5,

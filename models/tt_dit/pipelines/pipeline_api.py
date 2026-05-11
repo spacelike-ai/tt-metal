@@ -21,7 +21,7 @@ class _Pipeline(Protocol[_R_co]):
         *,
         prompts: Sequence[str],
         negative_prompts: Sequence[str] | None,
-        num_inference_steps: int = ...,
+        num_inference_steps: int,
         seed: int,
         traced: bool,
         on_event: PipelineEventCallback | None,
@@ -35,20 +35,15 @@ class PipelineAPIMixin:
         *,
         prompt: str,
         negative_prompt: str | None = None,
-        num_inference_steps: int | None = None,
+        num_inference_steps: int,
         seed: int = 0,
         on_event: PipelineEventCallback | None = None,
     ) -> _R_co:
-        kwargs = {}
-
-        if num_inference_steps is not None:
-            kwargs["num_inference_steps"] = num_inference_steps
-
         return self(
             prompts=[prompt],
             negative_prompts=[negative_prompt] if negative_prompt is not None else None,
+            num_inference_steps=num_inference_steps,
             seed=seed,
             traced=True,
             on_event=on_event,
-            **kwargs,
         )

@@ -387,7 +387,7 @@ class QwenImagePipeline(PipelineAPIMixin):
         self,
         *,
         num_images_per_prompt: int = 1,
-        cfg_scale: float,
+        cfg_scale: float = 4.0,
         prompts: Sequence[str],
         negative_prompts: Sequence[str] | None = None,
         num_inference_steps: int,

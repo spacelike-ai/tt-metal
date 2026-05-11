@@ -289,7 +289,7 @@ class MochiPipeline(PipelineAPIMixin):
         *,
         prompts: Sequence[str],
         negative_prompts: Sequence[str] | None = None,
-        num_inference_steps: int = 64,
+        num_inference_steps: int,
         guidance_scale: float = 4.5,
         num_videos_per_prompt: Optional[int] = 1,
         seed: int = 0,

@@ -131,7 +131,6 @@ def test_qwenimage_pipeline(
         images = pipeline(
             prompts=[prompt],
             num_inference_steps=num_inference_steps,
-            cfg_scale=4.0,
             seed=seed,
             traced=traced,
             vae_traced=False,

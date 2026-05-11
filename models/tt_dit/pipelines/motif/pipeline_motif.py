@@ -216,7 +216,7 @@ class MotifPipeline(PipelineAPIMixin):
         negative_prompts: Sequence[str | None] | None = None,
         negative_prompts_2: Sequence[str | None] | None = None,
         negative_prompts_3: Sequence[str | None] | None = None,
-        num_inference_steps: int = 40,
+        num_inference_steps: int,
         seed: int = 0,
         num_images_per_prompt: int = 1,
         cfg_scale: float = 5.0,

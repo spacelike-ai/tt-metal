@@ -527,7 +527,7 @@ class WanPipeline(PipelineAPIMixin):
         prompts: Sequence[str],
         negative_prompts: Sequence[str] | None = None,
         image_prompt=None,
-        num_inference_steps: int = 40,
+        num_inference_steps: int,
         guidance_scale: float = 4.0,
         guidance_scale_2: Optional[float] = 3.0,
         num_videos_per_prompt: Optional[int] = 1,
