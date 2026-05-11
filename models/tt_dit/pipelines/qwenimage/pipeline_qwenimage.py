@@ -531,7 +531,7 @@ class QwenImagePipeline(PipelineAPIMixin):
             else latents
         )
 
-        velocity_pred = self.transformers[submesh_id].forward(
+        return self.transformers[submesh_id].forward(
             spatial=latent_input,
             prompt=context,
             timestep=timestep,
@@ -540,10 +540,6 @@ class QwenImagePipeline(PipelineAPIMixin):
             spatial_sequence_length=latents_sequence_length,
             prompt_sequence_length=prompt_sequence_length,
         )
-
-        # Make latents an output, because inputs are copied to the trace region before executing a
-        # trace and might be overwritten during execution.
-        return latents, velocity_pred
 
     def _step(
         self,
@@ -571,7 +567,7 @@ class QwenImagePipeline(PipelineAPIMixin):
                 dtype=ttnn.float32,
                 device=submesh_device,
             )
-            latents[idx], velocity_pred = self._tracers[idx](
+            velocity_pred = self._tracers[idx](
                 cfg_enabled=cfg_enabled,
                 timestep=timestep,
                 latents=latents[idx],
@@ -585,6 +581,9 @@ class QwenImagePipeline(PipelineAPIMixin):
                 submesh_id=idx,
                 traced=traced,
             )
+
+            latents[idx] = self._tracers[idx].inputs["latents"]
+
             if cfg_enabled:
                 velocity_pred = self._cfg_combiner.combine(velocity_pred, cfg_scale)
             latents[idx] = self._solvers[idx].step(step=step, latent=latents[idx], velocity_pred=velocity_pred)

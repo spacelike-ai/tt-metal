@@ -415,14 +415,14 @@ class Flux1Pipeline(PipelineAPIMixin):
         latents_sequence_length: int,
         prompt_sequence_length: int,
         submesh_id: int,
-    ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
+    ) -> ttnn.Tensor:
         latent_input = (
             ttnn.concat([latents, latents])
             if cfg_enabled and not self._parallel_config.cfg_parallel.factor > 1
             else latents
         )
 
-        velocity_pred = self.transformers[submesh_id].forward(
+        return self.transformers[submesh_id].forward(
             spatial=latent_input,
             prompt=context,
             pooled=pooled,
@@ -433,10 +433,6 @@ class Flux1Pipeline(PipelineAPIMixin):
             spatial_sequence_length=latents_sequence_length,
             prompt_sequence_length=prompt_sequence_length,
         )
-
-        # Make latents an output, because inputs are copied to the trace region before executing a
-        # trace and might be overwritten during execution.
-        return latents, velocity_pred
 
     def _step(
         self,
@@ -467,7 +463,7 @@ class Flux1Pipeline(PipelineAPIMixin):
                 device=submesh_device,
             )
 
-            latents[idx], velocity_pred = self._tracers[idx](
+            velocity_pred = self._tracers[idx](
                 cfg_enabled=cfg_enabled,
                 latents=latents[idx],
                 context=context[idx] if context is not None else None,
@@ -483,6 +479,8 @@ class Flux1Pipeline(PipelineAPIMixin):
                 submesh_id=idx,
                 traced=traced,
             )
+
+            latents[idx] = self._tracers[idx].inputs["latents"]
 
             if cfg_enabled:
                 velocity_pred = self._cfg_combiner.combine(velocity_pred, cfg_scale)
