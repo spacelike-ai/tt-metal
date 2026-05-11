@@ -99,7 +99,6 @@ class MochiPipelineConfig:
     height: int
     width: int
     num_frames: int
-    cfg_enabled: bool
 
     checkpoint_name: str
 
@@ -119,7 +118,6 @@ class MochiPipelineConfig:
         height: int = 480,
         width: int = 848,
         num_frames: int = 168,
-        cfg_enabled: bool = True,
         checkpoint_name: str = _DEFAULT_CHECKPOINT,
     ) -> MochiPipelineConfig:
         preset_dict = _PRESETS_BH if ttnn.device.is_blackhole() else _PRESETS_WH
@@ -153,7 +151,6 @@ class MochiPipelineConfig:
             height=height,
             width=width,
             num_frames=num_frames,
-            cfg_enabled=cfg_enabled,
             checkpoint_name=checkpoint_name,
         )
 
@@ -163,21 +160,6 @@ class MochiPipeline(PipelineAPIMixin):
     The mochi pipeline for text-to-video generation.
 
     Reference: https://github.com/genmoai/models
-
-    Args:
-        transformer ([`MochiTransformer3DModel`]):
-            Conditional Transformer architecture to denoise the encoded video latents.
-        vae ([`AutoencoderKLMochi`]):
-            Variational Auto-Encoder (VAE) Model to encode and decode videos to and from latent representations.
-        text_encoder ([`T5EncoderModel`]):
-            [T5](https://huggingface.co/docs/transformers/en/model_doc/t5#transformers.T5EncoderModel), specifically
-            the [google/t5-v1_1-xxl](https://huggingface.co/google/t5-v1_1-xxl) variant.
-        tokenizer (`CLIPTokenizer`):
-            Tokenizer of class
-            [CLIPTokenizer](https://huggingface.co/docs/transformers/en/model_doc/clip#transformers.CLIPTokenizer).
-        tokenizer (`T5TokenizerFast`):
-            Second Tokenizer of class
-            [T5TokenizerFast](https://huggingface.co/docs/transformers/en/model_doc/t5#transformers.T5TokenizerFast).
     """
 
     @classmethod
@@ -188,7 +170,6 @@ class MochiPipeline(PipelineAPIMixin):
         height: int = 480,
         width: int = 848,
         num_frames: int = 168,
-        cfg_enabled: bool = True,
         checkpoint_name: str = _DEFAULT_CHECKPOINT,
     ) -> MochiPipeline:
         config = MochiPipelineConfig.default(
@@ -196,7 +177,6 @@ class MochiPipeline(PipelineAPIMixin):
             height=height,
             width=width,
             num_frames=num_frames,
-            cfg_enabled=cfg_enabled,
             checkpoint_name=checkpoint_name,
         )
         return cls(device=mesh_device, config=config)
@@ -214,16 +194,14 @@ class MochiPipeline(PipelineAPIMixin):
 
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_spatial_scale_factor)
 
-        self.mesh_device = device
-        self.vae_mesh_shape = config.vae_mesh_shape
+        self._device = device
+        self._vae_mesh_shape = config.vae_mesh_shape
         self.parallel_config = config.dit_parallel_config
         self.vae_parallel_config = config.vae_parallel_config
-        self.num_links = config.num_links
         self.reload_dit_model = config.reload_dit_model  # Only required if VAE is memory-constrained.
         self._height = config.height
         self._width = config.width
         self._num_frames = config.num_frames
-        self._cfg_enabled = config.cfg_enabled
 
         if self.reload_dit_model and not cache.cache_dir_is_set():
             msg = (
@@ -233,15 +211,15 @@ class MochiPipeline(PipelineAPIMixin):
             raise RuntimeError(msg)
 
         # Create CCL manager
-        self.ccl_manager = CCLManager(
+        self._ccl_manager = CCLManager(
             mesh_device=device,
             num_links=config.num_links,
             topology=config.topology,
         )
 
         # Create VAE CCL manager using the VAE mesh shape.
-        with reshape_device(self.mesh_device, self.vae_mesh_shape):
-            self.vae_ccl_manager = CCLManager(
+        with reshape_device(self._device, self._vae_mesh_shape):
+            self._vae_ccl_manager = CCLManager(
                 mesh_device=device,
                 num_links=config.num_links,
                 topology=ttnn.Topology.Linear,
@@ -259,31 +237,31 @@ class MochiPipeline(PipelineAPIMixin):
         # Load pretrained Mochi Transformer (TT)
         self._checkpoint = MochiCheckpoint(checkpoint_name)
 
-        self.transformer = self._checkpoint.build(
-            ccl_manager=self.ccl_manager,
+        self._transformer = self._checkpoint.build(
+            ccl_manager=self._ccl_manager,
             parallel_config=self.parallel_config,
             is_fsdp=True,
         )
         self._tracer = Tracer(self._traced_step, device=device, prep_run=False)
 
         self._checkpoint.load(
-            self.transformer,
-            mesh_device=self.mesh_device,
+            self._transformer,
+            mesh_device=self._device,
             parallel_config=self.parallel_config,
         )
 
-        with reshape_device(self.mesh_device, self.vae_mesh_shape):
+        with reshape_device(self._device, self._vae_mesh_shape):
             self._vae = MochiVAEDecoderAdapter(
                 checkpoint_name=checkpoint_name,
                 parallel_config=self.vae_parallel_config,
-                ccl_manager=self.vae_ccl_manager,
+                ccl_manager=self._vae_ccl_manager,
                 use_torch=config.use_reference_vae,
             )
             if not config.use_reference_vae:
                 self._vae.reload_weights()
 
         logger.info("Pipeline allocation run...")
-        self(prompts=[""], num_inference_steps=2, guidance_scale=2 if config.cfg_enabled else 1, traced=False)
+        self(prompts=[""], num_inference_steps=2, guidance_scale=2, traced=False)
 
     def prepare_latents(
         self,
@@ -324,27 +302,23 @@ class MochiPipeline(PipelineAPIMixin):
         width = self._width
         num_frames = self._num_frames
 
-        if guidance_scale > 1 and not self._cfg_enabled:
-            msg = "guidance_scale > 1 requires CFG to be enabled"
+        if height % 8 != 0 or width % 8 != 0:
+            msg = f"`height` and `width` have to be divisible by 8 but are {height} and {width}."
             raise ValueError(msg)
 
-        if height % 8 != 0 or width % 8 != 0:
-            raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
-
-        cfg_enabled = guidance_scale > 1.0
         batch_size = len(prompts)
 
         # 3. Prepare text embeddings
         on_event(SectionStart("encoder"))
         (
-            prompt_embeds,
-            prompt_attention_mask,
-            negative_prompt_embeds,
-            negative_prompt_attention_mask,
+            pos_context,
+            pos_context_mask,
+            neg_context,
+            neg_context_mask,
         ) = self._text_encoder.encode_cfg(
             prompts,
             negative_prompts,
-            cfg_enabled=cfg_enabled,
+            cfg_enabled=True,
             num_videos_per_prompt=num_videos_per_prompt,
             max_sequence_length=max_sequence_length,
             disable_attention_mask=traced,
@@ -352,27 +326,20 @@ class MochiPipeline(PipelineAPIMixin):
         )
         on_event(SectionEnd("encoder"))
 
-        print(f"prompt_embeds.shape: {prompt_embeds.shape}")
-        print(f"prompt_attention_mask.shape: {prompt_attention_mask.shape}")
-        print(f"negative_prompt_embeds.shape: {negative_prompt_embeds.shape}")
-        print(f"negative_prompt_attention_mask.shape: {negative_prompt_attention_mask.shape}")
-
         # 3b. If the transformer was destroyed, recreate it.
-        if self.transformer is None:
+        if self._transformer is None:
             logger.info("Recreating MochiTransformer3DModel")
-            self.transformer = self._checkpoint.build(
-                ccl_manager=self.ccl_manager,
+            self._transformer = self._checkpoint.build(
+                ccl_manager=self._ccl_manager,
                 parallel_config=self.parallel_config,
                 is_fsdp=True,
             )
-            self._tracer = Tracer(
-                self.transformer.forward, device=self.mesh_device, prep_run=True, clone_prep_inputs=False
-            )
+            self._tracer = Tracer(self._traced_step, device=self._device, prep_run=True, clone_prep_inputs=False)
 
             logger.info("Loading MochiTransformer3DModel state_dict")
             self._checkpoint.load(
-                self.transformer,
-                mesh_device=self.mesh_device,
+                self._transformer,
+                mesh_device=self._device,
                 parallel_config=self.parallel_config,
             )
 
@@ -386,14 +353,8 @@ class MochiPipeline(PipelineAPIMixin):
             height,
             width,
             num_frames,
-            prompt_embeds.dtype,
+            pos_context.dtype,
         )
-        print(f"preparing latents with H: {height}, W: {width}, num_frames: {num_frames}")
-        print(f"latents.shape: {latents.shape}")
-
-        if cfg_enabled:
-            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-            prompt_attention_mask = torch.cat([negative_prompt_attention_mask, prompt_attention_mask], dim=0)
 
         # 5. Prepare timestep
         # from https://github.com/genmoai/models/blob/075b6e36db58f1242921deff83a1066887b9c9e1/src/mochi_preview/infer.py#L77
@@ -401,6 +362,11 @@ class MochiPipeline(PipelineAPIMixin):
         sigmas, alphas = alphas, sigmas  # equivalent to diffuser's invert_sigmas=True
         self._solver.set_schedule(sigmas, alphas)
         timesteps = [s * 1000 for s in sigmas[:-1]]
+
+        # Upload spatial latents and pre-compute rope features once before the loop.
+        _, _, f, h, w = latents.shape
+        latents, latent_sequence_length = self._transformer.preprocess_spatial_input(latents)
+        rope_cos, rope_sin, trans_mat = self._transformer.prepare_rope_features(f, h, w)
 
         # 6. Denoising loop
         on_event(SectionStart("denoising"))
@@ -410,9 +376,14 @@ class MochiPipeline(PipelineAPIMixin):
                     step=i,
                     t=t,
                     latents=latents,
-                    prompt_embeds=prompt_embeds,
-                    prompt_attention_mask=prompt_attention_mask,
-                    cfg_enabled=cfg_enabled,
+                    neg_context=neg_context,
+                    pos_context=pos_context,
+                    neg_context_mask=neg_context_mask,
+                    pos_context_mask=pos_context_mask,
+                    rope_cos=rope_cos,
+                    rope_sin=rope_sin,
+                    trans_mat=trans_mat,
+                    latent_sequence_length=latent_sequence_length,
                     guidance_scale=guidance_scale,
                     traced=traced,
                 )
@@ -420,14 +391,13 @@ class MochiPipeline(PipelineAPIMixin):
                 progress_bar.update()
         on_event(SectionEnd("denoising"))
 
+        latents = self._transformer.postprocess_spatial_output(latents, f, h, w, latent_sequence_length)
+
         return self._decode_latents(
             latents,
             vae_traced=vae_traced,
             on_event=on_event,
         )
-
-    def synchronize_devices(self):
-        ttnn.synchronize_device(self.mesh_device)
 
     def _decode_latents(
         self,
@@ -439,93 +409,92 @@ class MochiPipeline(PipelineAPIMixin):
         # If the VAE is memory-constrained, free the transformer.
         if self.reload_dit_model:
             logger.info("Freeing MochiTransformer3DModel")
-            self.transformer = None
+            self._transformer = None
             self._tracer.release_trace()
             self._tracer = None
 
         on_event(SectionStart("vae"))
-        with reshape_device(self.mesh_device, self.vae_mesh_shape):
+        with reshape_device(self._device, self._vae_mesh_shape):
             video = self._vae.decode(latents, traced=vae_traced)
         on_event(SectionEnd("vae"))
 
         return self.video_processor.postprocess_video(video, output_type="pil")
-
-    def _traced_step(
-        self,
-        *,
-        spatial: torch.Tensor,
-        prompt: torch.Tensor,
-        timestep: torch.Tensor,
-        prompt_attention_mask: torch.Tensor,
-        traced: bool,
-    ) -> torch.Tensor:
-        assert self.transformer is not None
-        assert self._tracer is not None
-
-        B, C, T, H, W = spatial.shape
-
-        rope_cos_1HND, rope_sin_1HND, trans_mat = self.transformer.prepare_rope_features(T, H, W)
-        temb_11BD, prompt_1BLP = self.transformer.prepare_timestep_text_features(
-            timestep, prompt, prompt_attention_mask
-        )
-        spatial_1BNI, N = self.transformer.preprocess_spatial_input(spatial)
-
-        proj_out_1BNI = self._tracer(
-            temb_11BD=temb_11BD,
-            prompt_1BLP=prompt_1BLP,
-            rope_cos_1HND=rope_cos_1HND,
-            rope_sin_1HND=rope_sin_1HND,
-            spatial_1BNI=spatial_1BNI,
-            trans_mat=trans_mat,
-            N=N,
-            traced=traced,
-        )
-
-        out = self.transformer.postprocess_spatial_output(proj_out_1BNI, T, H, W, N)
-        return out.to(torch.float32)
 
     def _step(
         self,
         *,
         step: int,
         t: float,
-        latents: torch.Tensor,
-        prompt_embeds: torch.Tensor,
-        prompt_attention_mask: torch.Tensor,
-        cfg_enabled: bool,
+        latents: ttnn.Tensor,
+        context: tuple[torch.Tensor, torch.Tensor],
+        context_mask: tuple[torch.Tensor, torch.Tensor],
+        rope_cos: ttnn.Tensor,
+        rope_sin: ttnn.Tensor,
+        trans_mat: ttnn.Tensor,
+        latent_sequence_length: int,
         guidance_scale: float,
         traced: bool,
-    ) -> torch.Tensor:
-        latent_model_input = torch.cat([latents] * 2) if cfg_enabled else latents
-        # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-        timestep = torch.tensor(t).expand(latent_model_input.shape[0]).to(latents.dtype)
+    ) -> ttnn.Tensor:
+        assert self._transformer is not None
 
-        noise_pred_uncond = self._traced_step(
-            spatial=latent_model_input[:1],
-            prompt=prompt_embeds[:1],
-            timestep=timestep[:1],
-            prompt_attention_mask=prompt_attention_mask[:1],
+        timestep = torch.tensor([t], dtype=torch.float32)
+        temb_uncond, prompt_uncond = self._transformer.prepare_timestep_text_features(
+            timestep, context[0], context_mask[0]
+        )
+        temb_cond, prompt_cond = self._transformer.prepare_timestep_text_features(timestep, context[1], context_mask[1])
+
+        latents, noise_pred = self._tracer(
+            latents=latents,
+            temb_uncond=temb_uncond,
+            temb_cond=temb_cond,
+            prompt_uncond=prompt_uncond,
+            prompt_cond=prompt_cond,
+            rope_cos=rope_cos,
+            rope_sin=rope_sin,
+            trans_mat=trans_mat,
+            latent_sequence_length=latent_sequence_length,
+            guidance_scale=guidance_scale,
             traced=traced,
         )
-        noise_pred_text = self._traced_step(
-            spatial=latent_model_input[1:],
-            prompt=prompt_embeds[1:],
-            timestep=timestep[1:],
-            prompt_attention_mask=prompt_attention_mask[1:],
-            traced=traced,
+
+        return self._solver.step(step=step, latent=latents, velocity_pred=noise_pred)
+
+    def _traced_step(
+        self,
+        *,
+        latents: ttnn.Tensor,
+        temb_uncond: ttnn.Tensor,
+        temb_cond: ttnn.Tensor,
+        prompt_uncond: ttnn.Tensor,
+        prompt_cond: ttnn.Tensor,
+        rope_cos: ttnn.Tensor,
+        rope_sin: ttnn.Tensor,
+        trans_mat: ttnn.Tensor,
+        latent_sequence_length: int,
+        guidance_scale: float,
+    ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
+        assert self._transformer is not None
+
+        pred_uncond = self._transformer.forward(
+            temb_11BD=temb_uncond,
+            prompt_1BLP=prompt_uncond,
+            rope_cos_1HND=rope_cos,
+            rope_sin_1HND=rope_sin,
+            spatial_1BNI=latents,
+            trans_mat=trans_mat,
+            N=latent_sequence_length,
+        )
+        pred_cond = self._transformer.forward(
+            temb_11BD=temb_cond,
+            prompt_1BLP=prompt_cond,
+            rope_cos_1HND=rope_cos,
+            rope_sin_1HND=rope_sin,
+            spatial_1BNI=latents,
+            trans_mat=trans_mat,
+            N=latent_sequence_length,
         )
 
-        assert cfg_enabled
-        if cfg_enabled:
-            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+        pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
 
-        latents_dtype = latents.dtype
-        latents = self._solver.step(step=step, latent=latents.to(torch.float32), velocity_pred=noise_pred)
-        latents = latents.to(latents_dtype)
-
-        if latents.dtype != latents_dtype:
-            if torch.backends.mps.is_available():
-                # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
-                latents = latents.to(latents_dtype)
-
-        return latents
+        # Make latents an output, because inputs may be overwritten during trace execution.
+        return latents, pred
