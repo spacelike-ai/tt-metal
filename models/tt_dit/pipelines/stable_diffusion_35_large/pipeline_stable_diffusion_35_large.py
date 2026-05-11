@@ -185,8 +185,8 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         for submesh_device in self.submesh_devices:
             ttnn.synchronize_device(submesh_device)
 
-        self._predict_tracers = [
-            Tracer(self._predict, device=submesh, prep_run=False) for submesh in self.submesh_devices
+        self._tracers = [
+            Tracer(self._traced_step, device=submesh, prep_run=False) for submesh in self.submesh_devices
         ]
         self._solvers = [EulerSolver() for _ in self.submesh_devices]
 
@@ -336,7 +336,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
 
         return output
 
-    def _predict(
+    def _traced_step(
         self,
         *,
         cfg_enabled: bool,
@@ -391,7 +391,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
                 device=submesh_device,
             )
 
-            latent, noise_pred = self._predict_tracers[idx](
+            latent, noise_pred = self._tracers[idx](
                 cfg_enabled=do_classifier_free_guidance,
                 latent=latents[idx],
                 prompt=prompt_embeds[idx] if prompt_embeds is not None else None,

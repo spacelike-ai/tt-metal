@@ -264,7 +264,7 @@ class MochiPipeline(PipelineAPIMixin):
             parallel_config=self.parallel_config,
             is_fsdp=True,
         )
-        self._transformer_tracer = Tracer(self.transformer.forward, device=device, prep_run=False)
+        self._tracer = Tracer(self._traced_step, device=device, prep_run=False)
 
         self._checkpoint.load(
             self.transformer,
@@ -300,7 +300,6 @@ class MochiPipeline(PipelineAPIMixin):
 
         shape = (batch_size, num_channels_latents, num_frames, height, width)
         return torch.randn(shape, dtype=torch.float32).to(dtype)
-
 
     @torch.no_grad()
     def __call__(
@@ -366,7 +365,7 @@ class MochiPipeline(PipelineAPIMixin):
                 parallel_config=self.parallel_config,
                 is_fsdp=True,
             )
-            self._transformer_tracer = Tracer(
+            self._tracer = Tracer(
                 self.transformer.forward, device=self.mesh_device, prep_run=True, clone_prep_inputs=False
             )
 
@@ -441,8 +440,8 @@ class MochiPipeline(PipelineAPIMixin):
         if self.reload_dit_model:
             logger.info("Freeing MochiTransformer3DModel")
             self.transformer = None
-            self._transformer_tracer.release_trace()
-            self._transformer_tracer = None
+            self._tracer.release_trace()
+            self._tracer = None
 
         on_event(SectionStart("vae"))
         with reshape_device(self.mesh_device, self.vae_mesh_shape):
@@ -451,7 +450,7 @@ class MochiPipeline(PipelineAPIMixin):
 
         return self.video_processor.postprocess_video(video, output_type="pil")
 
-    def _predict(
+    def _traced_step(
         self,
         *,
         spatial: torch.Tensor,
@@ -461,7 +460,7 @@ class MochiPipeline(PipelineAPIMixin):
         traced: bool,
     ) -> torch.Tensor:
         assert self.transformer is not None
-        assert self._transformer_tracer is not None
+        assert self._tracer is not None
 
         B, C, T, H, W = spatial.shape
 
@@ -471,9 +470,7 @@ class MochiPipeline(PipelineAPIMixin):
         )
         spatial_1BNI, N = self.transformer.preprocess_spatial_input(spatial)
 
-        forward = self._transformer_tracer if traced else self.transformer.forward
-
-        proj_out_1BNI = forward(
+        proj_out_1BNI = self._tracer(
             temb_11BD=temb_11BD,
             prompt_1BLP=prompt_1BLP,
             rope_cos_1HND=rope_cos_1HND,
@@ -481,6 +478,7 @@ class MochiPipeline(PipelineAPIMixin):
             spatial_1BNI=spatial_1BNI,
             trans_mat=trans_mat,
             N=N,
+            traced=traced,
         )
 
         out = self.transformer.postprocess_spatial_output(proj_out_1BNI, T, H, W, N)
@@ -502,14 +500,14 @@ class MochiPipeline(PipelineAPIMixin):
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         timestep = torch.tensor(t).expand(latent_model_input.shape[0]).to(latents.dtype)
 
-        noise_pred_uncond = self._predict(
+        noise_pred_uncond = self._traced_step(
             spatial=latent_model_input[:1],
             prompt=prompt_embeds[:1],
             timestep=timestep[:1],
             prompt_attention_mask=prompt_attention_mask[:1],
             traced=traced,
         )
-        noise_pred_text = self._predict(
+        noise_pred_text = self._traced_step(
             spatial=latent_model_input[1:],
             prompt=prompt_embeds[1:],
             timestep=timestep[1:],

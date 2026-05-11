@@ -259,8 +259,8 @@ class QwenImagePipeline(PipelineAPIMixin):
             )
             for mgr in self._ccl_managers
         ]
-        self._predict_tracers = [
-            Tracer(self._predict, device=device, prep_run=False) for device in self._submesh_devices
+        self._tracers = [
+            Tracer(self._traced_step, device=device, prep_run=False) for device in self._submesh_devices
         ]
         self._solvers = [EulerSolver() for _ in self._submesh_devices]
         self._transformers_loaded = False
@@ -510,7 +510,7 @@ class QwenImagePipeline(PipelineAPIMixin):
 
         return output
 
-    def _predict(
+    def _traced_step(
         self,
         *,
         cfg_enabled: bool,
@@ -569,7 +569,7 @@ class QwenImagePipeline(PipelineAPIMixin):
                 dtype=ttnn.float32,
                 device=submesh_device,
             )
-            latent, noise_pred = self._predict_tracers[idx](
+            latent, noise_pred = self._tracers[idx](
                 cfg_enabled=cfg_enabled,
                 timestep=timestep,
                 latent=latents[idx],

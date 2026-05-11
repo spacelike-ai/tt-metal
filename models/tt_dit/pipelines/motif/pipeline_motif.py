@@ -150,7 +150,7 @@ class MotifPipeline(PipelineAPIMixin):
         self._devices = create_submeshes(device, config.dit_parallel_config)
         logger.info(f"Created submeshes with shape {self._devices[0].shape}")
 
-        self._predict_tracers = [Tracer(self._predict, device=d, prep_run=False) for d in self._devices]
+        self._tracers = [Tracer(self._traced_step, device=d, prep_run=False) for d in self._devices]
 
         self._ccl_managers = [
             CCLManager(d, num_links=config.num_links, topology=config.topology) for d in self._devices
@@ -332,7 +332,7 @@ class MotifPipeline(PipelineAPIMixin):
                 device=device,
             )
 
-            x, v = self._predict_tracers[idx](
+            x, v = self._tracers[idx](
                 latents=latents[idx],
                 context=context[idx],
                 pooled=pooled[idx],
@@ -348,7 +348,7 @@ class MotifPipeline(PipelineAPIMixin):
 
         return latents
 
-    def _predict(
+    def _traced_step(
         self,
         *,
         latents: ttnn.Tensor,
