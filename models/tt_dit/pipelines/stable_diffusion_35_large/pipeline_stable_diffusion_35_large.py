@@ -266,7 +266,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
             assert width % (_VAE_SCALE_FACTOR * self.patch_size) == 0
             assert max_t5_sequence_length <= 512  # noqa: PLR2004
 
-            do_classifier_free_guidance = guidance_scale > 1
+            cfg_enabled = guidance_scale > 1
             # TODO: pass the patch_size value
             patch_size = 2
 
@@ -274,12 +274,12 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
 
             on_event(SectionStart("encoder"))
             with self._reshape_encoder():
-                prompt_embeds, pooled_prompt_embeds = self._text_encoder.encode_cfg(
+                context, pooled = self._text_encoder.encode_cfg(
                     (prompts, prompts_2, prompts_3),
                     (negative_prompts, negative_prompts_2, negative_prompts_3),
                     num_images_per_prompt=num_images_per_prompt,
                     max_t5_sequence_length=max_t5_sequence_length,
-                    cfg_enabled=do_classifier_free_guidance,
+                    cfg_enabled=cfg_enabled,
                     clip_skip=clip_skip,
                     traced=encoder_traced,
                     on_event=on_event,
@@ -297,14 +297,14 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
 
             logger.info("preparing latents...")
 
-            tt_prompt_embeds_list = distribute_cfg(
-                prompt_embeds.unsqueeze(1), devices=self.submesh_devices, on_host=False
+            tt_context_list = distribute_cfg(
+                context.unsqueeze(1), devices=self.submesh_devices, on_host=False
             )
-            tt_pooled_prompt_embeds_list = distribute_cfg(
-                pooled_prompt_embeds.unsqueeze(1).unsqueeze(1), devices=self.submesh_devices, on_host=False
+            tt_pooled_list = distribute_cfg(
+                pooled.unsqueeze(1).unsqueeze(1), devices=self.submesh_devices, on_host=False
             )
             tt_latents_step_list = self._random_latents(
-                batch_size=batch_size * num_images_per_prompt, dtype=prompt_embeds.dtype, seed=seed
+                batch_size=batch_size * num_images_per_prompt, dtype=context.dtype, seed=seed
             )
 
             logger.info("denoising...")
@@ -319,13 +319,13 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
                         tt_latents_step_list = self._step(
                             t=t,
                             latents=tt_latents_step_list,
-                            do_classifier_free_guidance=do_classifier_free_guidance,
-                            prompt_embeds=None if reuse_tensors else tt_prompt_embeds_list,
-                            pooled_prompt_embeds=None if reuse_tensors else tt_pooled_prompt_embeds_list,
-                            guidance_scale=guidance_scale,
-                            step_index=i,
+                            cfg_enabled=cfg_enabled,
+                            context=None if reuse_tensors else tt_context_list,
+                            pooled=None if reuse_tensors else tt_pooled_list,
+                            cfg_scale=guidance_scale,
+                            step=i,
                             prompt_sequence_length=333,
-                            spatial_sequence_length=4096,
+                            latents_sequence_length=4096,
                             traced=traced,
                         )
                     on_event(SectionEnd(f"denoising_step_{i}"))
@@ -344,45 +344,45 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         self,
         *,
         cfg_enabled: bool,
-        latent: ttnn.Tensor,
-        prompt: ttnn.Tensor,
+        latents: ttnn.Tensor,
+        context: ttnn.Tensor,
         pooled: ttnn.Tensor,
         timestep: ttnn.Tensor,
-        spatial_sequence_length: int,
+        latents_sequence_length: int,
         prompt_sequence_length: int,
         submesh_id: int,
     ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
         latent_model_input = (
-            ttnn.concat([latent, latent])
+            ttnn.concat([latents, latents])
             if cfg_enabled and not self.dit_parallel_config.cfg_parallel.factor > 1
-            else latent
+            else latents
         )
 
-        noise_pred = self.transformers[submesh_id](
+        velocity_pred = self.transformers[submesh_id](
             spatial=latent_model_input,
-            prompt_embed=prompt,
+            prompt_embed=context,
             pooled_projections=pooled,
             timestep=timestep,
-            N=spatial_sequence_length,
+            N=latents_sequence_length,
             L=prompt_sequence_length,
         )
 
         # Make latents an output, because inputs are copied to the trace region before executing a
         # trace and might be overwritten during execution.
-        return latent, noise_pred
+        return latents, velocity_pred
 
     def _step(
         self,
         *,
-        do_classifier_free_guidance: bool,
-        guidance_scale: float,
+        cfg_enabled: bool,
+        cfg_scale: float,
         latents: list[ttnn.Tensor],
         t: float,
-        pooled_prompt_embeds: list[ttnn.Tensor] | None,
-        prompt_embeds: list[ttnn.Tensor] | None,
-        step_index: int,
+        pooled: list[ttnn.Tensor] | None,
+        context: list[ttnn.Tensor] | None,
+        step: int,
         prompt_sequence_length: int,
-        spatial_sequence_length: int,
+        latents_sequence_length: int,
         traced: bool,
     ) -> list[ttnn.Tensor]:
         latents = list(latents)
@@ -395,20 +395,20 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
                 device=submesh_device,
             )
 
-            latent, noise_pred = self._tracers[idx](
-                cfg_enabled=do_classifier_free_guidance,
-                latent=latents[idx],
-                prompt=prompt_embeds[idx] if prompt_embeds is not None else None,
-                pooled=pooled_prompt_embeds[idx] if pooled_prompt_embeds is not None else None,
+            latents[idx], velocity_pred = self._tracers[idx](
+                cfg_enabled=cfg_enabled,
+                latents=latents[idx],
+                context=context[idx] if context is not None else None,
+                pooled=pooled[idx] if pooled is not None else None,
                 timestep=timestep,
                 submesh_id=idx,
-                spatial_sequence_length=spatial_sequence_length,
+                latents_sequence_length=latents_sequence_length,
                 prompt_sequence_length=prompt_sequence_length,
                 traced=traced,
             )
-            if do_classifier_free_guidance:
-                noise_pred = self._cfg_combiner.combine(noise_pred, guidance_scale)
-            latents[idx] = self._solvers[idx].step(step=step_index, latent=latent, velocity_pred=noise_pred)
+            if cfg_enabled:
+                velocity_pred = self._cfg_combiner.combine(velocity_pred, cfg_scale)
+            latents[idx] = self._solvers[idx].step(step=step, latent=latents[idx], velocity_pred=velocity_pred)
 
         return latents
 

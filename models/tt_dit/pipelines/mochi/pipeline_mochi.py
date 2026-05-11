@@ -314,15 +314,9 @@ class MochiPipeline(PipelineAPIMixin):
 
         # 3. Prepare text embeddings
         on_event(SectionStart("encoder"))
-        (
-            pos_context,
-            pos_context_mask,
-            neg_context,
-            neg_context_mask,
-        ) = self._text_encoder.encode_cfg(
+        context, context_masks = self._text_encoder.encode_cfg(
             prompts,
             negative_prompts,
-            cfg_enabled=True,
             num_videos_per_prompt=num_videos_per_prompt,
             max_sequence_length=max_sequence_length,
             disable_attention_mask=traced,
@@ -357,7 +351,7 @@ class MochiPipeline(PipelineAPIMixin):
             height,
             width,
             num_frames,
-            pos_context.dtype,
+            context[1].dtype,
         )
 
         # 5. Prepare timestep
@@ -369,7 +363,7 @@ class MochiPipeline(PipelineAPIMixin):
 
         # Upload spatial latents and pre-compute rope features once before the loop.
         _, _, f, h, w = latents.shape
-        latents, latent_sequence_length = self._transformer.preprocess_spatial_input(latents)
+        latents, latents_sequence_length = self._transformer.preprocess_spatial_input(latents)
         rope_cos, rope_sin, trans_mat = self._transformer.prepare_rope_features(f, h, w)
 
         # 6. Denoising loop
@@ -380,22 +374,20 @@ class MochiPipeline(PipelineAPIMixin):
                     step=i,
                     t=t,
                     latents=latents,
-                    neg_context=neg_context,
-                    pos_context=pos_context,
-                    neg_context_mask=neg_context_mask,
-                    pos_context_mask=pos_context_mask,
+                    context=context,
+                    context_masks=context_masks,
                     rope_cos=rope_cos,
                     rope_sin=rope_sin,
                     trans_mat=trans_mat,
-                    latent_sequence_length=latent_sequence_length,
-                    guidance_scale=guidance_scale,
+                    latents_sequence_length=latents_sequence_length,
+                    cfg_scale=guidance_scale,
                     traced=traced,
                 )
 
                 progress_bar.update()
         on_event(SectionEnd("denoising"))
 
-        latents = self._transformer.postprocess_spatial_output(latents, f, h, w, latent_sequence_length)
+        latents = self._transformer.postprocess_spatial_output(latents, f, h, w, latents_sequence_length)
 
         return self._decode_latents(
             latents,
@@ -431,37 +423,39 @@ class MochiPipeline(PipelineAPIMixin):
         t: float,
         latents: ttnn.Tensor,
         context: tuple[torch.Tensor, torch.Tensor],
-        context_mask: tuple[torch.Tensor, torch.Tensor],
+        context_masks: tuple[torch.Tensor, torch.Tensor],
         rope_cos: ttnn.Tensor,
         rope_sin: ttnn.Tensor,
         trans_mat: ttnn.Tensor,
-        latent_sequence_length: int,
-        guidance_scale: float,
+        latents_sequence_length: int,
+        cfg_scale: float,
         traced: bool,
     ) -> ttnn.Tensor:
         assert self._transformer is not None
 
         timestep = torch.tensor([t], dtype=torch.float32)
-        temb_uncond, prompt_uncond = self._transformer.prepare_timestep_text_features(
-            timestep, context[0], context_mask[0]
+        temb_uncond, context_uncond = self._transformer.prepare_timestep_text_features(
+            timestep, context[0], context_masks[0]
         )
-        temb_cond, prompt_cond = self._transformer.prepare_timestep_text_features(timestep, context[1], context_mask[1])
+        temb_cond, context_cond = self._transformer.prepare_timestep_text_features(
+            timestep, context[1], context_masks[1]
+        )
 
-        latents, noise_pred = self._tracer(
+        latents, velocity_pred = self._tracer(
             latents=latents,
             temb_uncond=temb_uncond,
             temb_cond=temb_cond,
-            prompt_uncond=prompt_uncond,
-            prompt_cond=prompt_cond,
+            context_uncond=context_uncond,
+            context_cond=context_cond,
             rope_cos=rope_cos,
             rope_sin=rope_sin,
             trans_mat=trans_mat,
-            latent_sequence_length=latent_sequence_length,
-            guidance_scale=guidance_scale,
+            latents_sequence_length=latents_sequence_length,
+            cfg_scale=cfg_scale,
             traced=traced,
         )
 
-        return self._solver.step(step=step, latent=latents, velocity_pred=noise_pred)
+        return self._solver.step(step=step, latent=latents, velocity_pred=velocity_pred)
 
     def _traced_step(
         self,
@@ -469,36 +463,36 @@ class MochiPipeline(PipelineAPIMixin):
         latents: ttnn.Tensor,
         temb_uncond: ttnn.Tensor,
         temb_cond: ttnn.Tensor,
-        prompt_uncond: ttnn.Tensor,
-        prompt_cond: ttnn.Tensor,
+        context_uncond: ttnn.Tensor,
+        context_cond: ttnn.Tensor,
         rope_cos: ttnn.Tensor,
         rope_sin: ttnn.Tensor,
         trans_mat: ttnn.Tensor,
-        latent_sequence_length: int,
-        guidance_scale: float,
+        latents_sequence_length: int,
+        cfg_scale: float,
     ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
         assert self._transformer is not None
 
-        pred_uncond = self._transformer.forward(
+        velocity_pred_uncond = self._transformer.forward(
             temb_11BD=temb_uncond,
-            prompt_1BLP=prompt_uncond,
+            prompt_1BLP=context_uncond,
             rope_cos_1HND=rope_cos,
             rope_sin_1HND=rope_sin,
             spatial_1BNI=latents,
             trans_mat=trans_mat,
-            N=latent_sequence_length,
+            N=latents_sequence_length,
         )
-        pred_cond = self._transformer.forward(
+        velocity_pred_cond = self._transformer.forward(
             temb_11BD=temb_cond,
-            prompt_1BLP=prompt_cond,
+            prompt_1BLP=context_cond,
             rope_cos_1HND=rope_cos,
             rope_sin_1HND=rope_sin,
             spatial_1BNI=latents,
             trans_mat=trans_mat,
-            N=latent_sequence_length,
+            N=latents_sequence_length,
         )
 
-        pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+        velocity_pred = velocity_pred_uncond + cfg_scale * (velocity_pred_cond - velocity_pred_uncond)
 
         # Make latents an output, because inputs may be overwritten during trace execution.
-        return latents, pred
+        return latents, velocity_pred

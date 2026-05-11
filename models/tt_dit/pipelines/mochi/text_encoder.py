@@ -35,31 +35,28 @@ class TextEncoder:
         prompts: Sequence[str],
         negative_prompts: Sequence[str],
         *,
-        cfg_enabled: bool,
         num_videos_per_prompt: int = 1,
         max_sequence_length: int = 256,
         disable_attention_mask: bool = False,
         on_event: PipelineEventCallback = null_callback,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
+        """Encode both cfg branches and return them in (uncond, cond) order."""
         on_event(SectionStart("t5_encoding"))
-        prompt_embeds, prompt_attention_mask = self._get_t5_prompt_embeds(
+        cond_embeds, cond_mask = self._get_t5_prompt_embeds(
             prompt=list(prompts),
             num_videos_per_prompt=num_videos_per_prompt,
             max_sequence_length=max_sequence_length,
             disable_attention_mask=disable_attention_mask,
         )
-
-        negative_prompt_embeds, negative_prompt_attention_mask = None, None
-        if cfg_enabled:
-            negative_prompt_embeds, negative_prompt_attention_mask = self._get_t5_prompt_embeds(
-                prompt=list(negative_prompts),
-                num_videos_per_prompt=num_videos_per_prompt,
-                max_sequence_length=max_sequence_length,
-                disable_attention_mask=disable_attention_mask,
-            )
+        uncond_embeds, uncond_mask = self._get_t5_prompt_embeds(
+            prompt=list(negative_prompts),
+            num_videos_per_prompt=num_videos_per_prompt,
+            max_sequence_length=max_sequence_length,
+            disable_attention_mask=disable_attention_mask,
+        )
         on_event(SectionEnd("t5_encoding"))
 
-        return prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask
+        return (uncond_embeds, cond_embeds), (uncond_mask, cond_mask)
 
     def _get_t5_prompt_embeds(
         self,

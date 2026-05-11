@@ -261,12 +261,12 @@ class Flux1Pipeline(PipelineAPIMixin):
 
             latents_height = height // _VAE_SCALE_FACTOR
             latents_width = width // _VAE_SCALE_FACTOR
-            spatial_sequence_length = latents_height * latents_width
+            latents_sequence_length = latents_height * latents_width
 
             logger.info("encoding prompts...")
 
             on_event(SectionStart("encoder"))
-            prompt_embeds, pooled_prompt_embeds = self._text_encoder.encode_cfg(
+            context, pooled = self._text_encoder.encode_cfg(
                 (prompts, prompts_2),
                 (negative_prompts, negative_prompts_2),
                 num_images_per_prompt=num_images_per_prompt,
@@ -275,13 +275,13 @@ class Flux1Pipeline(PipelineAPIMixin):
                 traced=encoder_traced,
                 on_event=on_event,
             )
-            _, prompt_sequence_length, _ = prompt_embeds.shape
+            _, prompt_sequence_length, _ = context.shape
             on_event(SectionEnd("encoder"))
 
             logger.info("preparing timesteps...")
 
             if self._with_guidance_embeds:  # FLUX.1 [dev]
-                mu = _calculate_shift(spatial_sequence_length, 256, 4096, 0.5, 1.15)
+                mu = _calculate_shift(latents_sequence_length, 256, 4096, 0.5, 1.15)
                 sigmas, alphas = schedules.shifted_linear(
                     num_inference_steps, shift=math.exp(mu), sigma_small=1 / num_inference_steps
                 )
@@ -304,9 +304,9 @@ class Flux1Pipeline(PipelineAPIMixin):
             ids = torch.cat((text_ids, image_ids), dim=0)
             rope_cos, rope_sin = self._pos_embed.forward(ids)
 
-            tt_prompt_embeds_list = distribute_cfg(prompt_embeds, devices=self._submesh_devices, on_host=False)
-            tt_pooled_prompt_embeds_list = distribute_cfg(
-                pooled_prompt_embeds, devices=self._submesh_devices, on_host=False
+            tt_context_list = distribute_cfg(context, devices=self._submesh_devices, on_host=False)
+            tt_pooled_list = distribute_cfg(
+                pooled, devices=self._submesh_devices, on_host=False
             )
             tt_latents_step_list = self._random_latents(batch_size=prompt_count * num_images_per_prompt, seed=seed)
             tt_guidance_list = (
@@ -314,10 +314,10 @@ class Flux1Pipeline(PipelineAPIMixin):
                 if guidance is not None
                 else None
             )
-            tt_spatial_rope_cos_list = from_torch_to_devices(
+            tt_latents_rope_cos_list = from_torch_to_devices(
                 rope_cos[prompt_sequence_length:], devices=self._submesh_devices, mesh_axes=[sp_axis, None]
             )
-            tt_spatial_rope_sin_list = from_torch_to_devices(
+            tt_latents_rope_sin_list = from_torch_to_devices(
                 rope_sin[prompt_sequence_length:], devices=self._submesh_devices, mesh_axes=[sp_axis, None]
             )
             tt_prompt_rope_cos_list = from_torch_to_devices(
@@ -337,19 +337,19 @@ class Flux1Pipeline(PipelineAPIMixin):
                         reuse_tensors = i > 0 and traced
 
                         tt_latents_step_list = self._step(
-                            step_index=i,
+                            step=i,
                             t=t,
                             latents=tt_latents_step_list,
                             cfg_enabled=cfg_enabled,
-                            prompt_embeds=None if reuse_tensors else tt_prompt_embeds_list,
-                            pooled_prompt_embeds=None if reuse_tensors else tt_pooled_prompt_embeds_list,
+                            context=None if reuse_tensors else tt_context_list,
+                            pooled=None if reuse_tensors else tt_pooled_list,
                             cfg_scale=cfg_scale,
                             guidance=None if reuse_tensors else tt_guidance_list,
-                            spatial_rope_cos=None if reuse_tensors else tt_spatial_rope_cos_list,
-                            spatial_rope_sin=None if reuse_tensors else tt_spatial_rope_sin_list,
+                            latents_rope_cos=None if reuse_tensors else tt_latents_rope_cos_list,
+                            latents_rope_sin=None if reuse_tensors else tt_latents_rope_sin_list,
                             prompt_rope_cos=None if reuse_tensors else tt_prompt_rope_cos_list,
                             prompt_rope_sin=None if reuse_tensors else tt_prompt_rope_sin_list,
-                            spatial_sequence_length=spatial_sequence_length,
+                            latents_sequence_length=latents_sequence_length,
                             prompt_sequence_length=prompt_sequence_length,
                             traced=traced,
                         )
@@ -414,57 +414,57 @@ class Flux1Pipeline(PipelineAPIMixin):
         self,
         *,
         cfg_enabled: bool,
-        latent: ttnn.Tensor,
-        prompt: ttnn.Tensor,
+        latents: ttnn.Tensor,
+        context: ttnn.Tensor,
         pooled: ttnn.Tensor,
         timestep: ttnn.Tensor,
         guidance: ttnn.Tensor | None,
-        spatial_rope_cos: ttnn.Tensor,
-        spatial_rope_sin: ttnn.Tensor,
+        latents_rope_cos: ttnn.Tensor,
+        latents_rope_sin: ttnn.Tensor,
         prompt_rope_cos: ttnn.Tensor,
         prompt_rope_sin: ttnn.Tensor,
-        spatial_sequence_length: int,
+        latents_sequence_length: int,
         prompt_sequence_length: int,
         submesh_id: int,
     ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
         latent_input = (
-            ttnn.concat([latent, latent])
+            ttnn.concat([latents, latents])
             if cfg_enabled and not self._parallel_config.cfg_parallel.factor > 1
-            else latent
+            else latents
         )
 
-        noise_pred = self.transformers[submesh_id].forward(
+        velocity_pred = self.transformers[submesh_id].forward(
             spatial=latent_input,
-            prompt=prompt,
+            prompt=context,
             pooled=pooled,
             timestep=timestep,
             guidance=guidance,
-            spatial_rope=(spatial_rope_cos, spatial_rope_sin),
+            spatial_rope=(latents_rope_cos, latents_rope_sin),
             prompt_rope=(prompt_rope_cos, prompt_rope_sin),
-            spatial_sequence_length=spatial_sequence_length,
+            latents_sequence_length=latents_sequence_length,
             prompt_sequence_length=prompt_sequence_length,
         )
 
         # Make latents an output, because inputs are copied to the trace region before executing a
         # trace and might be overwritten during execution.
-        return latent, noise_pred
+        return latents, velocity_pred
 
     def _step(
         self,
         *,
         cfg_enabled: bool,
         cfg_scale: float,
-        step_index: int,
+        step: int,
         latents: list[ttnn.Tensor],
         t: float,
-        pooled_prompt_embeds: list[ttnn.Tensor] | None,
-        prompt_embeds: list[ttnn.Tensor] | None,
+        pooled: list[ttnn.Tensor] | None,
+        context: list[ttnn.Tensor] | None,
         guidance: list[ttnn.Tensor | None] | None,
-        spatial_rope_cos: list[ttnn.Tensor] | None,
-        spatial_rope_sin: list[ttnn.Tensor] | None,
+        latents_rope_cos: list[ttnn.Tensor] | None,
+        latents_rope_sin: list[ttnn.Tensor] | None,
         prompt_rope_cos: list[ttnn.Tensor] | None,
         prompt_rope_sin: list[ttnn.Tensor] | None,
-        spatial_sequence_length: int,
+        latents_sequence_length: int,
         prompt_sequence_length: int,
         traced: bool,
     ) -> list[ttnn.Tensor]:
@@ -478,27 +478,27 @@ class Flux1Pipeline(PipelineAPIMixin):
                 device=submesh_device,
             )
 
-            latent, noise_pred = self._tracers[idx](
+            latents[idx], velocity_pred = self._tracers[idx](
                 cfg_enabled=cfg_enabled,
-                latent=latents[idx],
-                prompt=prompt_embeds[idx] if prompt_embeds is not None else None,
-                pooled=pooled_prompt_embeds[idx] if pooled_prompt_embeds is not None else None,
+                latents=latents[idx],
+                context=context[idx] if context is not None else None,
+                pooled=pooled[idx] if pooled is not None else None,
                 timestep=timestep,
                 guidance=guidance[idx] if guidance is not None else None,
-                spatial_rope_cos=spatial_rope_cos[idx] if spatial_rope_cos is not None else None,
-                spatial_rope_sin=spatial_rope_sin[idx] if spatial_rope_sin is not None else None,
+                latents_rope_cos=latents_rope_cos[idx] if latents_rope_cos is not None else None,
+                latents_rope_sin=latents_rope_sin[idx] if latents_rope_sin is not None else None,
                 prompt_rope_cos=prompt_rope_cos[idx] if prompt_rope_cos is not None else None,
                 prompt_rope_sin=prompt_rope_sin[idx] if prompt_rope_sin is not None else None,
-                spatial_sequence_length=spatial_sequence_length,
+                latents_sequence_length=latents_sequence_length,
                 prompt_sequence_length=prompt_sequence_length,
                 submesh_id=idx,
                 traced=traced,
             )
 
             if cfg_enabled:
-                noise_pred = self._cfg_combiner.combine(noise_pred, cfg_scale)
+                velocity_pred = self._cfg_combiner.combine(velocity_pred, cfg_scale)
 
-            latents[idx] = self._solvers[idx].step(step=step_index, latent=latent, velocity_pred=noise_pred)
+            latents[idx] = self._solvers[idx].step(step=step, latent=latents[idx], velocity_pred=velocity_pred)
 
         for submesh_device in self._submesh_devices:
             ttnn.synchronize_device(submesh_device)  # Helps with accurate time profiling.

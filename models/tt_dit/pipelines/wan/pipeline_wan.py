@@ -449,7 +449,7 @@ class WanPipeline(PipelineAPIMixin):
         mask: torch.Tensor,
         cond_latents,
         rope_args: dict,
-        patchified_seqlen: int,
+        latents_sequence_length: int,
         latents_batch_size: int,
         cfg_enabled: bool,
         traced: bool,
@@ -470,12 +470,12 @@ class WanPipeline(PipelineAPIMixin):
             timestep.unsqueeze(1).unsqueeze(1).unsqueeze(1), device=(None if traced else self.mesh_device)
         )
 
-        permuted_noise_pred_tt = ts.model.combined_step(
+        permuted_velocity_pred_tt = ts.model.combined_step(
             do_classifier_free_guidance=cfg_enabled,
             spatial_1BNI=permuted_model_input,
             prompt_1BLP=ts.prompt_buffer,
             negative_prompt_1BLP=ts.negative_prompt_buffer,
-            N=patchified_seqlen,
+            N=latents_sequence_length,
             timestep=timestep,
             **rope_args,
             guidance_scale=ts.guidance_scale,
@@ -486,7 +486,7 @@ class WanPipeline(PipelineAPIMixin):
         return self._solver.step(
             step=step,
             latent=permuted_latent_tt,
-            velocity_pred=permuted_noise_pred_tt,
+            velocity_pred=permuted_velocity_pred_tt,
         )
 
     def get_model_input(self, latents, cond_latents):
@@ -654,7 +654,7 @@ class WanPipeline(PipelineAPIMixin):
 
                 if permuted_latent_tt is None:
                     # First iteration, preprocess spatial input and prepare rope features
-                    permuted_latent, patchified_seqlen = ts.model.preprocess_spatial_input_host(latents)
+                    permuted_latent, latents_sequence_length = ts.model.preprocess_spatial_input_host(latents)
 
                     if cond_latents is not None:
                         cond_latents, _ = ts.model.preprocess_spatial_input_host(cond_latents)
@@ -682,7 +682,7 @@ class WanPipeline(PipelineAPIMixin):
                     mask=mask,
                     cond_latents=cond_latents,
                     rope_args=rope_args,
-                    patchified_seqlen=patchified_seqlen,
+                    latents_sequence_length=latents_sequence_length,
                     latents_batch_size=latents.shape[0],
                     cfg_enabled=cfg_enabled,
                     traced=traced,
@@ -700,7 +700,7 @@ class WanPipeline(PipelineAPIMixin):
 
         # Postprocess spatial output
         latents = ts.model.postprocess_spatial_output_host(
-            permuted_latent, F=latent_frames, H=latent_height, W=latent_width, N=patchified_seqlen
+            permuted_latent, F=latent_frames, H=latent_height, W=latent_width, N=latents_sequence_length
         )
 
         on_event(SectionEnd("denoising"))

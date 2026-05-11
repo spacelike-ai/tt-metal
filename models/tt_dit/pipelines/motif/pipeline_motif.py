@@ -332,7 +332,7 @@ class MotifPipeline(PipelineAPIMixin):
                 device=device,
             )
 
-            x, v = self._tracers[idx](
+            latents[idx], velocity_pred = self._tracers[idx](
                 latents=latents[idx],
                 context=context[idx],
                 pooled=pooled[idx],
@@ -342,9 +342,9 @@ class MotifPipeline(PipelineAPIMixin):
             )
 
             if self._cfg_enabled:
-                v = self._combiner.combine(v, cfg_scale)
+                velocity_pred = self._combiner.combine(velocity_pred, cfg_scale)
 
-            latents[idx] = self._solvers[idx].step(step=step, latent=x, velocity_pred=v)
+            latents[idx] = self._solvers[idx].step(step=step, latent=latents[idx], velocity_pred=velocity_pred)
 
         return latents
 
@@ -359,7 +359,7 @@ class MotifPipeline(PipelineAPIMixin):
     ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
         duplicate_latents = self._cfg_enabled and not self._cfg_parallel
 
-        pred = self._transformers[submesh_idx].forward(
+        velocity_pred = self._transformers[submesh_idx].forward(
             spatial=ttnn.concat([latents, latents]) if duplicate_latents else latents,
             prompt=context,
             pooled=pooled,
@@ -367,7 +367,7 @@ class MotifPipeline(PipelineAPIMixin):
         )
 
         # Make latents an output, because inputs may be overwritten during trace execution.
-        return latents, pred
+        return latents, velocity_pred
 
     def _random_latents(self, batch_size: int, seed: int) -> list[ttnn.Tensor]:
         torch.manual_seed(seed)
