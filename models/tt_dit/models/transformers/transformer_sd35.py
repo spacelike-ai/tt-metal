@@ -170,7 +170,7 @@ class SD35TransformerBlock(Module):
             chunks=2 if self.context_pre_only else 6,
         )
 
-    def forward(self, spatial_1BND, prompt_1BLD, time_embed_11BE, N, L):
+    def forward(self, spatial_1BND, prompt_1BLD, time_embed_11BE, N):
         """
         spatial_1BND: fractured N on SP, fractured D on TP
         prompt_1BLD: replicated on SP, fractured D on TP
@@ -420,7 +420,7 @@ class SD35Transformer2DModel(Module):
     def _prepare_torch_state(self, state: dict[str, torch.Tensor]) -> None:
         rename_substate(state, "norm_out.linear", "norm_out_linear")
 
-    def forward(self, spatial, prompt_embed, pooled_projections, timestep, N, L):
+    def forward(self, spatial, prompt_embed, pooled_projections, timestep, N):
         """
         Args:
             spatial: Input spatial tensor (latents) - fractured dim 2 along sp_axis
@@ -435,7 +435,7 @@ class SD35Transformer2DModel(Module):
 
         # Pass through transformer blocks
         for block in self.transformer_blocks:
-            spatial, prompt_embed = block(spatial, prompt_embed, time_embed, N, L)
+            spatial, prompt_embed = block(spatial, prompt_embed, time_embed, N)
         # Final normalization and projection
         spatial_time = self.norm_out_linear(ttnn.silu(time_embed, memory_config=ttnn.DRAM_MEMORY_CONFIG))
         scale, shift = chunk_time(spatial_time, 2)

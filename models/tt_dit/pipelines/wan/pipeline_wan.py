@@ -124,6 +124,7 @@ class WanPipelineConfig:
     width: int
     num_frames: int
     cfg_enabled: bool
+    max_sequence_length: int
 
     checkpoint_name: str
 
@@ -150,6 +151,7 @@ class WanPipelineConfig:
         width: int = 832,
         num_frames: int = 81,
         cfg_enabled: bool = True,
+        max_sequence_length: int = 512,
         checkpoint_name: str = _DEFAULT_CHECKPOINT,
     ) -> WanPipelineConfig:
         preset_dict = _PRESETS_BH if ttnn.device.is_blackhole() else _PRESETS_WH
@@ -197,6 +199,7 @@ class WanPipelineConfig:
             width=width,
             num_frames=num_frames,
             cfg_enabled=cfg_enabled,
+            max_sequence_length=max_sequence_length,
             checkpoint_name=checkpoint_name,
         )
 
@@ -293,6 +296,7 @@ class WanPipeline(PipelineAPIMixin):
         width: int = 832,
         num_frames: int = 81,
         cfg_enabled: bool = True,
+        max_sequence_length: int = 512,
         pipeline_class: type[WanPipeline] | None = None,
     ) -> WanPipeline:
         config = WanPipelineConfig.default(
@@ -302,6 +306,7 @@ class WanPipeline(PipelineAPIMixin):
             width=width,
             num_frames=num_frames,
             cfg_enabled=cfg_enabled,
+            max_sequence_length=max_sequence_length,
         )
         pipeline_class_ = pipeline_class or cls
         return pipeline_class_(device=mesh_device, config=config)
@@ -350,6 +355,7 @@ class WanPipeline(PipelineAPIMixin):
             ccl_manager=self.encoder_ccl_manager,
             encoder_parallel_config=self.encoder_parallel_config,
             dit_parallel_config=self.parallel_config,
+            max_sequence_length=config.max_sequence_length,
         )
 
         self.transformer = self._checkpoint.build(
@@ -533,7 +539,6 @@ class WanPipeline(PipelineAPIMixin):
         num_videos_per_prompt: Optional[int] = 1,
         seed: int = 0,
         output_type: Optional[str] = "np",
-        max_sequence_length: int = 512,
         traced: bool = False,
         on_event: PipelineEventCallback | None = None,
     ):
@@ -571,7 +576,6 @@ class WanPipeline(PipelineAPIMixin):
 
         self.transformer_states[0].guidance_scale = guidance_scale
         self.transformer_states[1].guidance_scale = guidance_scale_2
-        cfg_enabled = guidance_scale > 1.0
 
         # device = self._execution_device
         device = "cpu"
@@ -584,9 +588,8 @@ class WanPipeline(PipelineAPIMixin):
         prompt_embeds, negative_prompt_embeds = self._text_encoder.encode_cfg(
             prompts,
             negative_prompts,
-            cfg_enabled=cfg_enabled,
+            cfg_enabled=self._cfg_enabled,
             num_videos_per_prompt=num_videos_per_prompt,
-            max_sequence_length=max_sequence_length,
             on_event=on_event,
         )
         on_event(SectionEnd("encoder"))
@@ -684,7 +687,7 @@ class WanPipeline(PipelineAPIMixin):
                     rope_args=rope_args,
                     latents_sequence_length=latents_sequence_length,
                     latents_batch_size=latents.shape[0],
-                    cfg_enabled=cfg_enabled,
+                    cfg_enabled=self._cfg_enabled,
                     traced=traced,
                 )
 

@@ -22,12 +22,14 @@ class TextEncoder:
         *,
         checkpoint_name: str,
         force_zeros_for_empty_prompt: bool,
+        max_sequence_length: int = 256,
     ) -> None:
         self.text_encoder = T5EncoderModel.from_pretrained(
             checkpoint_name, subfolder="text_encoder", torch_dtype=torch.float32
         )
         self.tokenizer = T5TokenizerFast.from_pretrained(checkpoint_name, subfolder="tokenizer")
         self._force_zeros_for_empty_prompt = force_zeros_for_empty_prompt
+        self._max_sequence_length = max_sequence_length
 
     @torch.no_grad()
     def encode_cfg(
@@ -36,7 +38,6 @@ class TextEncoder:
         negative_prompts: Sequence[str],
         *,
         num_videos_per_prompt: int = 1,
-        max_sequence_length: int = 256,
         disable_attention_mask: bool = False,
         on_event: PipelineEventCallback = null_callback,
     ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
@@ -45,13 +46,11 @@ class TextEncoder:
         cond_embeds, cond_mask = self._get_t5_prompt_embeds(
             prompt=list(prompts),
             num_videos_per_prompt=num_videos_per_prompt,
-            max_sequence_length=max_sequence_length,
             disable_attention_mask=disable_attention_mask,
         )
         uncond_embeds, uncond_mask = self._get_t5_prompt_embeds(
             prompt=list(negative_prompts),
             num_videos_per_prompt=num_videos_per_prompt,
-            max_sequence_length=max_sequence_length,
             disable_attention_mask=disable_attention_mask,
         )
         on_event(SectionEnd("t5_encoding"))
@@ -63,9 +62,9 @@ class TextEncoder:
         prompt: list[str],
         *,
         num_videos_per_prompt: int,
-        max_sequence_length: int,
         disable_attention_mask: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        max_sequence_length = self._max_sequence_length
         device = "cpu"
         dtype = self.text_encoder.dtype
 

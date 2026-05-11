@@ -59,6 +59,7 @@ class StableDiffusion3PipelineConfig:
     height: int
     width: int
     cfg_enabled: bool
+    max_t5_sequence_length: int
 
     checkpoint_name: str
 
@@ -76,6 +77,7 @@ class StableDiffusion3PipelineConfig:
         height: int = 1024,
         width: int = 1024,
         cfg_enabled: bool = True,
+        max_t5_sequence_length: int = 256,
         checkpoint_name: str = _DEFAULT_CHECKPOINT,
     ) -> StableDiffusion3PipelineConfig:
         preset = _PRESETS.get(tuple(mesh_shape), {})
@@ -109,6 +111,7 @@ class StableDiffusion3PipelineConfig:
             height=height,
             width=width,
             cfg_enabled=cfg_enabled,
+            max_t5_sequence_length=max_t5_sequence_length,
             checkpoint_name=checkpoint_name,
         )
 
@@ -122,6 +125,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         width: int = 1024,
         height: int = 1024,
         cfg_enabled: bool = True,
+        max_t5_sequence_length: int = 256,
         checkpoint_name: str = _DEFAULT_CHECKPOINT,
     ) -> StableDiffusion3Pipeline:
         config = StableDiffusion3PipelineConfig.default(
@@ -129,6 +133,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
             width=width,
             height=height,
             cfg_enabled=cfg_enabled,
+            max_t5_sequence_length=max_t5_sequence_length,
             checkpoint_name=checkpoint_name,
         )
         return cls(device=mesh_device, config=config)
@@ -203,6 +208,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
                 parallel_config=self.encoder_parallel_config,
                 enable_t5=config.enable_t5_text_encoder,
                 joint_attention_dim=self._joint_attention_dim,
+                max_t5_sequence_length=config.max_t5_sequence_length,
             )
 
             logger.info("creating VAE decoder...")
@@ -234,7 +240,6 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         seed: int = 0,
         num_images_per_prompt: int = 1,
         guidance_scale: float = 3.5,
-        max_t5_sequence_length: int = 256,
         traced: bool = False,
         vae_traced: bool | None = None,
         encoder_traced: bool | None = None,
@@ -260,11 +265,6 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
 
         assert height % (_VAE_SCALE_FACTOR * self.patch_size) == 0
         assert width % (_VAE_SCALE_FACTOR * self.patch_size) == 0
-        assert max_t5_sequence_length <= 512  # noqa: PLR2004
-
-        cfg_enabled = guidance_scale > 1
-        # TODO: pass the patch_size value
-        patch_size = 2
 
         logger.info("encoding prompts...")
 
@@ -274,8 +274,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
                 (prompts, prompts_2, prompts_3),
                 (negative_prompts, negative_prompts_2, negative_prompts_3),
                 num_images_per_prompt=num_images_per_prompt,
-                max_t5_sequence_length=max_t5_sequence_length,
-                cfg_enabled=cfg_enabled,
+                cfg_enabled=self._cfg_enabled,
                 clip_skip=clip_skip,
                 traced=encoder_traced,
                 on_event=on_event,
@@ -299,6 +298,10 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
             batch_size=batch_size * num_images_per_prompt, dtype=context.dtype, seed=seed
         )
 
+        latents_sequence_length = (height // (_VAE_SCALE_FACTOR * self.patch_size)) * (
+            width // (_VAE_SCALE_FACTOR * self.patch_size)
+        )
+
         logger.info("denoising...")
 
         on_event(SectionStart("denoising"))
@@ -309,13 +312,12 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
             tt_latents_step_list = self._step(
                 t=t,
                 latents=tt_latents_step_list,
-                cfg_enabled=cfg_enabled,
+                cfg_enabled=self._cfg_enabled,
                 context=None if reuse_tensors else tt_context_list,
                 pooled=None if reuse_tensors else tt_pooled_list,
                 cfg_scale=guidance_scale,
                 step=i,
-                prompt_sequence_length=333,
-                latents_sequence_length=4096,
+                latents_sequence_length=latents_sequence_length,
                 traced=traced,
             )
             on_event(SectionEnd(f"denoising_step_{i}"))
@@ -339,7 +341,6 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         pooled: ttnn.Tensor,
         timestep: ttnn.Tensor,
         latents_sequence_length: int,
-        prompt_sequence_length: int,
         submesh_id: int,
     ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
         latent_model_input = (
@@ -354,7 +355,6 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
             pooled_projections=pooled,
             timestep=timestep,
             N=latents_sequence_length,
-            L=prompt_sequence_length,
         )
 
         # Make latents an output, because inputs are copied to the trace region before executing a
@@ -371,7 +371,6 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         pooled: list[ttnn.Tensor] | None,
         context: list[ttnn.Tensor] | None,
         step: int,
-        prompt_sequence_length: int,
         latents_sequence_length: int,
         traced: bool,
     ) -> list[ttnn.Tensor]:
@@ -393,7 +392,6 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
                 timestep=timestep,
                 submesh_id=idx,
                 latents_sequence_length=latents_sequence_length,
-                prompt_sequence_length=prompt_sequence_length,
                 traced=traced,
             )
             if cfg_enabled:

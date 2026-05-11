@@ -48,12 +48,14 @@ class TextEncoder:
         ccl_manager: CCLManager,
         encoder_parallel_config: EncoderParallelConfig,
         dit_parallel_config: DiTParallelConfig,
+        max_sequence_length: int = 512,
     ) -> None:
         self._device = device
         self._ccl_manager = ccl_manager
         self._encoder_parallel_config = encoder_parallel_config
         self._dit_parallel_config = dit_parallel_config
         self._checkpoint_name = checkpoint_name
+        self._max_sequence_length = max_sequence_length
 
         self._tokenizer = AutoTokenizer.from_pretrained(checkpoint_name, subfolder="tokenizer", trust_remote_code=True)
         self._torch_text_encoder = UMT5EncoderModel.from_pretrained(
@@ -97,7 +99,6 @@ class TextEncoder:
         *,
         cfg_enabled: bool,
         num_videos_per_prompt: int = 1,
-        max_sequence_length: int = 512,
         on_event: PipelineEventCallback = null_callback,
     ) -> tuple[object, object]:
         on_event(SectionStart("t5_encoding"))
@@ -125,7 +126,6 @@ class TextEncoder:
         all_prompt_embeds = self._encode(
             all_input_prompts,
             num_videos_per_prompt=num_videos_per_prompt,
-            max_sequence_length=max_sequence_length,
         )
 
         prompt_embeds = all_prompt_embeds[:, :pos_prompt_end_idx]
@@ -139,7 +139,6 @@ class TextEncoder:
         prompts: list[str],
         *,
         num_videos_per_prompt: int,
-        max_sequence_length: int,
     ) -> object:
         prompts = [prompt_clean(u) for u in prompts]
         batch_size = len(prompts)
@@ -149,7 +148,7 @@ class TextEncoder:
         text_inputs = self._tokenizer(
             prompts,
             padding="max_length",
-            max_length=max_sequence_length,
+            max_length=self._max_sequence_length,
             truncation=True,
             add_special_tokens=True,
             return_attention_mask=True,

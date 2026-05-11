@@ -418,7 +418,6 @@ class QwenImagePipeline(PipelineAPIMixin):
         latents_sequence_length = (latents_height // self._patch_size) * (latents_width // self._patch_size)
 
         on_event(SectionStart("total"))
-        cfg_enabled = cfg_scale > 1
         logger.info("encoding prompts...")
 
         self.prepare_encoder()
@@ -429,7 +428,7 @@ class QwenImagePipeline(PipelineAPIMixin):
                 prompts,
                 negative_prompts,
                 num_images_per_prompt=num_images_per_prompt,
-                cfg_enabled=cfg_enabled,
+                cfg_enabled=self._cfg_enabled,
                 on_event=on_event,
                 traced=encoder_traced,
             )
@@ -491,7 +490,7 @@ class QwenImagePipeline(PipelineAPIMixin):
                 latents_sequence_length=latents_sequence_length,
                 prompt_sequence_length=prompt_sequence_length,
                 cfg_scale=cfg_scale,
-                cfg_enabled=cfg_enabled,
+                cfg_enabled=self._cfg_enabled,
                 traced=traced,
             )
             on_event(SectionEnd(f"denoising_step_{i}"))

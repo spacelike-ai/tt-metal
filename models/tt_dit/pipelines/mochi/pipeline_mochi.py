@@ -100,6 +100,7 @@ class MochiPipelineConfig:
     height: int
     width: int
     num_frames: int
+    max_sequence_length: int
 
     checkpoint_name: str
 
@@ -119,6 +120,7 @@ class MochiPipelineConfig:
         height: int = 480,
         width: int = 848,
         num_frames: int = 168,
+        max_sequence_length: int = 256,
         checkpoint_name: str = _DEFAULT_CHECKPOINT,
     ) -> MochiPipelineConfig:
         preset_dict = _PRESETS_BH if ttnn.device.is_blackhole() else _PRESETS_WH
@@ -152,6 +154,7 @@ class MochiPipelineConfig:
             height=height,
             width=width,
             num_frames=num_frames,
+            max_sequence_length=max_sequence_length,
             checkpoint_name=checkpoint_name,
         )
 
@@ -171,6 +174,7 @@ class MochiPipeline(PipelineAPIMixin):
         height: int = 480,
         width: int = 848,
         num_frames: int = 168,
+        max_sequence_length: int = 256,
         checkpoint_name: str = _DEFAULT_CHECKPOINT,
     ) -> MochiPipeline:
         config = MochiPipelineConfig.default(
@@ -178,6 +182,7 @@ class MochiPipeline(PipelineAPIMixin):
             height=height,
             width=width,
             num_frames=num_frames,
+            max_sequence_length=max_sequence_length,
             checkpoint_name=checkpoint_name,
         )
         return cls(device=mesh_device, config=config)
@@ -233,6 +238,7 @@ class MochiPipeline(PipelineAPIMixin):
         self._text_encoder = TextEncoder(
             checkpoint_name=checkpoint_name,
             force_zeros_for_empty_prompt=config.force_zeros_for_empty_prompt,
+            max_sequence_length=config.max_sequence_length,
         )
 
         # Load pretrained Mochi Transformer (TT)
@@ -293,7 +299,6 @@ class MochiPipeline(PipelineAPIMixin):
         guidance_scale: float = 4.5,
         num_videos_per_prompt: Optional[int] = 1,
         seed: int = 0,
-        max_sequence_length: int = 256,
         traced: bool = False,
         vae_traced: bool | None = None,
         on_event: PipelineEventCallback | None = None,
@@ -318,7 +323,6 @@ class MochiPipeline(PipelineAPIMixin):
             prompts,
             negative_prompts,
             num_videos_per_prompt=num_videos_per_prompt,
-            max_sequence_length=max_sequence_length,
             disable_attention_mask=traced,
             on_event=on_event,
         )

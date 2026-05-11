@@ -30,11 +30,13 @@ class TextEncoder:
         parallel_config: EncoderParallelConfig,
         enable_t5: bool,
         joint_attention_dim: int,
+        max_t5_sequence_length: int = 256,
     ) -> None:
         self._device = device
         self._ccl_manager = ccl_manager
         self._parallel_config = parallel_config
         self._joint_attention_dim = joint_attention_dim
+        self._max_t5_sequence_length = max_t5_sequence_length
 
         logger.info("loading torch text encoders...")
         self._tokenizer_1 = CLIPTokenizer.from_pretrained(checkpoint_name, subfolder="tokenizer")
@@ -130,7 +132,6 @@ class TextEncoder:
         neg_prompts: tuple[Sequence[str], Sequence[str], Sequence[str]] | None,
         *,
         num_images_per_prompt: int,
-        max_t5_sequence_length: int,
         cfg_enabled: bool,
         clip_skip: int | None = None,
         traced: bool = False,
@@ -139,7 +140,6 @@ class TextEncoder:
         prompt_embeds, pooled_prompt_embeds = self._encode(
             prompts,
             num_images_per_prompt=num_images_per_prompt,
-            max_t5_sequence_length=max_t5_sequence_length,
             clip_skip=clip_skip,
             traced=traced,
             on_event=on_event,
@@ -152,7 +152,6 @@ class TextEncoder:
         negative_prompt_embeds, negative_pooled_prompt_embeds = self._encode(
             neg_prompts,
             num_images_per_prompt=num_images_per_prompt,
-            max_t5_sequence_length=max_t5_sequence_length,
             clip_skip=clip_skip,
             traced=traced,
             on_event=on_event,
@@ -167,7 +166,6 @@ class TextEncoder:
         prompts: tuple[Sequence[str], Sequence[str], Sequence[str]],
         *,
         num_images_per_prompt: int,
-        max_t5_sequence_length: int,
         clip_skip: int | None,
         traced: bool,
         on_event: PipelineEventCallback,
@@ -204,7 +202,7 @@ class TextEncoder:
             device=self._device,
             prompt=prompts_3,
             num_images_per_prompt=num_images_per_prompt,
-            max_sequence_length=max_t5_sequence_length,
+            max_sequence_length=self._max_t5_sequence_length,
             tokenizer=self._tokenizer_3,
             text_encoder=self._text_encoder_3,
             tracer=self._t5_tracer if traced else None,

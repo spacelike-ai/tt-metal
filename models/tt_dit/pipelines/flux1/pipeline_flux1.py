@@ -82,7 +82,7 @@ class Flux1PipelineConfig:
         use_torch_clip_text_encoder: bool = False,
         height: int = 1024,
         width: int = 1024,
-        cfg_enabled: bool = False,  # Flux.1 doesn't support CFG.
+        cfg_enabled: bool = False,
         checkpoint_name: str,
     ) -> Flux1PipelineConfig:
         preset_dict = _PRESETS_BH if is_blackhole() else _PRESETS_WH
@@ -252,9 +252,6 @@ class Flux1Pipeline(PipelineAPIMixin):
         assert height % (_VAE_SCALE_FACTOR * self._patch_size) == 0
         assert width % (_VAE_SCALE_FACTOR * self._patch_size) == 0
 
-        cfg_enabled = cfg_scale > 1
-        assert not cfg_enabled, "CFG is not supported"
-
         latents_height = height // _VAE_SCALE_FACTOR
         latents_width = width // _VAE_SCALE_FACTOR
         latents_sequence_length = latents_height * latents_width
@@ -266,7 +263,7 @@ class Flux1Pipeline(PipelineAPIMixin):
             (prompts, prompts_2),
             (negative_prompts, negative_prompts_2),
             num_images_per_prompt=num_images_per_prompt,
-            cfg_enabled=cfg_enabled,
+            cfg_enabled=self._cfg_enabled,
             clip_skip=clip_skip,
             traced=encoder_traced,
             on_event=on_event,
@@ -332,7 +329,7 @@ class Flux1Pipeline(PipelineAPIMixin):
                 step=i,
                 t=t,
                 latents=tt_latents_step_list,
-                cfg_enabled=cfg_enabled,
+                cfg_enabled=self._cfg_enabled,
                 context=None if reuse_tensors else tt_context_list,
                 pooled=None if reuse_tensors else tt_pooled_list,
                 cfg_scale=cfg_scale,
