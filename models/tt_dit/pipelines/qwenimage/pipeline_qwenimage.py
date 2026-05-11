@@ -542,7 +542,7 @@ class QwenImagePipeline(PipelineAPIMixin):
             timestep=timestep,
             spatial_rope=(latents_rope_cos, latents_rope_sin),
             prompt_rope=(prompt_rope_cos, prompt_rope_sin),
-            latents_sequence_length=latents_sequence_length,
+            spatial_sequence_length=latents_sequence_length,
             prompt_sequence_length=prompt_sequence_length,
         )
 
