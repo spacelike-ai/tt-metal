@@ -38,6 +38,7 @@ from models.tt_dit.utils.tracing import Tracer
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from contextlib import AbstractContextManager
 
     from PIL import Image
 
@@ -267,7 +268,7 @@ class QwenImagePipeline(PipelineAPIMixin):
 
         # initialize text encoder. This will load the weights
         self._use_torch_text_encoder = config.use_torch_text_encoder
-        with reshape_device(self.encoder_device, self.encoder_mesh_shape):
+        with self._reshape_encoder():
             logger.info("creating text encoder (loading before transformers for memory efficiency)...")
             self._text_encoder = TextEncoder(
                 checkpoint_name=self._checkpoint_name,
@@ -291,7 +292,7 @@ class QwenImagePipeline(PipelineAPIMixin):
 
         self._use_torch_vae_decoder = config.use_torch_vae_decoder
 
-        with reshape_device(self.vae_device, self.vae_mesh_shape):
+        with self._reshape_vae():
             logger.info("creating VAE decoder...")
             self._vae = QwenImageVAEDecoderAdapter(
                 checkpoint_name=self._checkpoint_name,
@@ -355,7 +356,7 @@ class QwenImagePipeline(PipelineAPIMixin):
         """Prepare encoder for inference."""
         if not self._text_encoder.encoder_loaded():
             self._deallocate_transformers(self.encoder_submesh_idx)
-            with reshape_device(self.encoder_device, self.encoder_mesh_shape):
+            with self._reshape_encoder():
                 self._text_encoder.reload_encoder_weights()
 
     def prepare_transformers(self) -> None:
@@ -374,10 +375,16 @@ class QwenImagePipeline(PipelineAPIMixin):
         if self._vae.is_loaded():
             return
         self._deallocate_transformers(self.vae_submesh_idx)
-        with reshape_device(self.vae_device, self.vae_mesh_shape):
+        with self._reshape_vae():
             logger.info("loading VAE decoder weights to device...")
             self._vae.reload_weights()
         ttnn.synchronize_device(self.vae_device)
+
+    def _reshape_encoder(self) -> AbstractContextManager[None]:
+        return reshape_device(self.encoder_device, self.encoder_mesh_shape)
+
+    def _reshape_vae(self) -> AbstractContextManager[None]:
+        return reshape_device(self.vae_device, self.vae_mesh_shape)
 
     def __call__(
         self,
@@ -421,7 +428,7 @@ class QwenImagePipeline(PipelineAPIMixin):
             self.prepare_encoder()
 
             on_event(SectionStart("encoder"))
-            with reshape_device(self.encoder_device, self.encoder_mesh_shape):
+            with self._reshape_encoder():
                 prompt_embeds, prompt_mask = self._text_encoder.encode_cfg(
                     prompts,
                     negative_prompts,
@@ -638,7 +645,7 @@ class QwenImagePipeline(PipelineAPIMixin):
 
         if not self._use_torch_vae_decoder:
             self.prepare_vae()
-        with reshape_device(self.vae_device, self.vae_mesh_shape):
+        with self._reshape_vae():
             decoded_output = self._vae.decode(torch_latents, traced=traced)
 
         image = self._image_processor.postprocess(decoded_output, output_type="pt")

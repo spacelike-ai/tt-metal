@@ -172,7 +172,7 @@ class MotifPipeline(PipelineAPIMixin):
             for m in self._ccl_managers
         ]
 
-        with self._reshape_encoder_device():
+        with self._reshape_encoder():
             logger.info("creating encoder...")
             self._text_encoder = TextEncoder(
                 parallel_config=config.encoder_parallel_config,
@@ -197,7 +197,7 @@ class MotifPipeline(PipelineAPIMixin):
         logger.info("pipeline allocation run...")
         self(prompts=[""], num_inference_steps=2, traced=False, cfg_scale=2 if config.cfg_enabled else 1)
 
-    def _reshape_encoder_device(self) -> AbstractContextManager[None]:
+    def _reshape_encoder(self) -> AbstractContextManager[None]:
         device = self._devices[0]
         tp = self._encoder_tp
 
@@ -245,7 +245,7 @@ class MotifPipeline(PipelineAPIMixin):
         on_event(SectionStart("total"))
 
         on_event(SectionStart("encoder"))
-        with self._reshape_encoder_device():
+        with self._reshape_encoder():
             (
                 torch_early_context,
                 torch_early_pooled,
@@ -396,7 +396,7 @@ class MotifPipeline(PipelineAPIMixin):
             width=self._width // _VAE_SCALE_FACTOR,
         )
 
-        with self._reshape_encoder_device():
+        with self._reshape_encoder():
             decoded_output = self._vae.decode(torch_latents, traced=traced)
 
         image = self._image_processor.postprocess(decoded_output, output_type="pt")

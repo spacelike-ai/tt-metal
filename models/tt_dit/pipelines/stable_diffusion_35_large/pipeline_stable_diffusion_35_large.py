@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING
 
 import torch
 import tqdm
@@ -32,6 +32,7 @@ from models.tt_dit.utils.tracing import Tracer
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from contextlib import AbstractContextManager
 
 TILE_SIZE = 32
 
@@ -196,7 +197,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
 
         self._image_processor = VaeImageProcessor(vae_scale_factor=_VAE_SCALE_FACTOR)
 
-        with reshape_device(self.encoder_device, self.encoder_mesh_shape):
+        with self._reshape_encoder():
             logger.info("creating text encoder...")
             self._text_encoder = TextEncoder(
                 checkpoint_name=checkpoint_name,
@@ -220,6 +221,9 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         logger.info("Pipeline allocation run...")
         self(prompts=[""], num_inference_steps=2, guidance_scale=2 if config.cfg_enabled else 1, traced=False)
 
+    def _reshape_encoder(self) -> AbstractContextManager[None]:
+        return reshape_device(self.encoder_device, self.encoder_mesh_shape)
+
     def __call__(
         self,
         *,
@@ -239,7 +243,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         encoder_traced: bool | None = None,
         clip_skip: int | None = None,
         on_event: PipelineEventCallback | None = None,
-    ) -> List[Image.Image]:
+    ) -> list[Image.Image]:
         on_event = on_event if on_event is not None else null_callback
         prompts_2 = prompts_2 if prompts_2 is not None else prompts
         prompts_3 = prompts_3 if prompts_3 is not None else prompts
@@ -269,7 +273,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
             logger.info("encoding prompts...")
 
             on_event(SectionStart("encoder"))
-            with reshape_device(self.encoder_device, self.encoder_mesh_shape):
+            with self._reshape_encoder():
                 prompt_embeds, pooled_prompt_embeds = self._text_encoder.encode_cfg(
                     (prompts, prompts_2, prompts_3),
                     (negative_prompts, negative_prompts_2, negative_prompts_3),
@@ -441,7 +445,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         )
 
         # Upload + VAE forward + extract-to-host run under the encoder/VAE shape.
-        with reshape_device(self.encoder_device, self.encoder_mesh_shape):
+        with self._reshape_encoder():
             decoded_output = self._vae.decode(torch_latents, traced=traced)
 
         image = self._image_processor.postprocess(decoded_output, output_type="pt")

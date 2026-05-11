@@ -28,6 +28,7 @@ from models.tt_dit.utils.tracing import Tracer
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from contextlib import AbstractContextManager
 
 _DEFAULT_CHECKPOINT = "genmo/mochi-1-preview"
 
@@ -218,7 +219,7 @@ class MochiPipeline(PipelineAPIMixin):
         )
 
         # Create VAE CCL manager using the VAE mesh shape.
-        with reshape_device(self._device, self._vae_mesh_shape):
+        with self._reshape_vae():
             self._vae_ccl_manager = CCLManager(
                 mesh_device=device,
                 num_links=config.num_links,
@@ -250,7 +251,7 @@ class MochiPipeline(PipelineAPIMixin):
             parallel_config=self.parallel_config,
         )
 
-        with reshape_device(self._device, self._vae_mesh_shape):
+        with self._reshape_vae():
             self._vae = MochiVAEDecoderAdapter(
                 checkpoint_name=checkpoint_name,
                 parallel_config=self.vae_parallel_config,
@@ -262,6 +263,9 @@ class MochiPipeline(PipelineAPIMixin):
 
         logger.info("Pipeline allocation run...")
         self(prompts=[""], num_inference_steps=2, guidance_scale=2, traced=False)
+
+    def _reshape_vae(self) -> AbstractContextManager[None]:
+        return reshape_device(self._device, self._vae_mesh_shape)
 
     def prepare_latents(
         self,
@@ -414,7 +418,7 @@ class MochiPipeline(PipelineAPIMixin):
             self._tracer = None
 
         on_event(SectionStart("vae"))
-        with reshape_device(self._device, self._vae_mesh_shape):
+        with self._reshape_vae():
             video = self._vae.decode(latents, traced=vae_traced)
         on_event(SectionEnd("vae"))
 
