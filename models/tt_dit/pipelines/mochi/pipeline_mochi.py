@@ -264,16 +264,6 @@ class MochiPipeline(PipelineAPIMixin):
             parallel_config=self.parallel_config,
         )
 
-        self._latents_num_frames = (config.num_frames - 1) // self.vae_temporal_scale_factor + 1
-        self._latents_height = config.height // self.vae_spatial_scale_factor
-        self._latents_width = config.width // self.vae_spatial_scale_factor
-
-        # Pre-compute rope features so they live in pre-capture device memory and are not at
-        # risk of being clobbered by trace execution across pipeline runs.
-        self._rope_cos, self._rope_sin, self._trans_mat = self._transformer.prepare_rope_features(
-            self._latents_num_frames, self._latents_height, self._latents_width
-        )
-
         with self._reshape_vae():
             self._vae = MochiVAEDecoderAdapter(
                 checkpoint_name=checkpoint_name,
@@ -291,13 +281,11 @@ class MochiPipeline(PipelineAPIMixin):
         return reshape_device(self._device, self._vae_mesh_shape)
 
     def prepare_latents(self, batch_size: int, num_channels_latents: int, dtype: torch.dtype) -> torch.Tensor:
-        shape = (
-            batch_size,
-            num_channels_latents,
-            self._latents_num_frames,
-            self._latents_height,
-            self._latents_width,
-        )
+        height = self._height // self.vae_spatial_scale_factor
+        width = self._width // self.vae_spatial_scale_factor
+        num_frames = (self._num_frames - 1) // self.vae_temporal_scale_factor + 1
+
+        shape = (batch_size, num_channels_latents, num_frames, height, width)
         return torch.randn(shape, dtype=torch.float32).to(dtype)
 
     @torch.no_grad()
@@ -370,7 +358,10 @@ class MochiPipeline(PipelineAPIMixin):
         self._solver.set_schedule(sigmas, alphas)
         timesteps = [s * 1000 for s in sigmas[:-1]]
 
+        # Upload spatial latents and pre-compute rope features once before the loop.
+        _, _, f, h, w = latents.shape
         latents, latents_sequence_length = self._transformer.preprocess_spatial_input(latents)
+        rope_cos, rope_sin, trans_mat = self._transformer.prepare_rope_features(f, h, w)
 
         # 6. Denoising loop
         on_event(SectionStart("denoising"))
@@ -385,9 +376,9 @@ class MochiPipeline(PipelineAPIMixin):
                     spatial_1BNI=latents,
                     temb_11BD=temb_uncond,
                     prompt_1BLP=context_uncond,
-                    rope_cos_1HND=self._rope_cos,
-                    rope_sin_1HND=self._rope_sin,
-                    trans_mat=self._trans_mat,
+                    rope_cos_1HND=rope_cos if i == 0 else self._tracer.inputs["rope_cos_1HND"],
+                    rope_sin_1HND=rope_sin if i == 0 else self._tracer.inputs["rope_sin_1HND"],
+                    trans_mat=trans_mat if i == 0 else self._tracer.inputs["trans_mat"],
                     N=latents_sequence_length,
                     traced=traced,
                 )
@@ -400,9 +391,9 @@ class MochiPipeline(PipelineAPIMixin):
                     spatial_1BNI=latents,
                     temb_11BD=temb_cond,
                     prompt_1BLP=context_cond,
-                    rope_cos_1HND=self._rope_cos,
-                    rope_sin_1HND=self._rope_sin,
-                    trans_mat=self._trans_mat,
+                    rope_cos_1HND=self._tracer.inputs["rope_cos_1HND"],
+                    rope_sin_1HND=self._tracer.inputs["rope_sin_1HND"],
+                    trans_mat=self._tracer.inputs["trans_mat"],
                     N=latents_sequence_length,
                     traced=traced,
                 )
@@ -413,9 +404,7 @@ class MochiPipeline(PipelineAPIMixin):
                 progress_bar.update()
         on_event(SectionEnd("denoising"))
 
-        latents = self._transformer.postprocess_spatial_output(
-            latents, self._latents_num_frames, self._latents_height, self._latents_width, latents_sequence_length
-        )
+        latents = self._transformer.postprocess_spatial_output(latents, f, h, w, latents_sequence_length)
 
         return self._decode_latents(
             latents,
