@@ -303,6 +303,8 @@ class MotifPipeline(PipelineAPIMixin):
                     traced=traced,
                 )
 
+                # latents can be overwritten by trace execution, use the captured input instead,
+                # which is safe.
                 latents[idx] = tracer.inputs["latents"]
 
                 if self._cfg_enabled:
