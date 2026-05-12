@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import tqdm
@@ -282,17 +282,33 @@ class MotifPipeline(PipelineAPIMixin):
         for step, t in enumerate(tqdm.tqdm(sigmas[:-1])):
             on_event(SectionStart(f"denoising_step_{step}"))
 
-            early = t >= negative_strategy_switch_time
+            context = early_context if t >= negative_strategy_switch_time else late_context
+            pooled = early_pooled if t >= negative_strategy_switch_time else late_pooled
 
-            latents = self._step(
-                step=step,
-                t=t,
-                cfg_scale=cfg_scale,
-                latents=latents,
-                context=early_context if early else late_context,
-                pooled=early_pooled if early else late_pooled,
-                traced=traced,
-            )
+            for idx, (device, tracer) in enumerate(zip(self._devices, self._tracers, strict=True)):
+                timestep = ttnn.full(
+                    [1, 1],
+                    fill_value=t * 1000,
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=ttnn.float32,
+                    device=device,
+                )
+
+                velocity_pred = tracer(
+                    submesh_idx=idx,
+                    latents=latents[idx],
+                    prompt=context[idx],
+                    pooled=pooled[idx],
+                    timestep=timestep,
+                    traced=traced,
+                )
+
+                latents[idx] = tracer.inputs["latents"]
+
+                if self._cfg_enabled:
+                    velocity_pred = self._combiner.combine(velocity_pred, cfg_scale)
+
+                latents[idx] = self._solvers[idx].step(step=step, latent=latents[idx], velocity_pred=velocity_pred)
 
             # Helps with accurate time profiling.
             for device in self._devices:
@@ -310,63 +326,11 @@ class MotifPipeline(PipelineAPIMixin):
         on_event(SectionEnd("total"))
         return images
 
-    def _step(
-        self,
-        *,
-        step: int,
-        t: float,
-        cfg_scale: float,
-        latents: Sequence[ttnn.Tensor],
-        context: Sequence[ttnn.Tensor],
-        pooled: Sequence[ttnn.Tensor],
-        traced: bool,
-    ) -> list[ttnn.Tensor]:
-        latents = list(latents)
+    def _traced_step(self, *, submesh_idx: int, latents: ttnn.Tensor, **kwargs: Any) -> ttnn.Tensor:
+        if self._cfg_enabled and not self._cfg_parallel:
+            latents = ttnn.concat([latents, latents])
 
-        for idx, device in enumerate(self._devices):
-            timestep = ttnn.full(
-                [1, 1],
-                fill_value=t * 1000,
-                layout=ttnn.TILE_LAYOUT,
-                dtype=ttnn.float32,
-                device=device,
-            )
-
-            velocity_pred = self._tracers[idx](
-                latents=latents[idx],
-                context=context[idx],
-                pooled=pooled[idx],
-                timestep=timestep,
-                submesh_idx=idx,
-                traced=traced,
-            )
-
-            latents[idx] = self._tracers[idx].inputs["latents"]
-
-            if self._cfg_enabled:
-                velocity_pred = self._combiner.combine(velocity_pred, cfg_scale)
-
-            latents[idx] = self._solvers[idx].step(step=step, latent=latents[idx], velocity_pred=velocity_pred)
-
-        return latents
-
-    def _traced_step(
-        self,
-        *,
-        latents: ttnn.Tensor,
-        context: ttnn.Tensor,
-        pooled: ttnn.Tensor,
-        timestep: ttnn.Tensor,
-        submesh_idx: int,
-    ) -> ttnn.Tensor:
-        duplicate_latents = self._cfg_enabled and not self._cfg_parallel
-
-        return self._transformers[submesh_idx].forward(
-            spatial=ttnn.concat([latents, latents]) if duplicate_latents else latents,
-            prompt=context,
-            pooled=pooled,
-            timestep=timestep,
-        )
+        return self._transformers[submesh_idx].forward(spatial=latents, **kwargs)
 
     def _random_latents(self, batch_size: int, seed: int) -> list[ttnn.Tensor]:
         torch.manual_seed(seed)

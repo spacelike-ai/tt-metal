@@ -256,7 +256,7 @@ class MochiPipeline(PipelineAPIMixin):
             parallel_config=self.parallel_config,
             is_fsdp=True,
         )
-        self._tracer = Tracer(self._traced_step, device=device, prep_run=False)
+        self._tracer = Tracer(self._transformer.forward, device=device, prep_run=False)
 
         self._checkpoint.load(
             self._transformer,
@@ -340,7 +340,9 @@ class MochiPipeline(PipelineAPIMixin):
                 parallel_config=self.parallel_config,
                 is_fsdp=True,
             )
-            self._tracer = Tracer(self._traced_step, device=self._device, prep_run=True, clone_prep_inputs=False)
+            self._tracer = Tracer(
+                self._transformer.forward, device=self._device, prep_run=True, clone_prep_inputs=False
+            )
 
             logger.info("Loading MochiTransformer3DModel state_dict")
             self._checkpoint.load(
@@ -348,6 +350,8 @@ class MochiPipeline(PipelineAPIMixin):
                 mesh_device=self._device,
                 parallel_config=self.parallel_config,
             )
+
+        assert self._tracer is not None
 
         # 4. Prepare latent variables
         torch.manual_seed(seed)
@@ -372,19 +376,39 @@ class MochiPipeline(PipelineAPIMixin):
         on_event(SectionStart("denoising"))
         with tqdm.tqdm(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
-                latents = self._step(
-                    step=i,
-                    t=t,
-                    latents=latents,
-                    context=context,
-                    context_masks=context_masks,
-                    rope_cos=self._rope_cos,
-                    rope_sin=self._rope_sin,
+                timestep = torch.tensor([t], dtype=torch.float32)
+
+                temb_uncond, context_uncond = self._transformer.prepare_timestep_text_features(
+                    timestep, context[0], context_masks[0]
+                )
+                velocity_pred_uncond = self._tracer(
+                    spatial_1BNI=latents,
+                    temb_11BD=temb_uncond,
+                    prompt_1BLP=context_uncond,
+                    rope_cos_1HND=self._rope_cos,
+                    rope_sin_1HND=self._rope_sin,
                     trans_mat=self._trans_mat,
-                    latents_sequence_length=latents_sequence_length,
-                    cfg_scale=guidance_scale,
+                    N=latents_sequence_length,
                     traced=traced,
                 )
+                latents = self._tracer.inputs["spatial_1BNI"]
+
+                temb_cond, context_cond = self._transformer.prepare_timestep_text_features(
+                    timestep, context[1], context_masks[1]
+                )
+                velocity_pred_cond = self._tracer(
+                    spatial_1BNI=latents,
+                    temb_11BD=temb_cond,
+                    prompt_1BLP=context_cond,
+                    rope_cos_1HND=self._rope_cos,
+                    rope_sin_1HND=self._rope_sin,
+                    trans_mat=self._trans_mat,
+                    N=latents_sequence_length,
+                    traced=traced,
+                )
+
+                velocity_pred = velocity_pred_uncond + guidance_scale * (velocity_pred_cond - velocity_pred_uncond)
+                latents = self._solver.step(step=i, latent=latents, velocity_pred=velocity_pred)
 
                 progress_bar.update()
         on_event(SectionEnd("denoising"))
@@ -419,81 +443,3 @@ class MochiPipeline(PipelineAPIMixin):
         on_event(SectionEnd("vae"))
 
         return self.video_processor.postprocess_video(video, output_type="pil")
-
-    def _step(
-        self,
-        *,
-        step: int,
-        t: float,
-        latents: ttnn.Tensor,
-        context: tuple[torch.Tensor, torch.Tensor],
-        context_masks: tuple[torch.Tensor, torch.Tensor],
-        rope_cos: ttnn.Tensor,
-        rope_sin: ttnn.Tensor,
-        trans_mat: ttnn.Tensor,
-        latents_sequence_length: int,
-        cfg_scale: float,
-        traced: bool,
-    ) -> ttnn.Tensor:
-        assert self._tracer is not None
-        assert self._transformer is not None
-
-        timestep = torch.tensor([t], dtype=torch.float32)
-
-        temb_uncond, context_uncond = self._transformer.prepare_timestep_text_features(
-            timestep, context[0], context_masks[0]
-        )
-
-        velocity_pred_uncond = self._tracer(
-            latents=latents,
-            temb=temb_uncond,
-            context=context_uncond,
-            rope_cos=rope_cos,
-            rope_sin=rope_sin,
-            trans_mat=trans_mat,
-            latents_sequence_length=latents_sequence_length,
-            traced=traced,
-        )
-        latents = self._tracer.inputs["latents"]
-
-        temb_cond, context_cond = self._transformer.prepare_timestep_text_features(
-            timestep, context[1], context_masks[1]
-        )
-
-        velocity_pred_cond = self._tracer(
-            latents=latents,
-            temb=temb_cond,
-            context=context_cond,
-            rope_cos=rope_cos,
-            rope_sin=rope_sin,
-            trans_mat=trans_mat,
-            latents_sequence_length=latents_sequence_length,
-            traced=traced,
-        )
-
-        velocity_pred = velocity_pred_uncond + cfg_scale * (velocity_pred_cond - velocity_pred_uncond)
-
-        return self._solver.step(step=step, latent=latents, velocity_pred=velocity_pred)
-
-    def _traced_step(
-        self,
-        *,
-        latents: ttnn.Tensor,
-        temb: ttnn.Tensor,
-        context: ttnn.Tensor,
-        rope_cos: ttnn.Tensor,
-        rope_sin: ttnn.Tensor,
-        trans_mat: ttnn.Tensor,
-        latents_sequence_length: int,
-    ) -> ttnn.Tensor:
-        assert self._transformer is not None
-
-        return self._transformer.forward(
-            temb_11BD=temb,
-            prompt_1BLP=context,
-            rope_cos_1HND=rope_cos,
-            rope_sin_1HND=rope_sin,
-            spatial_1BNI=latents,
-            trans_mat=trans_mat,
-            N=latents_sequence_length,
-        )

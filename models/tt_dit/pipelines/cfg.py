@@ -136,7 +136,7 @@ def distribute_cfg(
     /,
     *,
     devices: tuple[ttnn.MeshDevice] | tuple[ttnn.MeshDevice, ttnn.MeshDevice],
-    on_host: bool,
+    on_host: bool = False,
 ) -> tuple[ttnn.Tensor] | tuple[ttnn.Tensor, ttnn.Tensor]:
     """Return one tensor per submesh from a conditioning batch."""
     match devices:

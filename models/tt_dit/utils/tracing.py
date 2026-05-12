@@ -312,7 +312,7 @@ class Tracer:
             if len(self._devices) != 1:
                 msg = (
                     f"input '{path_label}' is a host tensor; host tensors are not supported "
-                    "when the tracer manages multiple devices"
+                    "during capture when the tracer manages multiple devices"
                 )
                 raise ValueError(msg)
             return value.to(self._devices[0])

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import tqdm
@@ -133,12 +133,7 @@ class Flux1Pipeline(PipelineAPIMixin):
         )
         return cls(device=mesh_device, config=config)
 
-    def __init__(
-        self,
-        *,
-        device: ttnn.MeshDevice,
-        config: Flux1PipelineConfig,
-    ) -> None:
+    def __init__(self, *, device: ttnn.MeshDevice, config: Flux1PipelineConfig) -> None:
         self._mesh_device = device
         self._parallel_config = config.dit_parallel_config
         self._encoder_parallel_config = config.encoder_parallel_config
@@ -259,7 +254,7 @@ class Flux1Pipeline(PipelineAPIMixin):
         logger.info("encoding prompts...")
 
         on_event(SectionStart("encoder"))
-        context, pooled = self._text_encoder.encode_cfg(
+        torch_context, torch_pooled = self._text_encoder.encode_cfg(
             (prompts, prompts_2),
             (negative_prompts, negative_prompts_2),
             num_images_per_prompt=num_images_per_prompt,
@@ -268,7 +263,7 @@ class Flux1Pipeline(PipelineAPIMixin):
             traced=encoder_traced,
             on_event=on_event,
         )
-        _, prompt_sequence_length, _ = context.shape
+        _, prompt_sequence_length, _ = torch_context.shape
         on_event(SectionEnd("encoder"))
 
         logger.info("preparing timesteps...")
@@ -284,7 +279,7 @@ class Flux1Pipeline(PipelineAPIMixin):
             solver.set_schedule(sigmas, alphas)
         timesteps = [s * 1000 for s in sigmas[:-1]]
 
-        guidance = (
+        torch_guidance = (
             torch.full([prompt_count * num_images_per_prompt], fill_value=guidance_scale)
             if self._with_guidance_embeds
             else None
@@ -295,68 +290,77 @@ class Flux1Pipeline(PipelineAPIMixin):
         text_ids = torch.zeros([prompt_sequence_length, 3])
         image_ids = _latent_image_ids(height=latents_height, width=latents_width)
         ids = torch.cat((text_ids, image_ids), dim=0)
-        rope_cos, rope_sin = self._pos_embed.forward(ids)
+        torch_rope_cos, torch_rope_sin = self._pos_embed.forward(ids)
 
-        tt_context_list = distribute_cfg(context, devices=self._submesh_devices, on_host=False)
-        tt_pooled_list = distribute_cfg(pooled, devices=self._submesh_devices, on_host=False)
-        tt_latents_step_list = self._random_latents(batch_size=prompt_count * num_images_per_prompt, seed=seed)
-        tt_guidance_list = (
-            from_torch_to_devices(guidance.unsqueeze(-1), devices=self._submesh_devices)
-            if guidance is not None
-            else None
+        context = distribute_cfg(torch_context, devices=self._submesh_devices)
+        pooled = distribute_cfg(torch_pooled, devices=self._submesh_devices)
+        latents = self._random_latents(batch_size=prompt_count * num_images_per_prompt, seed=seed)
+        guidance = (
+            from_torch_to_devices(torch_guidance.unsqueeze(-1), devices=self._submesh_devices)
+            if torch_guidance is not None
+            else [None] * len(self._submesh_devices)
         )
-        tt_latents_rope_cos_list = from_torch_to_devices(
-            rope_cos[prompt_sequence_length:], devices=self._submesh_devices, mesh_axes=[sp_axis, None]
+        latents_rope_cos = from_torch_to_devices(
+            torch_rope_cos[prompt_sequence_length:], devices=self._submesh_devices, mesh_axes=[sp_axis, None]
         )
-        tt_latents_rope_sin_list = from_torch_to_devices(
-            rope_sin[prompt_sequence_length:], devices=self._submesh_devices, mesh_axes=[sp_axis, None]
+        latents_rope_sin = from_torch_to_devices(
+            torch_rope_sin[prompt_sequence_length:], devices=self._submesh_devices, mesh_axes=[sp_axis, None]
         )
-        tt_prompt_rope_cos_list = from_torch_to_devices(
-            rope_cos[:prompt_sequence_length], devices=self._submesh_devices
-        )
-        tt_prompt_rope_sin_list = from_torch_to_devices(
-            rope_sin[:prompt_sequence_length], devices=self._submesh_devices
-        )
+        prompt_rope_cos = from_torch_to_devices(torch_rope_cos[:prompt_sequence_length], devices=self._submesh_devices)
+        prompt_rope_sin = from_torch_to_devices(torch_rope_sin[:prompt_sequence_length], devices=self._submesh_devices)
 
         logger.info("denoising...")
 
         on_event(SectionStart("denoising"))
         for i, t in enumerate(tqdm.tqdm(timesteps)):
             on_event(SectionStart(f"denoising_step_{i}"))
-            reuse_tensors = i > 0 and traced
 
-            tt_latents_step_list = self._step(
-                step=i,
-                t=t,
-                latents=tt_latents_step_list,
-                cfg_enabled=self._cfg_enabled,
-                context=None if reuse_tensors else tt_context_list,
-                pooled=None if reuse_tensors else tt_pooled_list,
-                cfg_scale=cfg_scale,
-                guidance=None if reuse_tensors else tt_guidance_list,
-                latents_rope_cos=None if reuse_tensors else tt_latents_rope_cos_list,
-                latents_rope_sin=None if reuse_tensors else tt_latents_rope_sin_list,
-                prompt_rope_cos=None if reuse_tensors else tt_prompt_rope_cos_list,
-                prompt_rope_sin=None if reuse_tensors else tt_prompt_rope_sin_list,
-                latents_sequence_length=latents_sequence_length,
-                prompt_sequence_length=prompt_sequence_length,
-                traced=traced,
-            )
+            for idx, (device, tracer) in enumerate(zip(self._submesh_devices, self._tracers, strict=True)):
+                timestep = ttnn.full(
+                    [1, 1],
+                    fill_value=t,
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=ttnn.float32,
+                    device=device,
+                )
+
+                inputs = tracer.inputs
+                velocity_pred = tracer(
+                    cfg_enabled=self._cfg_enabled,
+                    submesh_idx=idx,
+                    latents=latents[idx],
+                    prompt=context[idx] if i == 0 else inputs["prompt"],
+                    pooled=pooled[idx] if i == 0 else inputs["pooled"],
+                    timestep=timestep,
+                    guidance=guidance[idx] if i == 0 and guidance else inputs["guidance"],
+                    spatial_rope=(latents_rope_cos[idx], latents_rope_sin[idx]) if i == 0 else inputs["spatial_rope"],
+                    prompt_rope=(prompt_rope_cos[idx], prompt_rope_sin[idx]) if i == 0 else inputs["prompt_rope"],
+                    spatial_sequence_length=latents_sequence_length,
+                    prompt_sequence_length=prompt_sequence_length,
+                    traced=traced,
+                )
+
+                latents[idx] = tracer.inputs["latents"]
+
+                if self._cfg_enabled:
+                    velocity_pred = self._cfg_combiner.combine(velocity_pred, cfg_scale)
+
+                latents[idx] = self._solvers[idx].step(step=i, latent=latents[idx], velocity_pred=velocity_pred)
+
+            for device in self._submesh_devices:
+                ttnn.synchronize_device(device)  # Helps with accurate time profiling.
+
             on_event(SectionEnd(f"denoising_step_{i}"))
         on_event(SectionEnd("denoising"))
 
         logger.info("decoding image...")
 
         on_event(SectionStart("vae"))
-        output = self._decode_latents(tt_latents_step_list[self.vae_submesh_idx], traced=vae_traced)
+        output = self._decode_latents(latents[self.vae_submesh_idx], traced=vae_traced)
         on_event(SectionEnd("vae"))
         on_event(SectionEnd("total"))
 
         return output
-
-    def synchronize_devices(self):
-        for device in self._submesh_devices:
-            ttnn.synchronize_device(device)
 
     def _random_latents(self, *, batch_size: int, seed: int) -> list[ttnn.Tensor]:
         torch.manual_seed(seed)
@@ -399,98 +403,11 @@ class Flux1Pipeline(PipelineAPIMixin):
         assert isinstance(image, torch.Tensor)
         return self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
 
-    def _traced_step(
-        self,
-        *,
-        cfg_enabled: bool,
-        latents: ttnn.Tensor,
-        context: ttnn.Tensor,
-        pooled: ttnn.Tensor,
-        timestep: ttnn.Tensor,
-        guidance: ttnn.Tensor | None,
-        latents_rope_cos: ttnn.Tensor,
-        latents_rope_sin: ttnn.Tensor,
-        prompt_rope_cos: ttnn.Tensor,
-        prompt_rope_sin: ttnn.Tensor,
-        latents_sequence_length: int,
-        prompt_sequence_length: int,
-        submesh_id: int,
-    ) -> ttnn.Tensor:
-        latent_input = (
-            ttnn.concat([latents, latents])
-            if cfg_enabled and not self._parallel_config.cfg_parallel.factor > 1
-            else latents
-        )
+    def _traced_step(self, *, cfg_enabled: bool, submesh_idx: int, latents: ttnn.Tensor, **kwargs: Any) -> ttnn.Tensor:
+        if cfg_enabled and not self._parallel_config.cfg_parallel.factor > 1:
+            latents = ttnn.concat([latents, latents])
 
-        return self.transformers[submesh_id].forward(
-            spatial=latent_input,
-            prompt=context,
-            pooled=pooled,
-            timestep=timestep,
-            guidance=guidance,
-            spatial_rope=(latents_rope_cos, latents_rope_sin),
-            prompt_rope=(prompt_rope_cos, prompt_rope_sin),
-            spatial_sequence_length=latents_sequence_length,
-            prompt_sequence_length=prompt_sequence_length,
-        )
-
-    def _step(
-        self,
-        *,
-        cfg_enabled: bool,
-        cfg_scale: float,
-        step: int,
-        latents: list[ttnn.Tensor],
-        t: float,
-        pooled: list[ttnn.Tensor] | None,
-        context: list[ttnn.Tensor] | None,
-        guidance: list[ttnn.Tensor | None] | None,
-        latents_rope_cos: list[ttnn.Tensor] | None,
-        latents_rope_sin: list[ttnn.Tensor] | None,
-        prompt_rope_cos: list[ttnn.Tensor] | None,
-        prompt_rope_sin: list[ttnn.Tensor] | None,
-        latents_sequence_length: int,
-        prompt_sequence_length: int,
-        traced: bool,
-    ) -> list[ttnn.Tensor]:
-        latents = list(latents)
-        for idx, submesh_device in enumerate(self._submesh_devices):
-            timestep = ttnn.full(
-                [1, 1],
-                fill_value=t,
-                layout=ttnn.TILE_LAYOUT,
-                dtype=ttnn.float32,
-                device=submesh_device,
-            )
-
-            velocity_pred = self._tracers[idx](
-                cfg_enabled=cfg_enabled,
-                latents=latents[idx],
-                context=context[idx] if context is not None else None,
-                pooled=pooled[idx] if pooled is not None else None,
-                timestep=timestep,
-                guidance=guidance[idx] if guidance is not None else None,
-                latents_rope_cos=latents_rope_cos[idx] if latents_rope_cos is not None else None,
-                latents_rope_sin=latents_rope_sin[idx] if latents_rope_sin is not None else None,
-                prompt_rope_cos=prompt_rope_cos[idx] if prompt_rope_cos is not None else None,
-                prompt_rope_sin=prompt_rope_sin[idx] if prompt_rope_sin is not None else None,
-                latents_sequence_length=latents_sequence_length,
-                prompt_sequence_length=prompt_sequence_length,
-                submesh_id=idx,
-                traced=traced,
-            )
-
-            latents[idx] = self._tracers[idx].inputs["latents"]
-
-            if cfg_enabled:
-                velocity_pred = self._cfg_combiner.combine(velocity_pred, cfg_scale)
-
-            latents[idx] = self._solvers[idx].step(step=step, latent=latents[idx], velocity_pred=velocity_pred)
-
-        for submesh_device in self._submesh_devices:
-            ttnn.synchronize_device(submesh_device)  # Helps with accurate time profiling.
-
-        return latents
+        return self.transformers[submesh_idx].forward(spatial=latents, **kwargs)
 
 
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/flux/pipeline_flux.py
