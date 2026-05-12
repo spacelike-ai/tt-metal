@@ -13,7 +13,6 @@ from diffusers.video_processor import VideoProcessor
 from loguru import logger
 
 import ttnn
-
 from models.tt_dit.models.transformers.transformer_mochi import MochiCheckpoint
 from models.tt_dit.models.vae.vae_mochi import MochiVAEDecoderAdapter
 from models.tt_dit.parallel.config import DiTParallelConfig, MochiVAEParallelConfig
@@ -310,7 +309,7 @@ class MochiPipeline(PipelineAPIMixin):
 
         # 3. Prepare text embeddings
         on_event(SectionStart("encoder"))
-        context, context_masks = self._text_encoder.encode_cfg(
+        torch_context, torch_context_masks = self._text_encoder.encode_cfg(
             prompts,
             negative_prompts,
             num_videos_per_prompt=num_videos_per_prompt,
@@ -347,7 +346,7 @@ class MochiPipeline(PipelineAPIMixin):
         latents = self.prepare_latents(
             batch_size * num_videos_per_prompt,
             num_channels_latents,
-            context[1].dtype,
+            torch_context[1].dtype,
         )
 
         # 5. Prepare timestep
@@ -368,34 +367,43 @@ class MochiPipeline(PipelineAPIMixin):
             for i, t in enumerate(timesteps):
                 timestep = torch.tensor([t], dtype=torch.float32)
 
-                temb_uncond, context_uncond = self._transformer.prepare_timestep_text_features(
-                    timestep, context[0], context_masks[0]
+                temb, context = self._transformer.prepare_timestep_text_features(
+                    timestep, torch_context[0], torch_context_masks[0]
                 )
                 velocity_pred_uncond = self._tracer(
                     spatial_1BNI=latents,
-                    temb_11BD=temb_uncond,
-                    prompt_1BLP=context_uncond,
+                    temb_11BD=temb,
+                    prompt_1BLP=context,
                     rope_cos_1HND=rope_cos if i == 0 else self._tracer.inputs["rope_cos_1HND"],
                     rope_sin_1HND=rope_sin if i == 0 else self._tracer.inputs["rope_sin_1HND"],
                     trans_mat=trans_mat if i == 0 else self._tracer.inputs["trans_mat"],
                     N=latents_sequence_length,
                     traced=traced,
                 )
+
+                # latents can be overwritten by trace execution, use the captured input instead,
+                # which is safe.
                 latents = self._tracer.inputs["spatial_1BNI"]
 
-                temb_cond, context_cond = self._transformer.prepare_timestep_text_features(
-                    timestep, context[1], context_masks[1]
+                # Move to CPU memory since the output tensor will be overwritten by the next trace
+                # execution.
+                velocity_pred_uncond = velocity_pred_uncond.cpu()
+
+                temb, context = self._transformer.prepare_timestep_text_features(
+                    timestep, torch_context[1], torch_context_masks[1]
                 )
                 velocity_pred_cond = self._tracer(
                     spatial_1BNI=latents,
-                    temb_11BD=temb_cond,
-                    prompt_1BLP=context_cond,
+                    temb_11BD=temb,
+                    prompt_1BLP=context,
                     rope_cos_1HND=self._tracer.inputs["rope_cos_1HND"],
                     rope_sin_1HND=self._tracer.inputs["rope_sin_1HND"],
                     trans_mat=self._tracer.inputs["trans_mat"],
                     N=latents_sequence_length,
                     traced=traced,
                 )
+
+                velocity_pred_uncond = velocity_pred_uncond.to(velocity_pred_cond.device())
 
                 velocity_pred = velocity_pred_uncond + guidance_scale * (velocity_pred_cond - velocity_pred_uncond)
                 latents = self._solver.step(step=i, latent=latents, velocity_pred=velocity_pred)
