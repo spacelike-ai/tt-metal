@@ -427,7 +427,7 @@ def _pack_latents(
 # adapted from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/pipelines/flux/pipeline_flux.py
 def _unpack_latents(latents: torch.Tensor, height: int, width: int, vae_scale_factor: int) -> torch.Tensor:
     # B, H * W, C * P * Q -> B, C, H * P, W * Q
-    batch_size, num_patches, channels = latents.shape
+    batch_size, _num_patches, channels = latents.shape
 
     height = height // vae_scale_factor
     width = width // vae_scale_factor

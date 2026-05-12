@@ -394,7 +394,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
         assert isinstance(image, torch.Tensor)
         return self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
 
-    def synchronize_devices(self):
+    def synchronize_devices(self) -> None:
         for submesh_device in self.submesh_devices:
             ttnn.synchronize_device(submesh_device)
 

@@ -14,7 +14,6 @@ from diffusers.image_processor import VaeImageProcessor
 from loguru import logger
 
 import ttnn
-
 from models.tt_dit.models.transformers.transformer_qwenimage import QwenImageCheckpoint
 from models.tt_dit.models.vae.vae_qwenimage import QwenImageVAEDecoderAdapter
 from models.tt_dit.parallel.config import (
@@ -171,10 +170,11 @@ class QwenImagePipelineConfig:
 
 
 class QwenImagePipeline(PipelineAPIMixin):
-    """
-    QwenImagePipeline is a pipeline for generating images from text prompts.
+    """QwenImagePipeline is a pipeline for generating images from text prompts.
+
     It uses a transformer to encode the text prompts and a VAE to decode the latent space.
-    Dynamic loading is controlled by the initialization state. During inference, modules will be loaded/offloaded as needed.
+    Dynamic loading is controlled by the initialization state. During inference, modules
+    will be loaded/offloaded as needed.
     """
 
     @classmethod
@@ -203,9 +203,10 @@ class QwenImagePipeline(PipelineAPIMixin):
         config: QwenImagePipelineConfig,
     ) -> None:
         if config.dynamic_load_encoder or config.dynamic_load_vae:
-            assert (
-                cache.cache_dir_is_set()
-            ), "Dynamic loading of encoder or vae is enabled but the cache directory (env variable TT_DIT_CACHE_DIR) is not set."
+            assert cache.cache_dir_is_set(), (
+                "Dynamic loading of encoder or vae is enabled but the cache directory "
+                "(env variable TT_DIT_CACHE_DIR) is not set."
+            )
 
         self._mesh_device = device
         self._parallel_config = config.dit_parallel_config
@@ -306,7 +307,7 @@ class QwenImagePipeline(PipelineAPIMixin):
         logger.info("Pipeline allocation run...")
         self(prompts=[""], num_inference_steps=2, cfg_scale=2 if config.cfg_enabled else 1, traced=False)
 
-    def _load_transformers(self, idx) -> None:
+    def _load_transformers(self, idx: int) -> None:
         """Load transformer weights to device. Called lazily for device encoder path."""
         if self.transformers[idx].is_loaded():
             return
@@ -320,7 +321,7 @@ class QwenImagePipeline(PipelineAPIMixin):
 
         ttnn.synchronize_device(self._submesh_devices[idx])
 
-    def _deallocate_transformers(self, idx) -> None:
+    def _deallocate_transformers(self, idx: int) -> None:
         """Deallocate transformer weights from device to free memory."""
         if not self.transformers[idx].is_loaded():
             return
@@ -330,14 +331,14 @@ class QwenImagePipeline(PipelineAPIMixin):
         ttnn.synchronize_device(self._submesh_devices[idx])
 
     @staticmethod
-    def get_mesh_shape(mesh_device, parallel_factor):
+    def get_mesh_shape(mesh_device: ttnn.MeshDevice, parallel_factor: ParallelFactor) -> ttnn.MeshShape:
         mesh_shape = list(mesh_device.shape)
         mesh_shape[parallel_factor.mesh_axis] = parallel_factor.factor
         mesh_shape[1 - parallel_factor.mesh_axis] = mesh_device.shape.mesh_size() // parallel_factor.factor
         return ttnn.MeshShape(tuple(mesh_shape))
 
     # TODO: Configure the correct parallel config
-    def get_wan_vae_parallel_config(self):
+    def get_wan_vae_parallel_config(self) -> VaeHWParallelConfig:
         return VaeHWParallelConfig(
             height_parallel=ParallelFactor(
                 factor=self.vae_device.shape[self._vae_parallel_config.tensor_parallel.mesh_axis],
@@ -424,7 +425,7 @@ class QwenImagePipeline(PipelineAPIMixin):
 
         on_event(SectionStart("encoder"))
         with self._reshape_encoder():
-            torch_context, prompt_mask = self._text_encoder.encode_cfg(
+            torch_context, _prompt_mask = self._text_encoder.encode_cfg(
                 prompts,
                 negative_prompts,
                 num_images_per_prompt=num_images_per_prompt,
@@ -536,7 +537,7 @@ class QwenImagePipeline(PipelineAPIMixin):
 
         return self.transformers[submesh_idx].forward(spatial=latents, **kwargs)
 
-    def synchronize_devices(self):
+    def synchronize_devices(self) -> None:
         for device in self._submesh_devices:
             ttnn.synchronize_device(device)
 

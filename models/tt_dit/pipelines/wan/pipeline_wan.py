@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 import tqdm
@@ -15,7 +15,6 @@ from diffusers.video_processor import VideoProcessor
 from loguru import logger
 
 import ttnn
-
 from models.tt_dit.models.transformers.wan2_2.transformer_wan import WanCheckpoint, WanTransformer3DModel
 from models.tt_dit.models.vae.vae_wan2_1 import WanVAEDecoderAdapter
 from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VaeHWParallelConfig
@@ -204,38 +203,6 @@ class WanPipelineConfig:
         )
 
 
-EXAMPLE_DOC_STRING = """
-    Examples:
-        ```python
-        >>> import torch
-        >>> from diffusers.utils import export_to_video
-        >>> from diffusers import AutoencoderKLWan, WanPipeline
-        >>> from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
-
-        >>> # Available models: Wan-AI/Wan2.1-T2V-14B-Diffusers, Wan-AI/Wan2.1-T2V-1.3B-Diffusers
-        >>> model_id = "Wan-AI/Wan2.1-T2V-14B-Diffusers"
-        >>> vae = AutoencoderKLWan.from_pretrained(model_id, subfolder="vae", torch_dtype=torch.float32)
-        >>> pipe = WanPipeline.from_pretrained(model_id, vae=vae, torch_dtype=torch.bfloat16)
-        >>> flow_shift = 5.0  # 5.0 for 720P, 3.0 for 480P
-        >>> pipe.scheduler = UniPCMultistepScheduler.from_config(pipe.scheduler.config, flow_shift=flow_shift)
-        >>> pipe.to("cuda")
-
-        >>> prompt = "A cat and a dog baking a cake together in a kitchen. The cat is carefully measuring flour, while the dog is stirring the batter with a wooden spoon. The kitchen is cozy, with sunlight streaming through the window."
-        >>> negative_prompt = "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
-
-        >>> output = pipe(
-        ...     prompt=prompt,
-        ...     negative_prompt=negative_prompt,
-        ...     height=720,
-        ...     width=1280,
-        ...     num_frames=81,
-        ...     guidance_scale=5.0,
-        ... ).frames[0]
-        >>> export_to_video(output, "output.mp4", fps=16)
-        ```
-"""
-
-
 @dataclass
 class TransformerState:
     model: WanTransformer3DModel
@@ -246,8 +213,7 @@ class TransformerState:
 
 
 class WanPipeline(PipelineAPIMixin):
-    r"""
-    Pipeline for text-to-video generation using Wan.
+    r"""Pipeline for text-to-video generation using Wan.
 
     Args:
         mesh_device (`ttnn.MeshDevice`):
@@ -433,10 +399,10 @@ class WanPipeline(PipelineAPIMixin):
             ttnn.copy(prompt_1BLP, buffer)
         return buffer
 
-    def _prepare_text_encoder(self):
+    def _prepare_text_encoder(self) -> None:
         self._text_encoder.prepare()
 
-    def _prepare_transformer(self, idx: int):
+    def _prepare_transformer(self, idx: int) -> None:
         state = self.transformer_states[idx]
         state.checkpoint.load(
             state.model,
@@ -453,7 +419,7 @@ class WanPipeline(PipelineAPIMixin):
         ts: TransformerState,
         permuted_latent_tt: ttnn.Tensor,
         mask: torch.Tensor,
-        cond_latents,
+        cond_latents: ttnn.Tensor | None,
         rope_args: dict,
         latents_sequence_length: int,
         latents_batch_size: int,
@@ -495,10 +461,9 @@ class WanPipeline(PipelineAPIMixin):
             velocity_pred=permuted_velocity_pred_tt,
         )
 
-    def get_model_input(self, latents, cond_latents):
-        """
-        Adapter function to enable I2V. For base T2V, just return the latents.
-        """
+    def get_model_input(self, latents: ttnn.Tensor, cond_latents: ttnn.Tensor | None) -> ttnn.Tensor:
+        """Adapter function to enable I2V. For base T2V, just return the latents."""
+        del cond_latents
         return latents
 
     def prepare_latents(
@@ -509,9 +474,11 @@ class WanPipeline(PipelineAPIMixin):
         height: int = 480,
         width: int = 832,
         num_frames: int = 81,
-        dtype: Optional[torch.dtype] = None,
-        device: Optional[torch.device] = None,
+        dtype: torch.dtype | None = None,
+        device: torch.device | None = None,
     ) -> torch.Tensor:
+        del image_prompt, dtype
+
         num_latent_frames = (num_frames - 1) // self.vae_scale_factor_temporal + 1
         shape = (
             batch_size,
@@ -524,7 +491,7 @@ class WanPipeline(PipelineAPIMixin):
         latents = torch.randn(shape, dtype=torch.float32, device=torch.device(device))
         return latents, None
 
-    DEFAULT_NEGATIVE_PROMPT = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
+    DEFAULT_NEGATIVE_PROMPT = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"  # noqa: E501, RUF001
 
     @torch.no_grad()
     def __call__(
@@ -535,10 +502,10 @@ class WanPipeline(PipelineAPIMixin):
         image_prompt=None,
         num_inference_steps: int,
         guidance_scale: float = 4.0,
-        guidance_scale_2: Optional[float] = 3.0,
-        num_videos_per_prompt: Optional[int] = 1,
+        guidance_scale_2: float | None = 3.0,
+        num_videos_per_prompt: int | None = 1,
         seed: int = 0,
-        output_type: Optional[str] = "np",
+        output_type: str | None = "np",
         traced: bool = False,
         on_event: PipelineEventCallback | None = None,
     ):
@@ -559,14 +526,17 @@ class WanPipeline(PipelineAPIMixin):
             raise ValueError(msg)
 
         if height % 16 != 0 or width % 16 != 0:
-            raise ValueError(f"`height` and `width` have to be divisible by 16 but are {height} and {width}.")
+            msg = f"`height` and `width` have to be divisible by 16 but are {height} and {width}."
+            raise ValueError(msg)
 
         if self._boundary_ratio is None and guidance_scale_2 is not None:
-            raise ValueError("`guidance_scale_2` is only supported when the pipeline's `boundary_ratio` is not None.")
+            msg = "`guidance_scale_2` is only supported when the pipeline's `boundary_ratio` is not None."
+            raise ValueError(msg)
 
         if num_frames % self.vae_scale_factor_temporal != 1:
             logger.warning(
-                f"`num_frames - 1` has to be divisible by {self.vae_scale_factor_temporal}. Rounding to the nearest number."
+                f"`num_frames - 1` has to be divisible by {self.vae_scale_factor_temporal}. "
+                "Rounding to the nearest number."
             )
             num_frames = num_frames // self.vae_scale_factor_temporal * self.vae_scale_factor_temporal + 1
         num_frames = max(num_frames, 1)
@@ -577,7 +547,6 @@ class WanPipeline(PipelineAPIMixin):
         self.transformer_states[0].guidance_scale = guidance_scale
         self.transformer_states[1].guidance_scale = guidance_scale_2
 
-        # device = self._execution_device
         device = "cpu"
 
         batch_size = len(prompts)
@@ -733,10 +702,10 @@ class WanPipeline(PipelineAPIMixin):
         on_event(SectionEnd("vae"))
         return video
 
-    def synchronize_devices(self):
+    def synchronize_devices(self) -> None:
         ttnn.synchronize_device(self.mesh_device)
 
-    def release_traces(self):
+    def release_traces(self) -> None:
         for model in (self.transformer, self.transformer_2):
             tracer = WanTransformer3DModel.combined_step._tracers.get(model)
             if tracer is not None:

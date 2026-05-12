@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 import tqdm
@@ -160,8 +160,7 @@ class MochiPipelineConfig:
 
 
 class MochiPipeline(PipelineAPIMixin):
-    r"""
-    The mochi pipeline for text-to-video generation.
+    r"""The mochi pipeline for text-to-video generation.
 
     Reference: https://github.com/genmoai/models
     """
@@ -296,12 +295,12 @@ class MochiPipeline(PipelineAPIMixin):
         negative_prompts: Sequence[str] | None = None,
         num_inference_steps: int,
         guidance_scale: float = 4.5,
-        num_videos_per_prompt: Optional[int] = 1,
+        num_videos_per_prompt: int | None = 1,
         seed: int = 0,
         traced: bool = False,
         vae_traced: bool | None = None,
         on_event: PipelineEventCallback | None = None,
-    ):
+    ) -> torch.Tensor:
         on_event = on_event if on_event is not None else null_callback
         negative_prompts = negative_prompts if negative_prompts is not None else [""] * len(prompts)
 
