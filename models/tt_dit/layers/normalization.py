@@ -202,6 +202,7 @@ class DistributedRMSNorm(Module):
         rope_cos=None,
         rope_sin=None,
         trans_mat=None,
+        dtype=None,
     ) -> ttnn.Tensor:
         expected_dim = self.embedding_dim // self.mesh_width
         if x.shape[-1] != expected_dim:
@@ -232,6 +233,7 @@ class DistributedRMSNorm(Module):
             transformation_mat=trans_mat,
             rope_cos=rope_cos,
             rope_sin=rope_sin,
+            dtype=dtype,
         )
         return x
 
