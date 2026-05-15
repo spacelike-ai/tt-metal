@@ -7,8 +7,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 import tqdm
+from diffusers.pipelines.mochi.pipeline_mochi import linear_quadratic_schedule
+from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.video_processor import VideoProcessor
 from loguru import logger
 
@@ -20,7 +23,7 @@ from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
 from models.tt_dit.pipelines.mochi.text_encoder import TextEncoder
 from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
-from models.tt_dit.solvers import EulerSolver, schedules
+from models.tt_dit.solvers import EulerSolver
 from models.tt_dit.utils import cache
 from models.tt_dit.utils.mesh import reshape_device
 from models.tt_dit.utils.tracing import Tracer
@@ -245,10 +248,11 @@ class MochiPipeline(PipelineAPIMixin):
                 topology=ttnn.Topology.Linear,
             )
 
+        checkpoint_name = config.checkpoint_name
+        self._scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(checkpoint_name, subfolder="scheduler")
         self._solver = EulerSolver()
 
         # Load pretrained T5 text encoder and tokenizer (Torch)
-        checkpoint_name = config.checkpoint_name
         self._text_encoder = TextEncoder(
             checkpoint_name=checkpoint_name,
             force_zeros_for_empty_prompt=config.force_zeros_for_empty_prompt,
@@ -360,10 +364,10 @@ class MochiPipeline(PipelineAPIMixin):
 
         # 5. Prepare timestep
         # from https://github.com/genmoai/models/blob/075b6e36db58f1242921deff83a1066887b9c9e1/src/mochi_preview/infer.py#L77
-        sigmas, alphas = schedules.linear_quadratic(num_inference_steps, threshold_noise=0.025)
-        sigmas, alphas = alphas, sigmas  # equivalent to diffuser's invert_sigmas=True
-        self._solver.set_schedule(sigmas, alphas)
-        timesteps = [s * 1000 for s in sigmas[:-1]]
+        sigmas = np.array(linear_quadratic_schedule(num_inference_steps, threshold_noise=0.025))
+        self._scheduler.set_timesteps(sigmas=sigmas)
+        self._solver.set_schedule(self._scheduler.sigmas.tolist())
+        timesteps = self._scheduler.timesteps
 
         # Upload spatial latents and pre-compute rope features once before the loop.
         _, _, f, h, w = latents.shape

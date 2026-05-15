@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 import tqdm
 from diffusers.image_processor import VaeImageProcessor
+from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from loguru import logger
 from PIL import Image
 
@@ -24,7 +25,7 @@ from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribut
 from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
 from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
 from models.tt_dit.pipelines.stable_diffusion_35_large.text_encoder import TextEncoder
-from models.tt_dit.solvers import EulerSolver, schedules
+from models.tt_dit.solvers import EulerSolver
 from models.tt_dit.utils.mesh import reshape_device
 from models.tt_dit.utils.tensor import from_torch_to_devices
 from models.tt_dit.utils.tracing import Tracer
@@ -191,6 +192,7 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
             ttnn.synchronize_device(submesh_device)
 
         self._tracers = [Tracer(self._traced_step, device=submesh, prep_run=False) for submesh in self.submesh_devices]
+        self._scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(checkpoint_name, subfolder="scheduler")
         self._solvers = [EulerSolver() for _ in self.submesh_devices]
 
         self._num_channels_latents = checkpoint.num_channels_latents
@@ -283,12 +285,11 @@ class StableDiffusion3Pipeline(PipelineAPIMixin):
 
         logger.info("preparing timesteps...")
 
-        shift = 3.0
-        sigma_small = shift * 0.001 / (1 + (shift - 1) * 0.001)
-        sigmas, alphas = schedules.shifted_linear(num_inference_steps, shift=shift, sigma_small=sigma_small)
+        self._scheduler.set_timesteps(num_inference_steps)
+        sigmas = self._scheduler.sigmas.tolist()
         for solver in self._solvers:
-            solver.set_schedule(sigmas, alphas)
-        timesteps = [s * 1000 for s in sigmas[:-1]]
+            solver.set_schedule(sigmas)
+        timesteps = self._scheduler.timesteps
 
         logger.info("preparing latents...")
 

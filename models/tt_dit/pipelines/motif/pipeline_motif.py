@@ -262,12 +262,12 @@ class MotifPipeline(PipelineAPIMixin):
         on_event(SectionEnd("encoder"))
 
         logger.info("preparing timesteps...")
-        sigmas, alphas = _schedule(
+        sigmas = _schedule(
             step_count=num_inference_steps,
             linear_quadratic_emulating_steps=linear_quadratic_emulating_steps,
         )
         for solver in self._solvers:
-            solver.set_schedule(sigmas=sigmas, alphas=alphas)
+            solver.set_schedule(sigmas)
 
         logger.info("preparing inputs...")
         latents = self._random_latents(batch_size=prompt_count * num_images_per_prompt, seed=seed)
@@ -370,7 +370,7 @@ class MotifPipeline(PipelineAPIMixin):
         return self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
 
 
-def _schedule(*, step_count: int, linear_quadratic_emulating_steps: int) -> tuple[list[float], list[float]]:
+def _schedule(*, step_count: int, linear_quadratic_emulating_steps: int) -> list[float]:
     """A slight variation of ``schedules.linear_quadratic``."""
     assert step_count % 2 == 0
 
@@ -382,6 +382,5 @@ def _schedule(*, step_count: int, linear_quadratic_emulating_steps: int) -> tupl
     sigmas2 = torch.linspace(0, 1, s // 2 + 1).pow(2) * a - a
 
     sigmas = torch.concat([sigmas1, sigmas2])
-    alphas = 1 - sigmas
 
-    return sigmas.tolist(), alphas.tolist()
+    return sigmas.tolist()

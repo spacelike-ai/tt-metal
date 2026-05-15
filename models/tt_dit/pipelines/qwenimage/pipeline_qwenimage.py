@@ -4,13 +4,14 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 import tqdm
 from diffusers.image_processor import VaeImageProcessor
+from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from loguru import logger
 
 import ttnn
@@ -28,7 +29,7 @@ from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribut
 from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
 from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
 from models.tt_dit.pipelines.qwenimage.text_encoder import TextEncoder
-from models.tt_dit.solvers import EulerSolver, schedules
+from models.tt_dit.solvers import EulerSolver
 from models.tt_dit.utils import cache
 from models.tt_dit.utils.mesh import reshape_device
 from models.tt_dit.utils.tensor import from_torch_to_devices
@@ -261,6 +262,7 @@ class QwenImagePipeline(PipelineAPIMixin):
             for mgr in self._ccl_managers
         ]
         self._tracers = [Tracer(self._traced_step, device=device, prep_run=False) for device in self._submesh_devices]
+        self._scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(self._checkpoint_name, subfolder="scheduler")
         self._solvers = [EulerSolver() for _ in self._submesh_devices]
         self._transformers_loaded = False
 
@@ -440,14 +442,14 @@ class QwenImagePipeline(PipelineAPIMixin):
 
         logger.info("preparing timesteps...")
 
-        mu = _calculate_shift(latents_sequence_length, 256, 8192, 0.5, 0.9)
-        sigmas, _ = schedules.shifted_linear(
-            num_inference_steps, shift=math.exp(mu), sigma_small=1 / num_inference_steps
+        self._scheduler.set_timesteps(
+            sigmas=np.linspace(1.0, 1 / num_inference_steps, num_inference_steps),
+            mu=_calculate_shift(latents_sequence_length, self._scheduler),
         )
-        sigmas, alphas = _stretch_to_terminal(sigmas, terminal=0.02)
+        sigmas = self._scheduler.sigmas.tolist()
         for solver in self._solvers:
-            solver.set_schedule(sigmas, alphas)
-        timesteps = [s * 1000 for s in sigmas[:-1]]
+            solver.set_schedule(sigmas)
+        timesteps = self._scheduler.timesteps
 
         logger.info("preparing latents...")
 
@@ -593,23 +595,12 @@ class QwenImagePipeline(PipelineAPIMixin):
         return self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
 
 
-def _calculate_shift(
-    image_seq_len: int,
-    base_seq_len: int,
-    max_seq_len: int,
-    base_shift: float,
-    max_shift: float,
-) -> float:
+def _calculate_shift(image_seq_len: int, scheduler: FlowMatchEulerDiscreteScheduler) -> float:
+    base_seq_len = scheduler.config.get("base_image_seq_len", 256)
+    max_seq_len = scheduler.config.get("max_image_seq_len", 4096)
+    base_shift = scheduler.config.get("base_shift", 0.5)
+    max_shift = scheduler.config.get("max_shift", 1.15)
+
     m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
     b = base_shift - m * base_seq_len
     return image_seq_len * m + b
-
-
-def _stretch_to_terminal(sigmas: list[float], terminal: float) -> tuple[list[float], list[float]]:
-    inner = sigmas[:-1]
-    one_minus = [1 - s for s in inner]
-    scale = one_minus[-1] / (1 - terminal)
-    sigmas = [1 - om / scale for om in one_minus]
-    sigmas.append(0.0)
-    alphas = [1 - s for s in sigmas]
-    return sigmas, alphas

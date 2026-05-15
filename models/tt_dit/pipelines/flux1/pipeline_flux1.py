@@ -4,13 +4,14 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 import tqdm
 from diffusers.image_processor import VaeImageProcessor
+from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from loguru import logger
 
 import ttnn
@@ -23,7 +24,7 @@ from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribut
 from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
 from models.tt_dit.pipelines.flux1.text_encoder import TextEncoder
 from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
-from models.tt_dit.solvers import EulerSolver, schedules
+from models.tt_dit.solvers import EulerSolver
 from models.tt_dit.utils.tensor import from_torch_to_devices
 from models.tt_dit.utils.tracing import Tracer
 
@@ -170,6 +171,7 @@ class Flux1Pipeline(PipelineAPIMixin):
             ttnn.synchronize_device(submesh_device)
 
         self._tracers = [Tracer(self._traced_step, device=device, prep_run=False) for device in self._submesh_devices]
+        self._scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(checkpoint_name, subfolder="scheduler")
         self._solvers = [EulerSolver() for _ in self._submesh_devices]
 
         self._pos_embed = checkpoint.pos_embed
@@ -268,16 +270,14 @@ class Flux1Pipeline(PipelineAPIMixin):
 
         logger.info("preparing timesteps...")
 
-        if self._with_guidance_embeds:  # FLUX.1 [dev]
-            mu = _calculate_shift(latents_sequence_length, 256, 4096, 0.5, 1.15)
-            sigmas, alphas = schedules.shifted_linear(
-                num_inference_steps, shift=math.exp(mu), sigma_small=1 / num_inference_steps
-            )
-        else:  # FLUX.1 [schnell]
-            sigmas, alphas = schedules.linear(num_inference_steps, sigma_small=1 / num_inference_steps)
+        self._scheduler.set_timesteps(
+            sigmas=np.linspace(1.0, 1 / num_inference_steps, num_inference_steps),
+            mu=_calculate_shift(latents_sequence_length, self._scheduler),
+        )
+        sigmas = self._scheduler.sigmas.tolist()
         for solver in self._solvers:
-            solver.set_schedule(sigmas, alphas)
-        timesteps = [s * 1000 for s in sigmas[:-1]]
+            solver.set_schedule(sigmas)
+        timesteps = self._scheduler.timesteps
 
         torch_guidance = (
             torch.full([prompt_count * num_images_per_prompt], fill_value=guidance_scale)
@@ -451,13 +451,12 @@ def _latent_image_ids(*, height: int, width: int) -> torch.Tensor:
     return latent_image_ids.reshape(latent_image_id_height * latent_image_id_width, latent_image_id_channels)
 
 
-def _calculate_shift(
-    image_seq_len: int,
-    base_seq_len: int,
-    max_seq_len: int,
-    base_shift: float,
-    max_shift: float,
-) -> float:
+def _calculate_shift(image_seq_len: int, scheduler: FlowMatchEulerDiscreteScheduler) -> float:
+    base_seq_len = scheduler.config.get("base_image_seq_len", 256)
+    max_seq_len = scheduler.config.get("max_image_seq_len", 4096)
+    base_shift = scheduler.config.get("base_shift", 0.5)
+    max_shift = scheduler.config.get("max_shift", 1.15)
+
     m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
     b = base_shift - m * base_seq_len
     return image_seq_len * m + b

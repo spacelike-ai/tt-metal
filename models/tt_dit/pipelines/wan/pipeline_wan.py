@@ -21,8 +21,10 @@ from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConf
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
 from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
+from diffusers.schedulers import UniPCMultistepScheduler
+
 from models.tt_dit.pipelines.wan.text_encoder import TextEncoder
-from models.tt_dit.solvers import UniPCSolver, UniPCVariant, schedules
+from models.tt_dit.solvers import UniPCSolver, UniPCVariant
 from models.tt_dit.utils import tensor
 from models.tt_dit.utils.tensor import float32_tensor
 
@@ -109,7 +111,6 @@ class WanPipelineConfig:
     encoder_parallel_config: EncoderParallelConfig
     vae_parallel_config: VaeHWParallelConfig
 
-    flow_shift: float
     boundary_ratio: float | None
     expand_timesteps: bool
     dynamic_load: bool
@@ -137,7 +138,6 @@ class WanPipelineConfig:
         dit_parallel_config: DiTParallelConfig | None = None,
         encoder_parallel_config: EncoderParallelConfig | None = None,
         vae_parallel_config: VaeHWParallelConfig | None = None,
-        flow_shift: float = 12.0,
         boundary_ratio: float | None = 0.875,
         expand_timesteps: bool = False,
         dynamic_load: bool | None = None,
@@ -181,7 +181,6 @@ class WanPipelineConfig:
             dit_parallel_config=dit_parallel_config,
             encoder_parallel_config=encoder_parallel_config,
             vae_parallel_config=vae_parallel_config,
-            flow_shift=flow_shift,
             boundary_ratio=boundary_ratio,
             expand_timesteps=expand_timesteps,
             dynamic_load=dynamic_load if dynamic_load is not None else preset["dynamic_load"],
@@ -291,7 +290,6 @@ class WanPipeline(PipelineAPIMixin):
         self._width = config.width
         self._num_frames = config.num_frames
 
-        self._flow_shift = config.flow_shift
         self._checkpoint = WanCheckpoint(config.checkpoint_name, subfolder="transformer")
         self._checkpoint_2 = WanCheckpoint(config.checkpoint_name, subfolder="transformer_2")
 
@@ -356,7 +354,13 @@ class WanPipeline(PipelineAPIMixin):
             TransformerState(self.transformer_2, self._checkpoint_2, guidance_scale=3.0),
         ]
 
-        self._solver = UniPCSolver(order=2, variant=UniPCVariant.B2)
+        self._scheduler = UniPCMultistepScheduler.from_pretrained(
+            self.checkpoint_name, subfolder="scheduler", flow_shift=12.0
+        )
+        self._solver = UniPCSolver(
+            order=self._scheduler.config.solver_order,
+            variant=UniPCVariant(self._scheduler.config.solver_type),
+        )
 
         # persistent latent buffers to enable safe tracing.
         self.latent_buffer = None
@@ -571,17 +575,9 @@ class WanPipeline(PipelineAPIMixin):
         on_event(SectionEnd("encoder"))
 
         # 4. Prepare schedule
-        (sigmas, alphas) = schedules.shifted_linear(
-            num_inference_steps, shift=self._flow_shift, sigma_small=0.001 + 0.999 / num_inference_steps
-        )
-        sigmas[0] -= 1e-6
-
-        # diffusers uses float32 for the schedule
-        sigmas = torch.tensor(sigmas, dtype=torch.float32).tolist()
-        alphas = (1 - torch.tensor(sigmas, dtype=torch.float32)).tolist()
-
-        timesteps = torch.tensor([s * 1000 for s in sigmas[:-1]])
-        self._solver.set_schedule(sigmas, alphas)
+        self._scheduler.set_timesteps(num_inference_steps)
+        self._solver.set_schedule(self._scheduler.sigmas.tolist())
+        timesteps = self._scheduler.timesteps
 
         # 5. Prepare latent variables
         torch.manual_seed(seed)
