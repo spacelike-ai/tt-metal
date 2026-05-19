@@ -10,7 +10,7 @@ from loguru import logger
 
 import ttnn
 from models.perf.benchmarking_utils import BenchmarkProfiler
-from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
+from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VaeHWParallelConfig
 from models.tt_dit.pipelines.events import profiler_event_callback
 from models.tt_dit.pipelines.fibo.pipeline_fibo import FiboPipeline, FiboPipelineConfig
 
@@ -26,11 +26,11 @@ from models.tt_dit.pipelines.fibo.pipeline_fibo import FiboPipeline, FiboPipelin
 )
 @pytest.mark.parametrize(("width", "height", "num_inference_steps"), [(1024, 1024, 20)])
 @pytest.mark.parametrize(
-    ("mesh_device", "cfg", "sp", "tp", "encoder_tp", "vae_tp", "topology", "num_links", "mesh_test_id"),
+    ("mesh_device", "cfg", "sp", "tp", "encoder_tp", "vae_height", "vae_width", "topology", "num_links", "mesh_test_id"),
     [
-        [(2, 4), (2, 0), (1, 0), (4, 1), (4, 1), (4, 1), ttnn.Topology.Linear, 1, "2x4cfg0sp0tp1"],
-        [(2, 4), (2, 1), (2, 0), (2, 1), (4, 1), (4, 1), ttnn.Topology.Linear, 1, "2x4cfg1sp0tp1"],
-        [(4, 8), (2, 1), (4, 0), (4, 1), (4, 1), (4, 1), ttnn.Topology.Linear, 4, "4x8cfg1sp0tp1"],
+        [(2, 4), (2, 0), (1, 0), (4, 1), (4, 1), (4, 1), (2, 0), ttnn.Topology.Linear, 1, "2x4cfg0sp0tp1"],
+        [(2, 4), (2, 1), (2, 0), (2, 1), (4, 1), (4, 1), (2, 0), ttnn.Topology.Linear, 1, "2x4cfg1sp0tp1"],
+        [(4, 8), (2, 1), (4, 0), (4, 1), (4, 1), (8, 1), (4, 0), ttnn.Topology.Linear, 4, "4x8cfg1sp0tp1"],
     ],
     ids=[
         "2x4cfg0sp0tp1",
@@ -40,10 +40,9 @@ from models.tt_dit.pipelines.fibo.pipeline_fibo import FiboPipeline, FiboPipelin
     indirect=["mesh_device"],
 )
 @pytest.mark.parametrize(
-    ("enable_t5_text_encoder", "use_torch_t5_text_encoder", "use_torch_clip_text_encoder"),
+    "use_torch_text_encoder",
     [
-        # pytest.param(True, True, True, id="encoder_cpu"),
-        pytest.param(True, False, False, id="encoder_device"),
+        pytest.param(False, id="encoder_device"),
     ],
 )
 @pytest.mark.parametrize(
@@ -70,13 +69,12 @@ def test_fibo_pipeline(
     sp: tuple[int, int],
     tp: tuple[int, int],
     encoder_tp: tuple[int, int],
-    vae_tp: tuple[int, int],
+    vae_height: tuple[int, int],
+    vae_width: tuple[int, int],
     topology: ttnn.Topology,
     num_links: int,
     no_prompt: bool,
-    enable_t5_text_encoder: bool,
-    use_torch_t5_text_encoder: bool,
-    use_torch_clip_text_encoder: bool,
+    use_torch_text_encoder: bool,
     traced: bool,
     mesh_test_id: str,
     use_cache: bool,
@@ -89,11 +87,12 @@ def test_fibo_pipeline(
         config=FiboPipelineConfig.default(
             dit_parallel_config=DiTParallelConfig.from_tuples(cfg=cfg, sp=sp, tp=tp),
             encoder_parallel_config=EncoderParallelConfig.from_tuple(encoder_tp),
-            vae_parallel_config=VAEParallelConfig.from_tuple(vae_tp),
+            vae_parallel_config=VaeHWParallelConfig.from_tuples(height=vae_height, width=vae_width),
             num_links=num_links,
             topology=topology,
             height=height,
             width=width,
+            use_torch_text_encoder=use_torch_text_encoder,
             checkpoint_name=model_location_generator("briaai/FIBO"),
         ),
     )
@@ -108,20 +107,12 @@ def test_fibo_pipeline(
             pytest.skip("Skipping traced test in CI environment. Use Performance test for detailed timing analysis.")
 
     prompts = [
-        "cinematic film still of Kodak Motion Picture Film (Sharp Detailed Image) An Oscar winning movie for Best "
-        "Cinematography a woman in a kimono standing on a subway train in Japan Kodak Motion Picture Film Style, "
-        "shallow depth of field, vignette, highly detailed, high budget, bokeh, cinemascope, moody, epic, gorgeous, "
-        "film grain, grainy"
+        """{"short_description": "A realistic image features a zebra standing on a concrete sidewalk next to a red fire hydrant. The zebra is positioned prominently in the center-right of the frame, facing towards the right with its head slightly lowered. The fire hydrant is in the bottom-left foreground. The background consists of a plain, light-colored wall, suggesting an urban or industrial setting. The lighting is even, highlighting the zebra's distinctive black and white stripes and the vibrant red of the hydrant.", "objects": [{"description": "A full-grown zebra with distinct black and white stripes covering its entire body. Its mane is short and upright, and its tail is long and bushy at the end. The zebra appears healthy and well-fed.", "location": "center-right", "relationship": "The zebra is standing next to the fire hydrant, appearing to be observing it or simply pausing in its vicinity.", "relative_size": "large within frame", "shape_and_color": "Elongated, equine shape with alternating black and white stripes.", "texture": "The zebra's coat appears smooth and short, typical of a mammal's fur. End of texture answer.", "appearance_details": "The stripes are sharply defined and vary in width and pattern across its body. Its muzzle is dark, and its eyes are dark and alert.", "number_of_objects": null, "pose": "Standing upright on all four legs, with its head slightly lowered and turned to its right.", "expression": "Calm and observant.", "clothing": null, "action": "Standing still.", "gender": "Unidentifiable.", "skin_tone_and_texture": null, "orientation": "Facing right."}, {"description": "A classic red fire hydrant, cylindrical in shape with various valves and caps. It has a chain connecting two of its components.", "location": "bottom-left foreground", "relationship": "The fire hydrant is situated on the sidewalk, directly in front of the zebra's left front leg.", "relative_size": "medium", "shape_and_color": "Cylindrical, bright red.", "texture": "The fire hydrant appears to have a smooth, painted metallic surface with some visible wear and tear. End of texture answer.", "appearance_details": "It has a slightly weathered appearance, with some dirt or grime near its base.", "number_of_objects": null, "pose": null, "expression": null, "clothing": null, "action": null, "gender": null, "skin_tone_and_texture": null, "orientation": "Upright."}], "background_setting": "The background is a plain, light gray concrete wall, suggesting an urban environment. Below the wall, there is a narrow strip of what appears to be dry grass or dirt, indicating a small patch of nature in an otherwise man-made setting. The ground is a concrete sidewalk with a curb separating it from a darker asphalt road.", "lighting": {"conditions": "Bright daylight", "direction": "Evenly lit, possibly from above or slightly front-lit.", "shadows": "Subtle, soft shadows are visible beneath the zebra and the fire hydrant, indicating a clear day with diffused light."}, "aesthetics": {"composition": "Centered, with the zebra occupying the majority of the frame and the fire hydrant providing a contrasting element in the foreground.", "color_scheme": "Monochromatic (black and white) for the zebra, contrasted with a vibrant red for the hydrant and neutral grays for the background.", "mood_atmosphere": "Surreal and intriguing, due to the unexpected presence of a zebra in an urban setting."}, "photographic_characteristics": {"depth_of_field": "Shallow, with the zebra and fire hydrant in sharp focus and the background slightly blurred.", "focus": "Sharp focus on subject.", "camera_angle": "Eye-level.", "lens_focal_length": "Standard."}, "style_medium": "photograph", "text_render": [], "context": "This is an art piece or conceptual photograph, likely created digitally, that plays on the juxtaposition of a wild animal in an unexpected urban environment. It could be used for advertising, editorial content, or as a standalone piece of art designed to provoke thought or amusement.", "artistic_style": "Surreal, realistic"}""",
     ]
 
     filename_prefix = f"fibo_{width}_{height}_{mesh_test_id}"
-    if enable_t5_text_encoder:
-        if use_torch_t5_text_encoder:
-            filename_prefix += "_t5cpu"
-    else:
-        filename_prefix += "_t5off"
-    if use_torch_clip_text_encoder:
-        filename_prefix += "_clipcpu"
+    if use_torch_text_encoder:
+        filename_prefix += "_enccpu"
     if not traced:
         filename_prefix += "_untraced"
 
@@ -142,8 +133,7 @@ def test_fibo_pipeline(
         images[0].save(output_filename)
         logger.info(f"Image saved as {output_filename}")
 
-        logger.info(f"CLIP encoding time: {benchmark_profiler.get_duration('clip_encoding', 0):.2f}s")
-        logger.info(f"T5 encoding time: {benchmark_profiler.get_duration('t5_encoding', 0):.2f}s")
+        logger.info(f"SmolLM3 encoding time: {benchmark_profiler.get_duration('smollm3_encoding', 0):.2f}s")
         logger.info(f"Total encoding time: {benchmark_profiler.get_duration('encoder', 0):.2f}s")
         logger.info(f"VAE decoding time: {benchmark_profiler.get_duration('vae', 0):.2f}s")
         logger.info(f"Total pipeline time: {benchmark_profiler.get_duration('total', 0):.2f}s")

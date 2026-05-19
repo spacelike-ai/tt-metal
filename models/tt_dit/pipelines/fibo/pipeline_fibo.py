@@ -2,20 +2,85 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+# Outstanding work before this pipeline runs (ordered roughly by when you'd hit each):
+#
+# TODO(fibo-1): SmolLM3 text encoder. ``encoders.smollm3.encoder_pair.SmolLm3TokenizerEncoderPair``
+#     is a placeholder import — the whole ``encoders/smollm3/`` directory needs to exist. A first
+#     cut can be torch-only (mirror ``Qwen25VlTokenizerEncoderPair`` with ``use_torch=True``) and
+#     defer the TT-NN encoder.
+#
+# TODO(fibo-2): Patchify mismatch. FIBO's transformer config has ``patch_size=1`` and
+#     ``in_channels=64``, but the Wan VAE outputs 16 channels. The 4x channel expansion is a 2x2
+#     spatial patching the diffusers FIBO pipeline does **outside** the transformer (it calls this
+#     ``do_patching``). Today ``_random_latents`` uses ``transformer.patchify`` with ``patch_size=1``
+#     and 16 channels reach the transformer when it expects 64. Add pipeline-level 2x2 patching
+#     separate from ``transformer.patchify``.
+#
+# TODO(fibo-3): RoPE preparation. The transformer's forward requires ``spatial_rope`` and
+#     ``prompt_rope`` tuples; ``_traced_step`` doesn't pass them. Mirror the QwenImage pipeline:
+#     build ``img_ids`` (3-axis: batch, h, w) and ``txt_ids`` (zeros) on CPU, call
+#     ``checkpoint.pos_embed.forward(ids)`` to get ``(cos, sin)``, ship to each submesh, thread
+#     through ``_traced_step``.
+#
+# TODO(fibo-4): Layer pad/trim. The transformer expects exactly ``num_layers + num_single_layers``
+#     (= 57) per-layer SmolLM3 hidden states. SmolLM3-3B emits ~37. Diffusers pads with the last
+#     layer repeated or trims from the start; mirror that before distributing across devices.
+#
+# TODO(fibo-5): DimFusion injection. ``transformer_fibo.FiboTransformer._dimfusion_inject`` is a
+#     no-op placeholder. It should compute
+#     ``concat(prompt[:, :, :inner_dim//2], caption_projection[i](text_layer))`` — and do so in a
+#     TP-sharded fashion (each ``caption_projection`` outputs onto the upper-half TP shards, so the
+#     concat doesn't need an extra all_gather / scatter).
+#
+# TODO(fibo-6): Joint attention mask. ``prompt_mask`` is accepted but unused — neither
+#     ``TransformerBlock`` nor ``Flux1SingleTransformerBlock`` currently accept a mask. Either
+#     thread one through, or accept the PCC hit from padding tokens participating in attention.
+#
+# TODO(fibo-7): Weight-key remapping. ``FiboTransformer._prepare_torch_state`` only renames
+#     ``norm_out``. Other top-level keys (``time_embed.time_proj.*``,
+#     ``time_embed.timestep_embedder.linear_1.*``, possibly ``caption_projection.*``) likely need
+#     adjustment to match our class structure. Expect a round of fixups on the first
+#     ``cache.load_model`` attempt.
+#
+# TODO(fibo-8): Sequence-length kwargs. The transformer forward declares
+#     ``spatial_sequence_length`` and ``prompt_sequence_length`` as required kwargs; the pipeline
+#     doesn't supply them in ``_traced_step``.
+#
+# TODO(fibo-9): VAE mesh reshape. ``_decode_latents`` wraps the VAE call in
+#     ``self._reshape_encoder()``, which sets up the encoder's TP layout. The Wan VAE wants an
+#     HW-parallel layout instead. Add a separate ``_reshape_vae()`` context manager driven by
+#     ``config.vae_parallel_config.height_parallel`` / ``width_parallel`` (mirror QwenImage's
+#     ``_reshape_vae``).
+#
+# TODO(fibo-10): Un-patchify mismatch. Companion to TODO(fibo-2): once we add pipeline-level 2x2
+#     patching on the input side, the output side needs to undo it before handing 16-channel
+#     latents to the VAE. ``transformer.unpatchify`` with ``patch_size=1`` leaves the spatial
+#     tensor at 64 channels; the VAE expects 16.
+#
+# TODO(fibo-11): ``num_inference_steps`` has no default. FIBO's diffusers pipeline defaults to 50;
+#     ours makes the caller pass it. Default it.
+#
+# TODO(fibo-12): Stack per-layer text-encoder tensors for the tracer. ``_traced_step`` currently
+#     gets 57 distinct tensor inputs per step (one per SmolLM3 hidden state); stacking them into
+#     a single ``[57, B, S, D]`` tensor would simplify trace capture and replay once DimFusion is
+#     wired up.
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 import tqdm
 from diffusers.image_processor import VaeImageProcessor
+from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from loguru import logger
 
 import ttnn
 from models.tt_dit.models.transformers.transformer_fibo import FiboCheckpoint
-from models.tt_dit.models.vae.vae_sd35 import VAEDecoderAdapter
-from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
+from models.tt_dit.models.vae.vae_qwenimage import QwenImageVAEDecoderAdapter
+from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VaeHWParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
 from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
@@ -33,9 +98,13 @@ if TYPE_CHECKING:
 
     from PIL import Image
 
-_VAE_SCALE_FACTOR = 8
+# Wan 2.2 VAE compresses 16x in each spatial dimension; FIBO additionally patchifies 2x2 inside
+# the transformer.
+_VAE_SCALE_FACTOR = 16
+_PATCH_SIZE = 2
 _LATENT_CHANNELS = 16
 _DEFAULT_CHECKPOINT = "briaai/FIBO"
+_DEFAULT_MAX_SEQUENCE_LENGTH = 3000
 
 _PRESETS: dict[tuple[int, ...], dict] = {
     (2, 4): {
@@ -43,7 +112,8 @@ _PRESETS: dict[tuple[int, ...], dict] = {
         "sp": (1, 0),
         "tp": (4, 1),
         "encoder_tp": (4, 1),
-        "vae_tp": (4, 1),
+        "vae_height": (4, 1),
+        "vae_width": (2, 0),
         "num_links": 1,
     },
     (4, 8): {
@@ -51,7 +121,8 @@ _PRESETS: dict[tuple[int, ...], dict] = {
         "sp": (4, 0),
         "tp": (4, 1),
         "encoder_tp": (4, 1),
-        "vae_tp": (4, 1),
+        "vae_height": (8, 1),
+        "vae_width": (4, 0),
         "num_links": 4,
     },
 }
@@ -64,16 +135,15 @@ class FiboPipelineConfig:
 
     dit_parallel_config: DiTParallelConfig
     encoder_parallel_config: EncoderParallelConfig
-    vae_parallel_config: VAEParallelConfig
+    vae_parallel_config: VaeHWParallelConfig
 
-    enable_t5_text_encoder: bool
-    use_torch_t5_text_encoder: bool
-    use_torch_clip_text_encoder: bool
-    use_torch_vae: bool
+    use_torch_text_encoder: bool
+    use_torch_vae_decoder: bool
 
     height: int
     width: int
     cfg_enabled: bool
+    max_sequence_length: int
 
     checkpoint_name: str
 
@@ -86,14 +156,13 @@ class FiboPipelineConfig:
         num_links: int | None = None,
         dit_parallel_config: DiTParallelConfig | None = None,
         encoder_parallel_config: EncoderParallelConfig | None = None,
-        vae_parallel_config: VAEParallelConfig | None = None,
-        enable_t5_text_encoder: bool = True,
-        use_torch_t5_text_encoder: bool = False,
-        use_torch_clip_text_encoder: bool = False,
-        use_torch_vae: bool = False,
+        vae_parallel_config: VaeHWParallelConfig | None = None,
+        use_torch_text_encoder: bool = False,
+        use_torch_vae_decoder: bool = False,
         height: int = 1024,
         width: int = 1024,
         cfg_enabled: bool = True,
+        max_sequence_length: int = _DEFAULT_MAX_SEQUENCE_LENGTH,
         checkpoint_name: str = _DEFAULT_CHECKPOINT,
     ) -> FiboPipelineConfig:
         """Build a fully populated config, picking parallelism defaults from ``mesh_shape``."""
@@ -105,14 +174,14 @@ class FiboPipelineConfig:
             dit_parallel_config=dit_parallel_config
             or DiTParallelConfig.from_tuples(cfg=preset["cfg"], sp=preset["sp"], tp=preset["tp"]),
             encoder_parallel_config=encoder_parallel_config or EncoderParallelConfig.from_tuple(preset["encoder_tp"]),
-            vae_parallel_config=vae_parallel_config or VAEParallelConfig.from_tuple(preset["vae_tp"]),
-            enable_t5_text_encoder=enable_t5_text_encoder,
-            use_torch_t5_text_encoder=use_torch_t5_text_encoder,
-            use_torch_clip_text_encoder=use_torch_clip_text_encoder,
-            use_torch_vae=use_torch_vae,
+            vae_parallel_config=vae_parallel_config
+            or VaeHWParallelConfig.from_tuples(height=preset["vae_height"], width=preset["vae_width"]),
+            use_torch_text_encoder=use_torch_text_encoder,
+            use_torch_vae_decoder=use_torch_vae_decoder,
             height=height,
             width=width,
             cfg_enabled=cfg_enabled,
+            max_sequence_length=max_sequence_length,
             checkpoint_name=checkpoint_name,
         )
 
@@ -144,6 +213,7 @@ class FiboPipeline(PipelineAPIMixin):
         self._height = config.height
         self._width = config.width
         self._cfg_enabled = config.cfg_enabled
+        self._max_sequence_length = config.max_sequence_length
 
         logger.info(f"Parallel config: {config.dit_parallel_config}")
         logger.info(f"Original mesh shape: {device.shape}")
@@ -157,37 +227,39 @@ class FiboPipeline(PipelineAPIMixin):
         ]
 
         self._combiner = CFGCombiner(self._devices)
+        self._scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+            config.checkpoint_name, subfolder="scheduler"
+        )
         self._solvers = (EulerSolver(), EulerSolver()) if self._cfg_parallel else (EulerSolver(),)
-        self._image_processor = VaeImageProcessor(vae_scale_factor=_VAE_SCALE_FACTOR)
+        self._image_processor = VaeImageProcessor(vae_scale_factor=_VAE_SCALE_FACTOR * _PATCH_SIZE)
 
         logger.info("creating transformer...")
-        checkpoint = FiboCheckpoint(config.checkpoint_name)
+        self._checkpoint = FiboCheckpoint(config.checkpoint_name)
         self._transformers = [
-            checkpoint.build(
-                latents_height=config.height // _VAE_SCALE_FACTOR,
-                latents_width=config.width // _VAE_SCALE_FACTOR,
-                parallel_config=config.dit_parallel_config,
-                ccl_manager=m,
-            )
+            self._checkpoint.build(parallel_config=config.dit_parallel_config, ccl_manager=m)
             for m in self._ccl_managers
         ]
 
         with self._reshape_encoder():
-            logger.info("creating encoder...")
+            logger.info("creating text encoder...")
             self._text_encoder = TextEncoder(
-                parallel_config=config.encoder_parallel_config,
-                enable_t5=config.enable_t5_text_encoder,
-                use_torch_clip_encoder=config.use_torch_clip_text_encoder,
-                use_torch_t5_encoder=config.use_torch_t5_text_encoder,
+                checkpoint_name=config.checkpoint_name,
+                device=self._devices[0],
                 ccl_manager=self._ccl_managers[0],
+                parallel_config=config.encoder_parallel_config,
+                use_torch=config.use_torch_text_encoder,
             )
 
             logger.info("creating VAE decoder...")
-            self._vae = VAEDecoderAdapter(
-                checkpoint_name="stabilityai/stable-diffusion-3.5-large",
+            # FIBO uses Wan 2.2's VAE (AutoencoderKLWan), which shares its architecture and config
+            # shape with the QwenImage VAE — same z_dim=16, dim_mult=(1,2,4,4), num_res_blocks=2,
+            # temperal_downsample=(False, True, True). The QwenImage adapter is reusable as-is
+            # apart from instantiating AutoencoderKLQwenImage on a FIBO checkpoint, which works
+            # because the Wan-style state-dict layout matches.
+            self._vae = QwenImageVAEDecoderAdapter(
+                checkpoint_name=config.checkpoint_name,
                 parallel_config=config.vae_parallel_config,
-                skip_shift=True,  # Fibo omits the VAE shift.
-                use_torch=config.use_torch_vae,
+                use_torch=config.use_torch_vae_decoder,
                 ccl_manager=self._ccl_managers[0],
             )
 
@@ -211,17 +283,12 @@ class FiboPipeline(PipelineAPIMixin):
         self,
         *,
         prompts: Sequence[str],
-        prompts_2: Sequence[str] | None = None,
-        prompts_3: Sequence[str] | None = None,
-        negative_prompts: Sequence[str | None] | None = None,
-        negative_prompts_2: Sequence[str | None] | None = None,
-        negative_prompts_3: Sequence[str | None] | None = None,
+        negative_prompts: Sequence[str] | None = None,
         num_inference_steps: int,
         seed: int = 0,
         num_images_per_prompt: int = 1,
         cfg_scale: float = 5.0,
-        linear_quadratic_emulating_steps: int = 100,
-        negative_strategy_switch_time: float = 0.85,
+        max_sequence_length: int | None = None,
         traced: bool = False,
         vae_traced: bool | None = None,
         encoder_traced: bool | None = None,
@@ -236,59 +303,57 @@ class FiboPipeline(PipelineAPIMixin):
         vae_traced = vae_traced if vae_traced is not None else traced
         encoder_traced = encoder_traced if encoder_traced is not None else traced
         on_event = on_event if on_event is not None else null_callback
-        negative_prompts = negative_prompts or [None] * prompt_count
+        negative_prompts = negative_prompts if negative_prompts is not None else [""] * prompt_count
+        max_sequence_length = max_sequence_length if max_sequence_length is not None else self._max_sequence_length
 
         assert num_images_per_prompt == 1, "generating multiple images is not supported"
         assert prompt_count == 1, "generating multiple images is not supported"
 
-        logger.info("encoding prompts...")
+        latents_height = self._height // _VAE_SCALE_FACTOR
+        latents_width = self._width // _VAE_SCALE_FACTOR
+        latents_sequence_length = (latents_height // _PATCH_SIZE) * (latents_width // _PATCH_SIZE)
+
         on_event(SectionStart("total"))
 
+        logger.info("encoding prompts...")
         on_event(SectionStart("encoder"))
         with self._reshape_encoder():
-            (
-                torch_early_context,
-                torch_early_pooled,
-                torch_late_context,
-                torch_late_pooled,
-            ) = self._text_encoder.encode_cfg(
-                (prompts, prompts_2 or prompts, prompts_3 or prompts),
-                (negative_prompts, negative_prompts_2 or negative_prompts, negative_prompts_3 or negative_prompts),
+            torch_context, torch_layers, torch_mask = self._text_encoder.encode_cfg(
+                prompts,
+                negative_prompts,
                 num_images_per_prompt=num_images_per_prompt,
                 cfg_enabled=self._cfg_enabled,
+                max_sequence_length=max_sequence_length,
                 traced=encoder_traced,
                 on_event=on_event,
             )
         on_event(SectionEnd("encoder"))
 
         logger.info("preparing timesteps...")
-        sigmas = _schedule(
-            step_count=num_inference_steps,
-            linear_quadratic_emulating_steps=linear_quadratic_emulating_steps,
-        )
+        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
+        mu = _calculate_shift(latents_sequence_length, self._scheduler)
+        self._scheduler.set_timesteps(sigmas=sigmas, mu=mu)
+        sigmas = self._scheduler.sigmas.tolist()
         for solver in self._solvers:
             solver.set_schedule(sigmas)
+        timesteps = self._scheduler.timesteps
 
         logger.info("preparing inputs...")
         latents = self._random_latents(batch_size=prompt_count * num_images_per_prompt, seed=seed)
-        early_context = distribute_cfg(torch_early_context, devices=self._devices, on_host=traced)
-        early_pooled = distribute_cfg(torch_early_pooled, devices=self._devices, on_host=traced)
-        late_context = distribute_cfg(torch_late_context, devices=self._devices, on_host=traced)
-        late_pooled = distribute_cfg(torch_late_pooled, devices=self._devices, on_host=traced)
+        context = distribute_cfg(torch_context, devices=self._devices, on_host=traced)
+        layers = [distribute_cfg(layer, devices=self._devices, on_host=traced) for layer in torch_layers]
+        mask = distribute_cfg(torch_mask, devices=self._devices, on_host=traced)
 
         logger.info("denoising...")
         on_event(SectionStart("denoising"))
 
-        for step, t in enumerate(tqdm.tqdm(sigmas[:-1])):
+        for step, t in enumerate(tqdm.tqdm(timesteps)):
             on_event(SectionStart(f"denoising_step_{step}"))
-
-            context = early_context if t >= negative_strategy_switch_time else late_context
-            pooled = early_pooled if t >= negative_strategy_switch_time else late_pooled
 
             for idx, (device, tracer) in enumerate(zip(self._devices, self._tracers, strict=True)):
                 timestep = ttnn.full(
                     [1, 1],
-                    fill_value=t * 1000,
+                    fill_value=t,
                     layout=ttnn.TILE_LAYOUT,
                     dtype=ttnn.float32,
                     device=device,
@@ -297,8 +362,9 @@ class FiboPipeline(PipelineAPIMixin):
                 velocity_pred = tracer(
                     submesh_idx=idx,
                     latents=latents[idx],
-                    prompt=context[idx],
-                    pooled=pooled[idx],
+                    prompt=context[idx] if step == 0 else tracer.inputs["prompt"],
+                    text_encoder_layers=[layer[idx] for layer in layers] if step == 0 else tracer.inputs["text_encoder_layers"],
+                    prompt_mask=mask[idx] if step == 0 else tracer.inputs["prompt_mask"],
                     timestep=timestep,
                     traced=traced,
                 )
@@ -370,17 +436,13 @@ class FiboPipeline(PipelineAPIMixin):
         return self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
 
 
-def _schedule(*, step_count: int, linear_quadratic_emulating_steps: int) -> list[float]:
-    """A slight variation of ``schedules.linear_quadratic``."""
-    assert step_count % 2 == 0
+def _calculate_shift(image_seq_len: int, scheduler: FlowMatchEulerDiscreteScheduler) -> float:
+    """Resolution-dependent mu used by FlowMatchEulerDiscreteScheduler's dynamic shifting."""
+    base_seq_len = scheduler.config.get("base_image_seq_len", 256)
+    max_seq_len = scheduler.config.get("max_image_seq_len", 4096)
+    base_shift = scheduler.config.get("base_shift", 0.5)
+    max_shift = scheduler.config.get("max_shift", 1.15)
 
-    s = step_count
-    n = linear_quadratic_emulating_steps
-    a = s // 2 / n - 1
-
-    sigmas1 = torch.linspace(1, 0, n + 1)[: s // 2]
-    sigmas2 = torch.linspace(0, 1, s // 2 + 1).pow(2) * a - a
-
-    sigmas = torch.concat([sigmas1, sigmas2])
-
-    return sigmas.tolist()
+    m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
+    b = base_shift - m * base_seq_len
+    return image_seq_len * m + b

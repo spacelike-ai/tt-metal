@@ -1,0 +1,389 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent USA, Inc.
+
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+import os
+from typing import TYPE_CHECKING
+
+import torch
+from diffusers import BriaFiboTransformer2DModel
+
+import ttnn
+from models.common.utility_functions import is_blackhole
+
+from models.tt_dit.blocks.transformer_block import TransformerBlock, _chunk_time3d
+from models.tt_dit.layers.embeddings import TimestepEmbedding, Timesteps
+from models.tt_dit.layers.linear import ColParallelLinear, Linear
+from models.tt_dit.layers.module import Module, ModuleList
+from models.tt_dit.layers.normalization import DistributedLayerNorm
+from models.tt_dit.models.transformers.transformer_flux1 import Flux1SingleTransformerBlock
+from models.tt_dit.utils import cache
+from models.tt_dit.utils.padding import PaddingConfig
+from models.tt_dit.utils.substate import rename_substate
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from models.tt_dit.parallel.config import DiTParallelConfig
+    from models.tt_dit.parallel.manager import CCLManager
+
+
+class FiboTimestepEmbedding(Module):
+    """FIBO's combined timestep embedding.
+
+    Sinusoidal timestep projection feeding a two-layer MLP. FIBO does not use pooled text
+    projections or distilled guidance, so this is strictly simpler than
+    ``CombinedTimestepGuidanceTextProjEmbeddings``.
+    """
+
+    def __init__(self, *, embedding_dim: int, mesh_device: ttnn.MeshDevice) -> None:
+        super().__init__()
+
+        self.time_proj = Timesteps(num_channels=256, cos_first=True, mesh_device=mesh_device)
+        self.timestep_embedder = TimestepEmbedding(
+            in_channels=256, time_embed_dim=embedding_dim, mesh_device=mesh_device
+        )
+
+    def forward(self, *, timestep: ttnn.Tensor) -> ttnn.Tensor:
+        return self.timestep_embedder(self.time_proj(timestep))
+
+
+class FiboCaptionProjection(Module):
+    """Per-block linear (no bias) projecting one SmolLM3 hidden-state layer into the upper half of
+    the DiT's prompt channel space.
+
+    Diffusers reference: ``BriaFiboTextProjection``.
+    """
+
+    def __init__(self, *, in_features: int, out_features: int, mesh_device: ttnn.MeshDevice) -> None:
+        super().__init__()
+        self.linear = Linear(in_features, out_features, bias=False, mesh_device=mesh_device)
+
+    def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        return self.linear(x)
+
+
+class FiboTransformer(Module):
+    sdpa_chunk_size_map = {
+        (False, 2, 4): (128, 512),
+        (False, 8, 4): (128, 256),
+        (True, 2, 2): (128, 512),
+        (True, 8, 4): (64, 512),
+    }
+    default_sdpa_chunk_size = (128, 512)
+
+    def __init__(
+        self,
+        *,
+        patch_size: int,
+        in_channels: int,
+        num_layers: int,
+        num_single_layers: int,
+        attention_head_dim: int,
+        num_attention_heads: int,
+        joint_attention_dim: int,
+        text_encoder_dim: int,
+        out_channels: int,
+        axes_dims_rope: Sequence[int],  # noqa: ARG002 — kept for parity with Flux; rope is built on CPU
+        mesh_device: ttnn.MeshDevice,
+        ccl_manager: CCLManager | None,
+        parallel_config: DiTParallelConfig,
+        padding_config: PaddingConfig | None,
+    ) -> None:
+        super().__init__()
+
+        inner_dim = num_attention_heads * attention_head_dim
+
+        self.patch_size = patch_size
+        self.inner_dim = inner_dim
+        self.mesh_device = mesh_device
+        self.parallel_config = parallel_config
+        self.ccl_manager = ccl_manager
+
+        q_chunk_size, k_chunk_size = self.sdpa_chunk_size_map.get(
+            (
+                is_blackhole(),
+                self.parallel_config.sequence_parallel.factor,
+                self.parallel_config.tensor_parallel.factor,
+            ),
+            self.default_sdpa_chunk_size,
+        )
+
+        self.time_embed = FiboTimestepEmbedding(embedding_dim=inner_dim, mesh_device=mesh_device)
+
+        self.context_embedder = ColParallelLinear(
+            joint_attention_dim,
+            inner_dim,
+            mesh_device=mesh_device,
+            mesh_axis=parallel_config.tensor_parallel.mesh_axis,
+        )
+
+        self.x_embedder = ColParallelLinear(
+            in_channels,
+            inner_dim,
+            mesh_device=mesh_device,
+            mesh_axis=parallel_config.tensor_parallel.mesh_axis,
+        )
+
+        self.transformer_blocks = ModuleList(
+            TransformerBlock(
+                dim=inner_dim,
+                num_heads=num_attention_heads,
+                head_dim=attention_head_dim,
+                context_pre_only=False,
+                ccl_manager=ccl_manager,
+                parallel_config=parallel_config,
+                padding_config=padding_config,
+                mesh_device=mesh_device,
+                attention_k_chunk_size=k_chunk_size,
+                attention_q_chunk_size=q_chunk_size,
+            )
+            for _ in range(num_layers)
+        )
+
+        self.single_transformer_blocks = ModuleList(
+            Flux1SingleTransformerBlock(
+                dim=inner_dim,
+                num_heads=num_attention_heads,
+                head_dim=attention_head_dim,
+                ccl_manager=ccl_manager,
+                parallel_config=parallel_config,
+                padding_config=padding_config,
+                mesh_device=mesh_device,
+                attention_k_chunk_size=k_chunk_size,
+                attention_q_chunk_size=q_chunk_size,
+            )
+            for _ in range(num_single_layers)
+        )
+
+        # DimFusion: one caption projection per block. Each maps a SmolLM3 hidden state into the
+        # upper half of the DiT's prompt channel space; it is concatenated with the lower half of
+        # the running encoder_hidden_states before every block.
+        self.caption_projection = ModuleList(
+            FiboCaptionProjection(
+                in_features=text_encoder_dim,
+                out_features=inner_dim // 2,
+                mesh_device=mesh_device,
+            )
+            for _ in range(num_layers + num_single_layers)
+        )
+
+        self.time_embed_out = Linear(inner_dim, 2 * inner_dim, mesh_device=mesh_device)
+
+        self.norm_out = DistributedLayerNorm(
+            inner_dim,
+            norm_eps=1e-6,
+            norm_elementwise_affine=False,
+            bias=False,
+            mesh_device=mesh_device,
+            mesh_axis=parallel_config.tensor_parallel.mesh_axis,
+            ccl_manager=ccl_manager,
+        )
+
+        self.proj_out = Linear(
+            inner_dim,
+            patch_size * patch_size * out_channels,
+            mesh_device=mesh_device,
+        )
+
+    def _prepare_torch_state(self, state: dict[str, torch.Tensor]) -> None:
+        rename_substate(state, "norm_out.linear", "time_embed_out")
+        rename_substate(state, "norm_out.norm", "norm_out")
+
+    def forward(
+        self,
+        *,
+        spatial: ttnn.Tensor,
+        prompt: ttnn.Tensor,
+        text_encoder_layers: list[ttnn.Tensor],
+        prompt_mask: ttnn.Tensor,  # noqa: ARG002 — TODO: thread joint attention mask through blocks
+        timestep: ttnn.Tensor,
+        spatial_rope: tuple[ttnn.Tensor, ttnn.Tensor],
+        prompt_rope: tuple[ttnn.Tensor, ttnn.Tensor],
+        spatial_sequence_length: int,
+        prompt_sequence_length: int,  # noqa: ARG002 — sized by block via prompt shape
+    ) -> ttnn.Tensor:
+        """Run the model forward.
+
+        Args:
+            spatial: Tensor with shape [batch, spatial_sequence_length / sp_factor, in_channels].
+            prompt: Tensor with shape [batch, prompt_sequence_length, joint_attention_dim]. FIBO
+                builds this in the pipeline as ``concat(last_hidden_state, second_to_last)``.
+            text_encoder_layers: Per-block SmolLM3 hidden states, padded/trimmed to exactly
+                ``num_layers + num_single_layers`` entries. Each has shape
+                [batch, prompt_sequence_length, text_encoder_dim].
+            prompt_mask: Per-token mask for ``prompt``. Currently unused; see TODO.
+            timestep: Tensor with shape [batch, 1].
+            spatial_rope, prompt_rope: Cos/sin tuples for 3-axis RoPE.
+        """
+        tp_axis = self.parallel_config.tensor_parallel.mesh_axis
+        expected_layers = len(self.transformer_blocks) + len(self.single_transformer_blocks)
+        assert (
+            len(text_encoder_layers) == expected_layers
+        ), f"text_encoder_layers must have {expected_layers} entries, got {len(text_encoder_layers)}"
+
+        time_embed = self.time_embed(timestep=timestep)
+        ttnn.silu(time_embed, output_tensor=time_embed)
+        time_embed = time_embed.reshape([time_embed.shape[-2], 1, time_embed.shape[-1]])
+
+        spatial = self.x_embedder(spatial)
+        prompt = self.context_embedder(prompt)
+
+        block_id = 0
+        for block in self.transformer_blocks:
+            prompt = self._dimfusion_inject(prompt, text_encoder_layers[block_id], block_id)
+            block_id += 1
+            spatial, prompt = block.forward(
+                spatial=spatial,
+                prompt=prompt,
+                time_embed=time_embed,
+                spatial_rope=spatial_rope,
+                prompt_rope=prompt_rope,
+                spatial_sequence_length=spatial_sequence_length,
+                skip_time_embed_activation_fn=True,
+            )
+
+        prompt = ttnn.clone(prompt, dtype=spatial.dtype)
+
+        for block in self.single_transformer_blocks:
+            prompt = self._dimfusion_inject(prompt, text_encoder_layers[block_id], block_id)
+            block_id += 1
+            spatial, prompt = block.forward(
+                spatial=spatial,
+                prompt=prompt,
+                time_embed=time_embed,
+                spatial_rope=spatial_rope,
+                prompt_rope=prompt_rope,
+                spatial_sequence_length=spatial_sequence_length,
+                skip_time_embed_activation_fn=True,
+            )
+
+        spatial = ttnn.squeeze(self.norm_out(ttnn.unsqueeze(spatial, 0)), 0)
+
+        spatial_time = self.time_embed_out(time_embed)
+        [scale, shift] = _chunk_time3d(spatial_time, 2)
+
+        spatial = self.ccl_manager.all_gather_persistent_buffer(spatial, dim=2, mesh_axis=tp_axis, use_hyperparams=True)
+
+        spatial = spatial * (1 + scale) + shift
+
+        return self.proj_out(spatial)
+
+    def _dimfusion_inject(self, prompt: ttnn.Tensor, text_layer: ttnn.Tensor, block_id: int) -> ttnn.Tensor:
+        """Replace the upper half of ``prompt``'s channel axis with a per-block projection of the
+        corresponding SmolLM3 hidden state. Diffusers reference:
+
+            encoder_hidden_states = torch.cat(
+                [encoder_hidden_states[:, :, : inner_dim // 2], caption_projection[i](layer_i)],
+                dim=-1,
+            )
+
+        TODO: this implementation is correctness-first, not TP-sharding-aware. The lower-half slice
+        is supposed to read from the first ``inner_dim // 2`` channels — which spans the first half
+        of TP shards — and the new upper half should land on the second half of TP shards. Doing
+        that without an extra all_gather/scatter requires either splitting ``caption_projection`` so
+        its output lands on the upper TP shards only, or restructuring how the prompt is sharded
+        across blocks. Until that's resolved, the simplest workaround would be an
+        ``all_gather`` + ``concat`` + manual reshard; we currently do nothing and rely on the
+        caller paths to be updated. **DimFusion is not yet wired up.**
+        """
+
+        # projected = self.caption_projection[block_id](text_layer)   # [B, seq, inner_dim // 2]
+        # return concat([prompt[:, :, : inner_dim // 2], projected], dim=-1)  # [B, seq, inner_dim]
+
+        _ = (text_layer, block_id, self.caption_projection)  # silence linters until implemented
+        return prompt
+
+    def patchify(self, latents: torch.Tensor) -> torch.Tensor:
+        """Patchify a B,H,W,C latent into B,(H/P)*(W/P),C*P*P tokens."""
+        batch_size, height, width, channels = latents.shape
+        patch = self.patch_size
+
+        if height % patch != 0 or width % patch != 0:
+            msg = f"height ({height}) and width ({width}) must be divisible by patch_size ({patch})"
+            raise ValueError(msg)
+
+        latents = latents.reshape([batch_size, height // patch, patch, width // patch, patch, channels])
+        return latents.permute(0, 1, 3, 5, 2, 4).flatten(3, 5).flatten(1, 2)
+
+    def unpatchify(self, spatial: torch.Tensor, *, height: int, width: int) -> torch.Tensor:
+        """Inverse of ``patchify``."""
+        batch_size, _, _ = spatial.shape
+        patch = self.patch_size
+
+        if height % patch != 0 or width % patch != 0:
+            msg = f"height ({height}) and width ({width}) must be divisible by patch_size ({patch})"
+            raise ValueError(msg)
+
+        spatial = spatial.reshape([batch_size, height // patch, width // patch, -1, patch, patch])
+        return spatial.permute(0, 1, 4, 2, 5, 3).flatten(3, 4).flatten(1, 2)
+
+
+class FiboCheckpoint:
+    """A FIBO checkpoint: fetches weights and builds loaded transformers."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        torch_transformer = BriaFiboTransformer2DModel.from_pretrained(
+            name,
+            subfolder="transformer",
+            torch_dtype=torch.bfloat16,
+        )
+        torch_transformer.eval()
+        self._config = torch_transformer.config
+        self._state_dict = torch_transformer.state_dict()
+
+        # CPU-side positional embedding helper; kept on the checkpoint so the pipeline can prepare
+        # ropes once per call and ship them to device.
+        self.pos_embed = torch_transformer.pos_embed
+        self.joint_attention_dim: int = self._config.joint_attention_dim
+        self.text_encoder_dim: int = self._config.text_encoder_dim
+        self.patch_size: int = self._config.patch_size
+        self.in_channels: int = self._config.in_channels
+
+    def build(
+        self,
+        *,
+        ccl_manager: CCLManager,
+        parallel_config: DiTParallelConfig,
+    ) -> FiboTransformer:
+        """Construct a ``FiboTransformer`` for this checkpoint and load its weights."""
+        device = ccl_manager.mesh_device
+        c = self._config
+
+        if c.num_attention_heads % parallel_config.tensor_parallel.factor != 0:
+            padding_config = PaddingConfig.from_tensor_parallel_factor(
+                c.num_attention_heads,
+                c.attention_head_dim,
+                parallel_config.tensor_parallel.factor,
+            )
+        else:
+            padding_config = None
+
+        model = FiboTransformer(
+            patch_size=c.patch_size,
+            in_channels=c.in_channels,
+            num_layers=c.num_layers,
+            num_single_layers=c.num_single_layers,
+            attention_head_dim=c.attention_head_dim,
+            num_attention_heads=c.num_attention_heads,
+            joint_attention_dim=c.joint_attention_dim,
+            text_encoder_dim=c.text_encoder_dim,
+            out_channels=c.in_channels,
+            axes_dims_rope=c.axes_dims_rope,
+            mesh_device=device,
+            ccl_manager=ccl_manager,
+            parallel_config=parallel_config,
+            padding_config=padding_config,
+        )
+        cache.load_model(
+            model,
+            get_torch_state_dict=lambda: self._state_dict,
+            model_name=os.path.basename(self._name),
+            subfolder="transformer",
+            parallel_config=parallel_config,
+            mesh_shape=tuple(device.shape),
+        )
+        return model
