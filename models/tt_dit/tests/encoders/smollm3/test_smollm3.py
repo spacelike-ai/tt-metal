@@ -8,11 +8,10 @@ import transformers
 from loguru import logger
 
 import ttnn
-
-from models.tt_dit.encoders.smollm3.model_smollm3 import SmolLm3Encoder
+from models.tt_dit.encoders.smollm3.model_smollm3 import SmolLm3Checkpoint
 from models.tt_dit.parallel.config import EncoderParallelConfig, ParallelFactor
 from models.tt_dit.parallel.manager import CCLManager
-from models.tt_dit.utils import cache, tensor
+from models.tt_dit.utils import tensor
 from models.tt_dit.utils.check import assert_quality
 
 
@@ -54,25 +53,13 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, masked: bool) -> None:
         else None
     )
 
-    torch_model = transformers.AutoModelForCausalLM.from_pretrained("briaai/FIBO", subfolder="text_encoder")
-
-    model = SmolLm3Encoder(
-        SmolLm3Encoder.config_from_hf(torch_model.config),
+    model = SmolLm3Checkpoint("briaai/FIBO").build(
         device=mesh_device,
         parallel_config=parallel_config,
         ccl_manager=ccl_manager,
     )
 
-    state_dict = torch_model.state_dict()
-    state_dict = SmolLm3Encoder.convert_state(state_dict)
-    cache.load_model(
-        model,
-        get_torch_state_dict=lambda: state_dict,
-        model_name="FIBO",
-        subfolder="text_encoder",
-        parallel_config=parallel_config,
-        mesh_shape=tuple(mesh_device.shape),
-    )
+    torch_model = transformers.AutoModelForCausalLM.from_pretrained("briaai/FIBO", subfolder="text_encoder")
 
     tokens = torch.randint(0, torch_model.config.vocab_size, [batch_size, sequence_length])
     lengths = torch.randint(sequence_length // 4, 3 * sequence_length // 4, [batch_size])
