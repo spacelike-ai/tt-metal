@@ -22,6 +22,7 @@ from models.tt_dit.models.transformers.transformer_flux1 import Flux1SingleTrans
 from models.tt_dit.utils import cache
 from models.tt_dit.utils.padding import PaddingConfig
 from models.tt_dit.utils.substate import rename_substate
+from models.tt_dit.utils.tensor import bf16_tensor
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -51,15 +52,50 @@ class FiboTimestepEmbedding(Module):
 
 
 class FiboCaptionProjection(Module):
-    """Per-block linear (no bias) projecting one SmolLM3 hidden-state layer into the upper half of
-    the DiT's prompt channel space.
+    """Per-block projection of one SmolLM3 hidden-state layer into the upper half of the DiT's
+    prompt channel space.
 
-    Diffusers reference: ``BriaFiboTextProjection``.
+    Diffusers reference: ``BriaFiboTextProjection`` (a ``Linear(text_encoder_dim, inner_dim // 2)``).
+
+    For TP-correct DimFusion without an extra all_gather / scatter, this widens the linear from
+    ``inner_dim // 2`` to ``inner_dim`` output channels and pads the loaded weight with zeros in
+    the lower ``inner_dim // 2`` rows. The natural ColParallel shard then places only-zero outputs
+    on the lower-half TP devices and the real projection on the upper-half TP devices, so the
+    per-block injection reduces to ``prompt * mask + caption_projection(text_layer)`` — a local
+    elementwise operation. This mirrors the "re-fuse weights so the natural shard matches the
+    expected layout" trick used by ``_re_fuse_proj_out_weight`` in ``transformer_flux1``.
     """
 
-    def __init__(self, *, in_features: int, out_features: int, mesh_device: ttnn.MeshDevice) -> None:
+    def __init__(
+        self,
+        *,
+        text_encoder_dim: int,
+        inner_dim: int,
+        mesh_device: ttnn.MeshDevice,
+        mesh_axis: int,
+    ) -> None:
         super().__init__()
-        self.linear = Linear(in_features, out_features, bias=False, mesh_device=mesh_device)
+        self._inner_dim = inner_dim
+        self.linear = ColParallelLinear(
+            text_encoder_dim,
+            inner_dim,
+            bias=False,
+            mesh_device=mesh_device,
+            mesh_axis=mesh_axis,
+        )
+
+    def _prepare_torch_state(self, state: dict[str, torch.Tensor]) -> None:
+        # Diffusers stores this as ``Linear(text_encoder_dim, inner_dim // 2)``; pad to
+        # ``Linear(text_encoder_dim, inner_dim)`` with zeros in the lower-half output channels.
+        # The inner ``ColParallelLinear`` then transposes and TP-shards as usual.
+        key = "linear.weight"
+        if key in state:
+            weight = state[key]
+            assert weight.shape[0] == self._inner_dim // 2, (
+                f"caption projection weight has out_features {weight.shape[0]}, "
+                f"expected {self._inner_dim // 2}"
+            )
+            state[key] = torch.cat([torch.zeros_like(weight), weight], dim=0)
 
     def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
         return self.linear(x)
@@ -159,15 +195,31 @@ class FiboTransformer(Module):
         )
 
         # DimFusion: one caption projection per block. Each maps a SmolLM3 hidden state into the
-        # upper half of the DiT's prompt channel space; it is concatenated with the lower half of
-        # the running encoder_hidden_states before every block.
+        # upper half of the DiT's prompt channel space; ``_dimfusion_inject`` combines it with the
+        # running encoder_hidden_states before every block as ``prompt * mask + projection``.
         self.caption_projection = ModuleList(
             FiboCaptionProjection(
-                in_features=text_encoder_dim,
-                out_features=inner_dim // 2,
+                text_encoder_dim=text_encoder_dim,
+                inner_dim=inner_dim,
                 mesh_device=mesh_device,
+                mesh_axis=parallel_config.tensor_parallel.mesh_axis,
             )
             for _ in range(num_layers + num_single_layers)
+        )
+
+        # DimFusion lower-half mask: a fixed ``(1, 1, inner_dim)`` tensor with ones in
+        # ``[0, inner_dim // 2)`` and zeros in ``[inner_dim // 2, inner_dim)``, TP-sharded along
+        # the last dim. Multiplying the running prompt by this mask zeros out the upper-half
+        # channels (which the matching ``caption_projection`` will refill with the real text
+        # projection), while leaving the lower-half channels untouched.
+        torch_mask = torch.cat(
+            [torch.ones(inner_dim // 2, dtype=torch.float32), torch.zeros(inner_dim // 2, dtype=torch.float32)]
+        ).reshape(1, 1, inner_dim)
+        self._dimfusion_mask = bf16_tensor(
+            torch_mask,
+            device=mesh_device,
+            mesh_axis=parallel_config.tensor_parallel.mesh_axis,
+            shard_dim=-1,
         )
 
         self.time_embed_out = Linear(inner_dim, 2 * inner_dim, mesh_device=mesh_device)
@@ -231,9 +283,15 @@ class FiboTransformer(Module):
         spatial = self.x_embedder(spatial)
         prompt = self.context_embedder(prompt)
 
+        # Pre-project all SmolLM3 layers up front (mirrors the diffusers reference, which
+        # populates ``new_text_encoder_layers`` before entering the block loop). Each result has
+        # the same shape and TP layout as ``prompt``; the lower-half channels are zero by virtue
+        # of ``FiboCaptionProjection``'s zero-padded weights.
+        projected_layers = [self.caption_projection[i](layer) for i, layer in enumerate(text_encoder_layers)]
+
         block_id = 0
         for block in self.transformer_blocks:
-            prompt = self._dimfusion_inject(prompt, text_encoder_layers[block_id], block_id)
+            prompt = self._dimfusion_inject(prompt, projected_layers[block_id])
             block_id += 1
             spatial, prompt = block.forward(
                 spatial=spatial,
@@ -248,7 +306,7 @@ class FiboTransformer(Module):
         prompt = ttnn.clone(prompt, dtype=spatial.dtype)
 
         for block in self.single_transformer_blocks:
-            prompt = self._dimfusion_inject(prompt, text_encoder_layers[block_id], block_id)
+            prompt = self._dimfusion_inject(prompt, projected_layers[block_id])
             block_id += 1
             spatial, prompt = block.forward(
                 spatial=spatial,
@@ -271,7 +329,7 @@ class FiboTransformer(Module):
 
         return self.proj_out(spatial)
 
-    def _dimfusion_inject(self, prompt: ttnn.Tensor, text_layer: ttnn.Tensor, block_id: int) -> ttnn.Tensor:
+    def _dimfusion_inject(self, prompt: ttnn.Tensor, projected_text_layer: ttnn.Tensor) -> ttnn.Tensor:
         """Replace the upper half of ``prompt``'s channel axis with a per-block projection of the
         corresponding SmolLM3 hidden state. Diffusers reference:
 
@@ -280,21 +338,12 @@ class FiboTransformer(Module):
                 dim=-1,
             )
 
-        TODO: this implementation is correctness-first, not TP-sharding-aware. The lower-half slice
-        is supposed to read from the first ``inner_dim // 2`` channels — which spans the first half
-        of TP shards — and the new upper half should land on the second half of TP shards. Doing
-        that without an extra all_gather/scatter requires either splitting ``caption_projection`` so
-        its output lands on the upper TP shards only, or restructuring how the prompt is sharded
-        across blocks. Until that's resolved, the simplest workaround would be an
-        ``all_gather`` + ``concat`` + manual reshard; we currently do nothing and rely on the
-        caller paths to be updated. **DimFusion is not yet wired up.**
+        Realized here as a local elementwise op: the caption projection's weights are zero-padded
+        so its output is only nonzero in the upper-half TP shards, and a fixed mask zeros out the
+        upper-half of ``prompt`` on those same shards. Adding the two yields the concat at no
+        communication cost.
         """
-
-        # projected = self.caption_projection[block_id](text_layer)   # [B, seq, inner_dim // 2]
-        # return concat([prompt[:, :, : inner_dim // 2], projected], dim=-1)  # [B, seq, inner_dim]
-
-        _ = (text_layer, block_id, self.caption_projection)  # silence linters until implemented
-        return prompt
+        return prompt * self._dimfusion_mask + projected_text_layer
 
     def patchify(self, latents: torch.Tensor) -> torch.Tensor:
         """Patchify a B,H,W,C latent into B,(H/P)*(W/P),C*P*P tokens."""

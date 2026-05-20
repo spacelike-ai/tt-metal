@@ -26,12 +26,6 @@
 #     (= 57) per-layer SmolLM3 hidden states. SmolLM3-3B emits ~37. Diffusers pads with the last
 #     layer repeated or trims from the start; mirror that before distributing across devices.
 #
-# TODO(fibo-5): DimFusion injection. ``transformer_fibo.FiboTransformer._dimfusion_inject`` is a
-#     no-op placeholder. It should compute
-#     ``concat(prompt[:, :, :inner_dim//2], caption_projection[i](text_layer))`` — and do so in a
-#     TP-sharded fashion (each ``caption_projection`` outputs onto the upper-half TP shards, so the
-#     concat doesn't need an extra all_gather / scatter).
-#
 # TODO(fibo-6): Joint attention mask. ``prompt_mask`` is accepted but unused — neither
 #     ``TransformerBlock`` nor ``Flux1SingleTransformerBlock`` currently accept a mask. Either
 #     thread one through, or accept the PCC hit from padding tokens participating in attention.
