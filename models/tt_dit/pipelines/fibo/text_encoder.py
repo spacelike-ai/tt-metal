@@ -7,12 +7,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+import transformers
 
 import ttnn
-from models.tt_dit.encoders.smollm3.encoder_pair import SmolLm3TokenizerEncoderPair
+from models.tt_dit.encoders.smollm3 import SmolLm3Checkpoint
 from models.tt_dit.parallel.config import EncoderParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
+from models.tt_dit.utils import tensor
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -23,6 +25,8 @@ _BOT_TOKEN_ID = 128000
 
 
 class TextEncoder:
+    """FIBO's SmolLM3 text encoder wrapper with PyTorch fallback."""
+
     def __init__(
         self,
         *,
@@ -32,24 +36,24 @@ class TextEncoder:
         parallel_config: EncoderParallelConfig,
         use_torch: bool,
     ) -> None:
-        self._encoder = SmolLm3TokenizerEncoderPair(
-            checkpoint_name,
-            tokenizer_subfolder="tokenizer",
-            encoder_subfolder="text_encoder",
-            device=device,
-            ccl_manager=ccl_manager,
-            parallel_config=parallel_config,
-            use_torch=use_torch,
-        )
+        self._device = device
+        self._tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint_name, subfolder="tokenizer")
 
-    def encoder_loaded(self) -> bool:
-        return self._encoder.encoder_loaded()
-
-    def reload_encoder_weights(self) -> None:
-        self._encoder.reload_encoder_weights()
-
-    def deallocate_encoder_weights(self) -> None:
-        self._encoder.deallocate_encoder_weights()
+        if use_torch:
+            self._torch_encoder = transformers.AutoModelForCausalLM.from_pretrained(
+                checkpoint_name,
+                subfolder="text_encoder",
+                torch_dtype=torch.bfloat16,
+            )
+            self._torch_encoder.eval()
+            self._encoder = None
+        else:
+            self._torch_encoder = None
+            self._encoder = SmolLm3Checkpoint(checkpoint_name).build(
+                device=device,
+                parallel_config=parallel_config,
+                ccl_manager=ccl_manager,
+            )
 
     @torch.no_grad()
     def encode_cfg(
@@ -74,19 +78,57 @@ class TextEncoder:
 
         all_prompts = [*negative_prompts, *prompts] if cfg_enabled else list(prompts)
 
+        tokens, mask = self._tokenize(all_prompts, max_sequence_length=max_sequence_length)
+
         on_event(SectionStart("smollm3_encoding"))
-        hidden_states, mask = self._encoder.encode(
-            all_prompts,
-            num_images_per_prompt=num_images_per_prompt,
-            sequence_length=max_sequence_length,
-            empty_token_id=_BOT_TOKEN_ID,
-            output_hidden_states=True,
-            enable_tracing=traced,
-        )
+        if self._torch_encoder is not None:
+            outputs = self._torch_encoder.forward(
+                input_ids=tokens,
+                attention_mask=mask,
+                output_hidden_states=True,
+            )
+            hidden_states = list(outputs.hidden_states)
+        else:
+            tt_tokens = tensor.from_torch(tokens, device=self._device, dtype=ttnn.uint32)
+            tt_mask = tensor.from_torch(mask, device=self._device)
+            tt_hidden_states = self._encoder.forward(
+                tt_tokens,
+                mask=tt_mask,
+                skip_final_linear=True,
+                output_hidden_states=True,
+            )
+            hidden_states = [tensor.to_torch(h) for h in tt_hidden_states]
         on_event(SectionEnd("smollm3_encoding"))
+
+        hidden_states = [h.repeat_interleave(num_images_per_prompt, dim=0) for h in hidden_states]
+        mask = mask.repeat_interleave(num_images_per_prompt, dim=0)
 
         # FIBO uses concat(last_layer, second_to_last_layer) along the channel axis as the
         # transformer's encoder_hidden_states input.
         embeds = torch.cat([hidden_states[-1], hidden_states[-2]], dim=-1)
 
-        return embeds, list(hidden_states), mask
+        return embeds, hidden_states, mask
+
+    def _tokenize(self, prompts: Sequence[str], *, max_sequence_length: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Tokenize to fixed length so traced encoder runs don't change shape.
+
+        Rows for empty prompts are replaced with all-``_BOT_TOKEN_ID`` and mask=1 at every
+        position, matching FIBO's diffusers reference (``get_prompt_embeds``).
+        """
+        tokenized = self._tokenizer(
+            list(prompts),
+            padding="max_length",
+            max_length=max_sequence_length,
+            truncation=True,
+            add_special_tokens=True,
+            return_tensors="pt",
+        )
+        input_ids: torch.Tensor = tokenized.input_ids
+        attention_mask: torch.Tensor = tokenized.attention_mask
+
+        empty_rows = torch.tensor([p == "" for p in prompts], dtype=torch.bool)
+        if empty_rows.any():
+            input_ids[empty_rows] = _BOT_TOKEN_ID
+            attention_mask[empty_rows] = 1
+
+        return input_ids, attention_mask

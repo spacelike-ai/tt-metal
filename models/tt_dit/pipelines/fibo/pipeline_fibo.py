@@ -4,11 +4,6 @@
 
 # Outstanding work before this pipeline runs (ordered roughly by when you'd hit each):
 #
-# TODO(fibo-1): SmolLM3 text encoder. ``encoders.smollm3.encoder_pair.SmolLm3TokenizerEncoderPair``
-#     is a placeholder import — the whole ``encoders/smollm3/`` directory needs to exist. A first
-#     cut can be torch-only (mirror ``Qwen25VlTokenizerEncoderPair`` with ``use_torch=True``) and
-#     defer the TT-NN encoder.
-#
 # TODO(fibo-2): Patchify mismatch. FIBO's transformer config has ``patch_size=1`` and
 #     ``in_channels=64``, but the Wan VAE outputs 16 channels. The 4x channel expansion is a 2x2
 #     spatial patching the diffusers FIBO pipeline does **outside** the transformer (it calls this
