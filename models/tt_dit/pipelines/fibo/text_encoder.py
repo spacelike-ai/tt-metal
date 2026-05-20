@@ -15,6 +15,7 @@ from models.tt_dit.parallel.config import EncoderParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
 from models.tt_dit.utils import tensor
+from models.tt_dit.utils.tracing import Tracer
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -47,6 +48,7 @@ class TextEncoder:
             )
             self._torch_encoder.eval()
             self._encoder = None
+            self._tracer = None
         else:
             self._torch_encoder = None
             self._encoder = SmolLm3Checkpoint(checkpoint_name).build(
@@ -54,6 +56,7 @@ class TextEncoder:
                 parallel_config=parallel_config,
                 ccl_manager=ccl_manager,
             )
+            self._tracer = Tracer(self._encoder.forward, device=device, prep_run=False)
 
     @torch.no_grad()
     def encode_cfg(
@@ -91,11 +94,12 @@ class TextEncoder:
         else:
             tt_tokens = tensor.from_torch(tokens, device=self._device, dtype=ttnn.uint32)
             tt_mask = tensor.from_torch(mask, device=self._device)
-            tt_hidden_states = self._encoder.forward(
+            tt_hidden_states = self._tracer(
                 tt_tokens,
                 mask=tt_mask,
                 skip_final_linear=True,
                 output_hidden_states=True,
+                traced=traced,
             )
             hidden_states = [tensor.to_torch(h) for h in tt_hidden_states]
         on_event(SectionEnd("smollm3_encoding"))
