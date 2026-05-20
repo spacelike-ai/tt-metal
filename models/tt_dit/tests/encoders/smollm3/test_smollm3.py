@@ -8,7 +8,7 @@ import transformers
 from loguru import logger
 
 import ttnn
-from models.tt_dit.encoders.smollm3.model_smollm3 import SmolLm3Checkpoint
+from models.tt_dit.encoders.smollm3 import SmolLm3Checkpoint
 from models.tt_dit.parallel.config import EncoderParallelConfig, ParallelFactor
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.utils import tensor
