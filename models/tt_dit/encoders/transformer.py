@@ -38,6 +38,24 @@ class TransformerContext:
     ccl_manager: CCLManager | None
 
 
+@dataclass(frozen=True, kw_only=True)
+class TransformerEncoderConfig:
+    """Architecture parameters for ``TransformerEncoder``."""
+
+    embed_size: int
+    ff_size: int
+    head_size: int
+    norm_eps: float
+    num_heads: int
+    num_kv_heads: int
+    num_layers: int
+    attn_qkv_bias: bool
+    attn_out_bias: bool
+    vocab_size: int
+    rope_config: RopeConfig
+    nope_layer_indices: Sequence[int] = ()
+
+
 class TransformerEncoder(Module):
     """Transformer encoder model with causal self-attention and support for decode mode.
 
@@ -48,19 +66,8 @@ class TransformerEncoder(Module):
 
     def __init__(
         self,
+        config: TransformerEncoderConfig,
         *,
-        embed_size: int,
-        ff_size: int,
-        head_size: int,
-        norm_eps: float,
-        num_heads: int,
-        num_kv_heads: int,
-        num_layers: int,
-        attn_qkv_bias: bool,
-        attn_out_bias: bool,
-        vocab_size: int,
-        rope_config: RopeConfig,
-        nope_layer_indices: Sequence[int] = (),
         device: ttnn.MeshDevice,
         parallel_config: EncoderParallelConfig | None = None,
         ccl_manager: CCLManager | None = None,
@@ -77,49 +84,39 @@ class TransformerEncoder(Module):
             msg = "ccl_manager must be provided if tensor parallelism is used"
             raise ValueError(msg)
 
-        self._nope_set = set(nope_layer_indices)
+        self._nope_set = set(config.nope_layer_indices)
         for idx in self._nope_set:
-            if not 0 <= idx < num_layers:
-                msg = f"nope_layer_indices entry {idx} out of range [0, {num_layers})"
+            if not 0 <= idx < config.num_layers:
+                msg = f"nope_layer_indices entry {idx} out of range [0, {config.num_layers})"
                 raise ValueError(msg)
 
-        self.pos_embedding = RotaryEmbedding(head_size=head_size, config=rope_config)
+        self.pos_embedding = RotaryEmbedding(head_size=config.head_size, config=config.rope_config)
 
-        self.token_embedding = Embedding(vocab_size, embed_size, device=ctx.device, mesh_axis=ctx.tp_axis)
+        self.token_embedding = Embedding(config.vocab_size, config.embed_size, device=ctx.device, mesh_axis=ctx.tp_axis)
         self.layers = ModuleList(
             TransformerEncoderLayer(
-                head_size=head_size,
-                embed_size=embed_size,
-                ff_size=ff_size,
-                num_heads=num_heads,
-                num_kv_heads=num_kv_heads,
-                norm_eps=norm_eps,
-                attn_qkv_bias=attn_qkv_bias,
-                attn_out_bias=attn_out_bias,
+                head_size=config.head_size,
+                embed_size=config.embed_size,
+                ff_size=config.ff_size,
+                num_heads=config.num_heads,
+                num_kv_heads=config.num_kv_heads,
+                norm_eps=config.norm_eps,
+                attn_qkv_bias=config.attn_qkv_bias,
+                attn_out_bias=config.attn_out_bias,
                 cache_id=i,
                 ctx=ctx,
             )
-            for i in range(num_layers)
+            for i in range(config.num_layers)
         )
 
-        self.final_norm = TransformerRmsNorm(embed_size, eps=norm_eps, ctx=ctx)
+        self.final_norm = TransformerRmsNorm(config.embed_size, eps=config.norm_eps, ctx=ctx)
 
         # vocab_size is much greater than embed_size
         self.final_linear = ColParallelLinear(
-            embed_size, vocab_size, bias=False, mesh_device=ctx.device, mesh_axis=ctx.tp_axis
+            config.embed_size, config.vocab_size, bias=False, mesh_device=ctx.device, mesh_axis=ctx.tp_axis
         )
 
-        self.embed_size = embed_size
-        self.ff_size = ff_size
-        self.head_size = head_size
-        self.norm_eps = norm_eps
-        self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads
-        self.num_layers = num_layers
-        self.attn_qkv_bias = attn_qkv_bias
-        self.attn_out_bias = attn_out_bias
-        self.vocab_size = vocab_size
-        self.rope_config = rope_config
+        self.config = config
 
         self._device = ctx.device
         self._tp_axis = ctx.tp_axis

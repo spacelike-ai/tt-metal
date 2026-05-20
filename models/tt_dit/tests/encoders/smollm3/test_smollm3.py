@@ -9,7 +9,6 @@ from loguru import logger
 
 import ttnn
 
-from models.tt_dit.blocks.rope import RopeConfig
 from models.tt_dit.encoders.smollm3.model_smollm3 import SmolLm3Encoder
 from models.tt_dit.parallel.config import EncoderParallelConfig, ParallelFactor
 from models.tt_dit.parallel.manager import CCLManager
@@ -56,28 +55,9 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, masked: bool) -> None:
     )
 
     torch_model = transformers.AutoModelForCausalLM.from_pretrained("briaai/FIBO", subfolder="text_encoder")
-    config = torch_model.config
-
-    # The shared TransformerEncoder only implements full causal attention. Sliding-window
-    # attention would silently produce wrong results.
-    assert not config.use_sliding_window, "sliding-window attention is not supported"
-    assert all(t == "full_attention" for t in config.layer_types), (
-        f"expected all layer_types to be 'full_attention', got {set(config.layer_types)}"
-    )
 
     model = SmolLm3Encoder(
-        vocab_size=config.vocab_size,
-        head_size=config.hidden_size // config.num_attention_heads,
-        embed_size=config.hidden_size,
-        ff_size=config.intermediate_size,
-        num_layers=config.num_hidden_layers,
-        num_heads=config.num_attention_heads,
-        num_kv_heads=config.num_key_value_heads,
-        norm_eps=config.rms_norm_eps,
-        attn_qkv_bias=False,
-        attn_out_bias=False,
-        rope_config=RopeConfig(theta=config.rope_parameters["rope_theta"]),
-        nope_layer_indices=[i for i, uses_rope in enumerate(config.no_rope_layers) if not uses_rope],
+        SmolLm3Encoder.config_from_hf(torch_model.config),
         device=mesh_device,
         parallel_config=parallel_config,
         ccl_manager=ccl_manager,
@@ -94,7 +74,7 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, masked: bool) -> None:
         mesh_shape=tuple(mesh_device.shape),
     )
 
-    tokens = torch.randint(0, config.vocab_size, [batch_size, sequence_length])
+    tokens = torch.randint(0, torch_model.config.vocab_size, [batch_size, sequence_length])
     lengths = torch.randint(sequence_length // 4, 3 * sequence_length // 4, [batch_size])
     mask = torch.arange(sequence_length).flip([0]) < lengths.unsqueeze(1) if masked else None
 
