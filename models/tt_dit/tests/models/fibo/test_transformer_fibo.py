@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent USA, Inc.
+# SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 
 # SPDX-License-Identifier: Apache-2.0
 
@@ -14,7 +14,6 @@ from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.utils import tensor
 from models.tt_dit.utils.check import assert_quality
 from models.tt_dit.utils.tracing import Tracer
-
 
 _PATCH_SIZE = 2  # pipeline-level 2x2 packing; FIBO's transformer itself uses patch_size=1
 

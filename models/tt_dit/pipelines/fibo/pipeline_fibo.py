@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent USA, Inc.
+# SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 
 # SPDX-License-Identifier: Apache-2.0
 
@@ -78,13 +78,12 @@ from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConf
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
 from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
+from models.tt_dit.pipelines.fibo.text_encoder import TextEncoder
 from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
 from models.tt_dit.solvers import EulerSolver
 from models.tt_dit.utils.mesh import reshape_device
 from models.tt_dit.utils.tensor import from_torch_to_devices
 from models.tt_dit.utils.tracing import Tracer
-
-from .text_encoder import TextEncoder
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -221,9 +220,7 @@ class FiboPipeline(PipelineAPIMixin):
         ]
 
         self._combiner = CFGCombiner(self._devices)
-        self._scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-            config.checkpoint_name, subfolder="scheduler"
-        )
+        self._scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(config.checkpoint_name, subfolder="scheduler")
         self._solvers = (EulerSolver(), EulerSolver()) if self._cfg_parallel else (EulerSolver(),)
         self._image_processor = VaeImageProcessor(vae_scale_factor=_VAE_SCALE_FACTOR * _PATCH_SIZE)
 
@@ -357,7 +354,9 @@ class FiboPipeline(PipelineAPIMixin):
                     submesh_idx=idx,
                     latents=latents[idx],
                     prompt=context[idx] if step == 0 else tracer.inputs["prompt"],
-                    text_encoder_layers=[layer[idx] for layer in layers] if step == 0 else tracer.inputs["text_encoder_layers"],
+                    text_encoder_layers=[layer[idx] for layer in layers]
+                    if step == 0
+                    else tracer.inputs["text_encoder_layers"],
                     prompt_mask=mask[idx] if step == 0 else tracer.inputs["prompt_mask"],
                     timestep=timestep,
                     traced=traced,

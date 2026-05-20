@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent USA, Inc.
+# SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 
 # SPDX-License-Identifier: Apache-2.0
 
@@ -12,7 +12,6 @@ from diffusers import BriaFiboTransformer2DModel
 
 import ttnn
 from models.common.utility_functions import is_blackhole
-
 from models.tt_dit.blocks.transformer_block import TransformerBlock, _chunk_time3d
 from models.tt_dit.layers.embeddings import TimestepEmbedding, Timesteps
 from models.tt_dit.layers.linear import ColParallelLinear, Linear
@@ -92,8 +91,7 @@ class FiboCaptionProjection(Module):
         if key in state:
             weight = state[key]
             assert weight.shape[0] == self._inner_dim // 2, (
-                f"caption projection weight has out_features {weight.shape[0]}, "
-                f"expected {self._inner_dim // 2}"
+                f"caption projection weight has out_features {weight.shape[0]}, " f"expected {self._inner_dim // 2}"
             )
             state[key] = torch.cat([torch.zeros_like(weight), weight], dim=0)
 

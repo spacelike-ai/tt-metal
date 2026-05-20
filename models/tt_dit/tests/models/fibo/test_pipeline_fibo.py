@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent USA, Inc.
+# SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 
 # SPDX-License-Identifier: Apache-2.0
 
@@ -26,7 +26,18 @@ from models.tt_dit.pipelines.fibo.pipeline_fibo import FiboPipeline, FiboPipelin
 )
 @pytest.mark.parametrize(("width", "height", "num_inference_steps"), [(1024, 1024, 20)])
 @pytest.mark.parametrize(
-    ("mesh_device", "cfg", "sp", "tp", "encoder_tp", "vae_height", "vae_width", "topology", "num_links", "mesh_test_id"),
+    (
+        "mesh_device",
+        "cfg",
+        "sp",
+        "tp",
+        "encoder_tp",
+        "vae_height",
+        "vae_width",
+        "topology",
+        "num_links",
+        "mesh_test_id",
+    ),
     [
         [(2, 4), (2, 0), (1, 0), (4, 1), (4, 1), (4, 1), (2, 0), ttnn.Topology.Linear, 1, "2x4cfg0sp0tp1"],
         [(2, 4), (2, 1), (2, 0), (2, 1), (4, 1), (4, 1), (2, 0), ttnn.Topology.Linear, 1, "2x4cfg1sp0tp1"],
