@@ -59,21 +59,6 @@
 #     ``FiboCheckpoint.pos_embed``. ``transformer_flux1`` has the same dead arg (commented-out
 #     ``FluxPosEmbed``); we inherited the pattern but should clean it up.
 #
-# TODO(fibo-14): Tune the PCC threshold in ``test_transformer_fibo.py``. Currently set to a
-#     placeholder ``pcc=0.99, relative_rmse=0.15`` without ever having run the test. Tighten once
-#     the test passes against the reference, the way ``test_transformer_qwenimage.py`` does
-#     (``pcc=0.99914``).
-#
-# TODO(fibo-15): The transformer test exercises DimFusion only incidentally. It compares against
-#     the diffusers reference with random ``text_encoder_layers`` and the assert_quality covers
-#     end-to-end PCC, but a unit-style test that feeds identifiable patterns through
-#     ``FiboCaptionProjection`` + ``_dimfusion_inject`` would catch sharded-layout bugs that a
-#     full-model PCC could absorb.
-#
-# TODO(fibo-16): Dry-run the imports. None of the FIBO code has been parsed/imported in this
-#     session — ``transformer_fibo.py``, ``pipeline_fibo.py`` and the tests could have trivial
-#     syntax or circular-import errors that the next test run will surface.
-#
 # TODO(fibo-17): Verify the ``model_location_generator`` fixture is available in the FIBO test
 #     path. Copied from ``test_transformer_qwenimage.py`` without confirming the conftest scope
 #     covers ``tests/models/fibo/``.

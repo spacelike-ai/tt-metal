@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from diffusers import BriaFiboTransformer2DModel
+from diffusers.configuration_utils import FrozenDict
 
 import ttnn
 from models.common.utility_functions import is_blackhole
@@ -51,8 +52,7 @@ class FiboTimestepEmbedding(Module):
 
 
 class FiboCaptionProjection(Module):
-    """Per-block projection of one SmolLM3 hidden-state layer into the upper half of the DiT's
-    prompt channel space.
+    """Per-block projection of a SmolLM3 hidden state into the DiT prompt's upper-half channels.
 
     Diffusers reference: ``BriaFiboTextProjection`` (a ``Linear(text_encoder_dim, inner_dim // 2)``).
 
@@ -369,26 +369,26 @@ class FiboTransformer(Module):
 
 
 class FiboCheckpoint:
-    """A FIBO checkpoint: fetches weights and builds loaded transformers."""
+    """A FIBO transformer checkpoint: fetches weights and builds a loaded ``FiboTransformer``.
+
+    Reads only ``config.json`` in ``__init__``; the actual torch weights are loaded lazily, on
+    ``build()`` cache-miss only. Mirrors ``SmolLm3Checkpoint``.
+    """
 
     def __init__(self, name: str) -> None:
-        self._name = name
-        torch_transformer = BriaFiboTransformer2DModel.from_pretrained(
-            name,
-            subfolder="transformer",
-            torch_dtype=torch.bfloat16,
-        )
-        torch_transformer.eval()
-        self._config = torch_transformer.config
-        self._state_dict = torch_transformer.state_dict()
+        # Internal import: ``BriaFiboEmbedND`` is not re-exported from ``diffusers`` but the file
+        # path is stable across versions. The class has no learnable parameters — only the rope
+        # axes_dim and theta — so we can construct it from config alone, no torch weights needed.
+        from diffusers.models.transformers.transformer_bria_fibo import BriaFiboEmbedND
 
-        # CPU-side positional embedding helper; kept on the checkpoint so the pipeline can prepare
-        # ropes once per call and ship them to device.
-        self.pos_embed = torch_transformer.pos_embed
-        self.joint_attention_dim: int = self._config.joint_attention_dim
-        self.text_encoder_dim: int = self._config.text_encoder_dim
-        self.patch_size: int = self._config.patch_size
-        self.in_channels: int = self._config.in_channels
+        config = FrozenDict(BriaFiboTransformer2DModel.load_config(name, subfolder="transformer"))
+        self._name = name
+        self._config = config
+
+        # CPU-side positional embedding helper. Kept on the checkpoint so the pipeline can prepare
+        # ropes once per call and ship them to device, without instantiating the (8B parameter)
+        # transformer torch model.
+        self.pos_embed = BriaFiboEmbedND(theta=config.rope_theta, axes_dim=config.axes_dims_rope)
 
     def build(
         self,
@@ -398,28 +398,28 @@ class FiboCheckpoint:
     ) -> FiboTransformer:
         """Construct a ``FiboTransformer`` for this checkpoint and load its weights."""
         device = ccl_manager.mesh_device
-        c = self._config
+        config = self._config
 
-        if c.num_attention_heads % parallel_config.tensor_parallel.factor != 0:
+        if config.num_attention_heads % parallel_config.tensor_parallel.factor != 0:
             padding_config = PaddingConfig.from_tensor_parallel_factor(
-                c.num_attention_heads,
-                c.attention_head_dim,
+                config.num_attention_heads,
+                config.attention_head_dim,
                 parallel_config.tensor_parallel.factor,
             )
         else:
             padding_config = None
 
         model = FiboTransformer(
-            patch_size=c.patch_size,
-            in_channels=c.in_channels,
-            num_layers=c.num_layers,
-            num_single_layers=c.num_single_layers,
-            attention_head_dim=c.attention_head_dim,
-            num_attention_heads=c.num_attention_heads,
-            joint_attention_dim=c.joint_attention_dim,
-            text_encoder_dim=c.text_encoder_dim,
-            out_channels=c.in_channels,
-            axes_dims_rope=c.axes_dims_rope,
+            patch_size=config.patch_size,
+            in_channels=config.in_channels,
+            num_layers=config.num_layers,
+            num_single_layers=config.num_single_layers,
+            attention_head_dim=config.attention_head_dim,
+            num_attention_heads=config.num_attention_heads,
+            joint_attention_dim=config.joint_attention_dim,
+            text_encoder_dim=config.text_encoder_dim,
+            out_channels=config.in_channels,
+            axes_dims_rope=config.axes_dims_rope,
             mesh_device=device,
             ccl_manager=ccl_manager,
             parallel_config=parallel_config,
@@ -427,10 +427,18 @@ class FiboCheckpoint:
         )
         cache.load_model(
             model,
-            get_torch_state_dict=lambda: self._state_dict,
-            model_name=os.path.basename(self._name),
+            get_torch_state_dict=self._load_state_dict,
+            model_name=self._name,
             subfolder="transformer",
             parallel_config=parallel_config,
             mesh_shape=tuple(device.shape),
         )
         return model
+
+    def _load_state_dict(self) -> dict[str, torch.Tensor]:
+        torch_model = BriaFiboTransformer2DModel.from_pretrained(
+            self._name,
+            subfolder="transformer",
+            torch_dtype=torch.bfloat16,
+        )
+        return torch_model.state_dict()

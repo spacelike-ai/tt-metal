@@ -168,7 +168,7 @@ def test_transformer(
             encoder_hidden_states=prompt,
             text_encoder_layers=text_encoder_layers,
             pooled_projections=None,
-            timestep=timestep / 1000,
+            timestep=timestep,
             img_ids=img_ids,
             txt_ids=txt_ids,
             guidance=None,
@@ -176,6 +176,4 @@ def test_transformer(
         )[0]
 
     tt_output_torch = tensor.to_torch(tt_output, mesh_axes=[None, sp_axis, None])
-    # PCC threshold is intentionally loose for the first cut; tighten once the joint attention
-    # mask (TODO(fibo-6)) and weight-key remapping (TODO(fibo-7)) are settled.
-    assert_quality(torch_output, tt_output_torch, pcc=0.99, relative_rmse=0.15)
+    assert_quality(torch_output, tt_output_torch, pcc=0.998, relative_rmse=0.06)
