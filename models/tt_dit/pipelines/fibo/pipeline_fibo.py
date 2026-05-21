@@ -11,12 +11,6 @@
 #     and 16 channels reach the transformer when it expects 64. Add pipeline-level 2x2 patching
 #     separate from ``transformer.patchify``.
 #
-# TODO(fibo-3): RoPE preparation. The transformer's forward requires ``spatial_rope`` and
-#     ``prompt_rope`` tuples; ``_traced_step`` doesn't pass them. Mirror the QwenImage pipeline:
-#     build ``img_ids`` (3-axis: batch, h, w) and ``txt_ids`` (zeros) on CPU, call
-#     ``checkpoint.pos_embed.forward(ids)`` to get ``(cos, sin)``, ship to each submesh, thread
-#     through ``_traced_step``.
-#
 # TODO(fibo-4): Layer pad/trim. The transformer expects exactly ``num_layers + num_single_layers``
 #     (= 57) per-layer SmolLM3 hidden states. SmolLM3-3B emits ~37. Diffusers pads with the last
 #     layer repeated or trims from the start; mirror that before distributing across devices.
@@ -24,16 +18,6 @@
 # TODO(fibo-6): Joint attention mask. ``prompt_mask`` is accepted but unused — neither
 #     ``TransformerBlock`` nor ``Flux1SingleTransformerBlock`` currently accept a mask. Either
 #     thread one through, or accept the PCC hit from padding tokens participating in attention.
-#
-# TODO(fibo-7): Weight-key remapping. ``FiboTransformer._prepare_torch_state`` only renames
-#     ``norm_out``. Other top-level keys (``time_embed.time_proj.*``,
-#     ``time_embed.timestep_embedder.linear_1.*``, possibly ``caption_projection.*``) likely need
-#     adjustment to match our class structure. Expect a round of fixups on the first
-#     ``cache.load_model`` attempt.
-#
-# TODO(fibo-8): Sequence-length kwargs. The transformer forward declares
-#     ``spatial_sequence_length`` and ``prompt_sequence_length`` as required kwargs; the pipeline
-#     doesn't supply them in ``_traced_step``.
 #
 # TODO(fibo-9): VAE mesh reshape. ``_decode_latents`` wraps the VAE call in
 #     ``self._reshape_encoder()``, which sets up the encoder's TP layout. The Wan VAE wants an
@@ -59,17 +43,9 @@
 #     ``FiboCheckpoint.pos_embed``. ``transformer_flux1`` has the same dead arg (commented-out
 #     ``FluxPosEmbed``); we inherited the pattern but should clean it up.
 #
-# TODO(fibo-17): Verify the ``model_location_generator`` fixture is available in the FIBO test
-#     path. Copied from ``test_transformer_qwenimage.py`` without confirming the conftest scope
-#     covers ``tests/models/fibo/``.
-#
 # TODO(fibo-18): Validate the fabricated ``vae_height`` / ``vae_width`` preset for the ``(4, 8)``
 #     mesh row in ``test_pipeline_fibo.py``. The ``(8, 1) / (4, 0)`` values were derived by
 #     analogy to QwenImage's mapping but not checked against actual VAE behavior on a 4x8 mesh.
-#
-# TODO(fibo-19): Possibly missing ``__init__.py`` in ``tests/models/fibo/``. The directory was
-#     created with ``mkdir -p`` without confirming whether sibling test directories carry one.
-#     Pytest discovery probably works without it, but worth a check.
 
 from __future__ import annotations
 
@@ -109,7 +85,9 @@ _VAE_SCALE_FACTOR = 16
 _PATCH_SIZE = 2
 _LATENT_CHANNELS = 16
 _DEFAULT_CHECKPOINT = "briaai/FIBO"
-_DEFAULT_MAX_SEQUENCE_LENGTH = 3000
+# Diffusers' FIBO pipeline defaults to 3000; we bump to the next tile-aligned length so the
+# SmolLM3 encoder doesn't internally pad and waste compute.
+_DEFAULT_MAX_SEQUENCE_LENGTH = 3008
 
 _PRESETS: dict[tuple[int, ...], dict] = {
     (2, 4): {
@@ -339,6 +317,13 @@ class FiboPipeline(PipelineAPIMixin):
         layers = [distribute_cfg(layer, devices=self._devices, on_host=traced) for layer in torch_layers]
         mask = distribute_cfg(torch_mask, devices=self._devices, on_host=traced)
 
+        prompt_sequence_length = torch_context.shape[1]
+        spatial_rope_cos, spatial_rope_sin, prompt_rope_cos, prompt_rope_sin = self._prepare_rope(
+            latents_height=latents_height,
+            latents_width=latents_width,
+            prompt_sequence_length=prompt_sequence_length,
+        )
+
         logger.info("denoising...")
         on_event(SectionStart("denoising"))
 
@@ -363,6 +348,14 @@ class FiboPipeline(PipelineAPIMixin):
                     else tracer.inputs["text_encoder_layers"],
                     prompt_mask=mask[idx] if step == 0 else tracer.inputs["prompt_mask"],
                     timestep=timestep,
+                    spatial_rope=(spatial_rope_cos[idx], spatial_rope_sin[idx])
+                    if step == 0
+                    else tracer.inputs["spatial_rope"],
+                    prompt_rope=(prompt_rope_cos[idx], prompt_rope_sin[idx])
+                    if step == 0
+                    else tracer.inputs["prompt_rope"],
+                    spatial_sequence_length=latents_sequence_length,
+                    prompt_sequence_length=prompt_sequence_length,
                     traced=traced,
                 )
 
@@ -396,6 +389,43 @@ class FiboPipeline(PipelineAPIMixin):
             latents = ttnn.concat([latents, latents])
 
         return self._transformers[submesh_idx].forward(spatial=latents, **kwargs)
+
+    def _prepare_rope(
+        self, *, latents_height: int, latents_width: int, prompt_sequence_length: int
+    ) -> tuple[list[ttnn.Tensor], list[ttnn.Tensor], list[ttnn.Tensor], list[ttnn.Tensor]]:
+        """Build FIBO's 3-axis RoPE on CPU and distribute spatial/prompt cos/sin to each submesh.
+
+        Mirrors the diffusers FIBO transformer: ``ids = cat([text_ids (zeros), img_ids], dim=0)``
+        is fed through ``checkpoint.pos_embed`` to get ``(freqs_cos, freqs_sin)`` of shape
+        ``[prompt_seq + img_seq, head_dim]``; we split at ``prompt_sequence_length`` and ship the
+        spatial half SP-sharded, the prompt half replicated.
+        """
+        h = latents_height // _PATCH_SIZE
+        w = latents_width // _PATCH_SIZE
+
+        img_ids = torch.zeros(h, w, 3)
+        img_ids[..., 1] = torch.arange(h)[:, None]
+        img_ids[..., 2] = torch.arange(w)[None, :]
+        img_ids = img_ids.reshape(h * w, 3)
+        text_ids = torch.zeros(prompt_sequence_length, 3)
+        ids = torch.cat([text_ids, img_ids], dim=0)
+
+        torch_rope_cos, torch_rope_sin = self._checkpoint.pos_embed(ids)
+
+        torch_prompt_rope_cos = torch_rope_cos[:prompt_sequence_length]
+        torch_prompt_rope_sin = torch_rope_sin[:prompt_sequence_length]
+        torch_spatial_rope_cos = torch_rope_cos[prompt_sequence_length:]
+        torch_spatial_rope_sin = torch_rope_sin[prompt_sequence_length:]
+
+        spatial_rope_cos = from_torch_to_devices(
+            torch_spatial_rope_cos, devices=self._devices, mesh_axes=[self._sp_axis, None]
+        )
+        spatial_rope_sin = from_torch_to_devices(
+            torch_spatial_rope_sin, devices=self._devices, mesh_axes=[self._sp_axis, None]
+        )
+        prompt_rope_cos = from_torch_to_devices(torch_prompt_rope_cos, devices=self._devices)
+        prompt_rope_sin = from_torch_to_devices(torch_prompt_rope_sin, devices=self._devices)
+        return spatial_rope_cos, spatial_rope_sin, prompt_rope_cos, prompt_rope_sin
 
     def _random_latents(self, batch_size: int, seed: int) -> list[ttnn.Tensor]:
         torch.manual_seed(seed)
