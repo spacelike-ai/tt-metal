@@ -11,10 +11,6 @@
 #     and 16 channels reach the transformer when it expects 64. Add pipeline-level 2x2 patching
 #     separate from ``transformer.patchify``.
 #
-# TODO(fibo-4): Layer pad/trim. The transformer expects exactly ``num_layers + num_single_layers``
-#     (= 57) per-layer SmolLM3 hidden states. SmolLM3-3B emits ~37. Diffusers pads with the last
-#     layer repeated or trims from the start; mirror that before distributing across devices.
-#
 # TODO(fibo-6): Joint attention mask. ``prompt_mask`` is accepted but unused — neither
 #     ``TransformerBlock`` nor ``Flux1SingleTransformerBlock`` currently accept a mask. Either
 #     thread one through, or accept the PCC hit from padding tokens participating in attention.
@@ -43,9 +39,9 @@
 #     ``FiboCheckpoint.pos_embed``. ``transformer_flux1`` has the same dead arg (commented-out
 #     ``FluxPosEmbed``); we inherited the pattern but should clean it up.
 #
-# TODO(fibo-18): Validate the fabricated ``vae_height`` / ``vae_width`` preset for the ``(4, 8)``
-#     mesh row in ``test_pipeline_fibo.py``. The ``(8, 1) / (4, 0)`` values were derived by
-#     analogy to QwenImage's mapping but not checked against actual VAE behavior on a 4x8 mesh.
+# TODO(fibo-18): Validate the ``vae_tp`` preset value for the ``(4, 8)`` mesh row. Currently
+#     ``(4, 1)`` (matching the (2, 4) row) but not checked against actual VAE behavior on a
+#     4x8 mesh; could plausibly want ``(8, 1)`` to use the full axis.
 
 from __future__ import annotations
 
@@ -116,7 +112,7 @@ class FiboPipelineConfig:
 
     dit_parallel_config: DiTParallelConfig
     encoder_parallel_config: EncoderParallelConfig
-    vae_parallel_config: VaeHWParallelConfig
+    vae_parallel_config: VAEParallelConfig
 
     use_torch_text_encoder: bool
     use_torch_vae_decoder: bool
@@ -301,6 +297,15 @@ class FiboPipeline(PipelineAPIMixin):
                 on_event=on_event,
             )
         on_event(SectionEnd("encoder"))
+
+        # Pad/trim SmolLM3's per-layer hidden states to the transformer's block count. Diffusers'
+        # FIBO pipeline does the same: when there are MORE encoder layers than DiT blocks, drop the
+        # earliest ones (keep the latest); when there are FEWER, duplicate the last layer to fill.
+        target_layers = self._checkpoint.num_blocks
+        if len(torch_layers) >= target_layers:
+            torch_layers = torch_layers[len(torch_layers) - target_layers:]
+        else:
+            torch_layers = torch_layers + [torch_layers[-1]] * (target_layers - len(torch_layers))
 
         logger.info("preparing timesteps...")
         sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)

@@ -390,6 +390,10 @@ class FiboCheckpoint:
         # transformer torch model.
         self.pos_embed = BriaFiboEmbedND(theta=config.rope_theta, axes_dim=config.axes_dims_rope)
 
+        # Total number of DiT blocks the transformer will instantiate — the pipeline pads/trims
+        # the SmolLM3 hidden-state list to exactly this length before each forward.
+        self.num_blocks: int = config.num_layers + config.num_single_layers
+
     def build(
         self,
         *,
