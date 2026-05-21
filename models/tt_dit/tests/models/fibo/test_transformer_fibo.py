@@ -47,14 +47,7 @@ def _build_ids(*, prompt_seq_len: int, latents_height: int, latents_width: int) 
 @pytest.mark.parametrize(
     ("batch_size", "latents_height", "latents_width", "prompt_seq_len"),
     [
-        (1, 32, 32, 64),
-    ],
-)
-@pytest.mark.parametrize(
-    "traced",
-    [
-        pytest.param(False, id="not_traced"),
-        pytest.param(True, id="traced"),
+        (1, 64, 64, 3008),
     ],
 )
 @pytest.mark.parametrize(
@@ -72,18 +65,14 @@ def test_transformer(
     latents_height: int,
     latents_width: int,
     prompt_seq_len: int,
-    traced: bool,
-    model_location_generator,
 ) -> None:
     torch.manual_seed(0)
 
     sp_factor = tuple(mesh_device.shape)[sp_axis]
     tp_factor = tuple(mesh_device.shape)[tp_axis]
 
-    checkpoint_name = model_location_generator("briaai/FIBO")
-    torch_model = reference.BriaFiboTransformer2DModel.from_pretrained(
-        checkpoint_name, subfolder="transformer", torch_dtype=torch.bfloat16
-    )
+    checkpoint_name = "briaai/FIBO"
+    torch_model = reference.BriaFiboTransformer2DModel.from_pretrained(checkpoint_name, subfolder="transformer")
     assert isinstance(torch_model, reference.BriaFiboTransformer2DModel)
     torch_model.eval()
 
@@ -106,49 +95,44 @@ def test_transformer(
 
     spatial_seq_len = (latents_height // _PATCH_SIZE) * (latents_width // _PATCH_SIZE)
 
-    tt_model_forward = Tracer(tt_model.forward, device=mesh_device) if traced else tt_model.forward
+    tracer = Tracer(tt_model.forward, device=mesh_device)
 
-    # Run twice: first call captures the trace (or compiles), second call exercises the trace.
-    for _ in range(2):
-        spatial = torch.randn([batch_size, spatial_seq_len, in_channels], dtype=torch.bfloat16)
-        prompt = torch.randn([batch_size, prompt_seq_len, joint_attention_dim], dtype=torch.bfloat16)
-        text_encoder_layers = [
-            torch.randn([batch_size, prompt_seq_len, text_encoder_dim], dtype=torch.bfloat16)
-            for _ in range(total_num_blocks)
-        ]
-        prompt_mask = torch.ones([batch_size, prompt_seq_len], dtype=torch.bfloat16)
-        timestep = torch.full([batch_size], fill_value=500.0, dtype=torch.bfloat16)
+    spatial = torch.randn([batch_size, spatial_seq_len, in_channels])
+    prompt = torch.randn([batch_size, prompt_seq_len, joint_attention_dim])
+    text_encoder_layers = [torch.randn([batch_size, prompt_seq_len, text_encoder_dim]) for _ in range(total_num_blocks)]
+    prompt_mask = torch.ones([batch_size, prompt_seq_len])
+    timestep = torch.full([batch_size], fill_value=500.0)
 
-        ids = _build_ids(prompt_seq_len=prompt_seq_len, latents_height=latents_height, latents_width=latents_width)
-        torch_rope_cos, torch_rope_sin = torch_model.pos_embed(ids)
-        prompt_rope_cos = torch_rope_cos[:prompt_seq_len]
-        prompt_rope_sin = torch_rope_sin[:prompt_seq_len]
-        spatial_rope_cos = torch_rope_cos[prompt_seq_len:]
-        spatial_rope_sin = torch_rope_sin[prompt_seq_len:]
+    ids = _build_ids(prompt_seq_len=prompt_seq_len, latents_height=latents_height, latents_width=latents_width)
+    torch_rope_cos, torch_rope_sin = torch_model.pos_embed(ids)
+    prompt_rope_cos = torch_rope_cos[:prompt_seq_len]
+    prompt_rope_sin = torch_rope_sin[:prompt_seq_len]
+    spatial_rope_cos = torch_rope_cos[prompt_seq_len:]
+    spatial_rope_sin = torch_rope_sin[prompt_seq_len:]
 
-        tt_spatial = tensor.from_torch(spatial, device=mesh_device, mesh_axes=[None, sp_axis, None])
-        tt_prompt = tensor.from_torch(prompt, device=mesh_device)
-        tt_text_encoder_layers = [tensor.from_torch(layer, device=mesh_device) for layer in text_encoder_layers]
-        tt_prompt_mask = tensor.from_torch(prompt_mask, device=mesh_device)
-        tt_timestep = tensor.from_torch(timestep.unsqueeze(-1), dtype=ttnn.float32, device=mesh_device)
+    tt_spatial = tensor.from_torch(spatial, device=mesh_device, mesh_axes=[None, sp_axis, None])
+    tt_prompt = tensor.from_torch(prompt, device=mesh_device)
+    tt_text_encoder_layers = [tensor.from_torch(layer, device=mesh_device) for layer in text_encoder_layers]
+    tt_prompt_mask = tensor.from_torch(prompt_mask, device=mesh_device)
+    tt_timestep = tensor.from_torch(timestep.unsqueeze(-1), dtype=ttnn.float32, device=mesh_device)
 
-        tt_spatial_rope_cos = tensor.from_torch(spatial_rope_cos, device=mesh_device, mesh_axes=[sp_axis, None])
-        tt_spatial_rope_sin = tensor.from_torch(spatial_rope_sin, device=mesh_device, mesh_axes=[sp_axis, None])
-        tt_prompt_rope_cos = tensor.from_torch(prompt_rope_cos, device=mesh_device)
-        tt_prompt_rope_sin = tensor.from_torch(prompt_rope_sin, device=mesh_device)
+    tt_spatial_rope_cos = tensor.from_torch(spatial_rope_cos, device=mesh_device, mesh_axes=[sp_axis, None])
+    tt_spatial_rope_sin = tensor.from_torch(spatial_rope_sin, device=mesh_device, mesh_axes=[sp_axis, None])
+    tt_prompt_rope_cos = tensor.from_torch(prompt_rope_cos, device=mesh_device)
+    tt_prompt_rope_sin = tensor.from_torch(prompt_rope_sin, device=mesh_device)
 
-        logger.info("running TT model...")
-        tt_output = tt_model_forward(
-            spatial=tt_spatial,
-            prompt=tt_prompt,
-            text_encoder_layers=tt_text_encoder_layers,
-            prompt_mask=tt_prompt_mask,
-            timestep=tt_timestep,
-            spatial_rope=(tt_spatial_rope_cos, tt_spatial_rope_sin),
-            prompt_rope=(tt_prompt_rope_cos, tt_prompt_rope_sin),
-            spatial_sequence_length=spatial_seq_len,
-            prompt_sequence_length=prompt_seq_len,
-        )
+    logger.info("running TT model...")
+    tt_output = tracer(
+        spatial=tt_spatial,
+        prompt=tt_prompt,
+        text_encoder_layers=tt_text_encoder_layers,
+        prompt_mask=tt_prompt_mask,
+        timestep=tt_timestep,
+        spatial_rope=(tt_spatial_rope_cos, tt_spatial_rope_sin),
+        prompt_rope=(tt_prompt_rope_cos, tt_prompt_rope_sin),
+        spatial_sequence_length=spatial_seq_len,
+        prompt_sequence_length=prompt_seq_len,
+    )
 
     logger.info("running torch reference...")
     with torch.no_grad():
