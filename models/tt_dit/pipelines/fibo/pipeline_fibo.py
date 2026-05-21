@@ -85,8 +85,8 @@ from loguru import logger
 
 import ttnn
 from models.tt_dit.models.transformers.transformer_fibo import FiboCheckpoint
-from models.tt_dit.models.vae.vae_qwenimage import QwenImageVAEDecoderAdapter
-from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VaeHWParallelConfig
+from models.tt_dit.models.vae.vae_fibo import FiboVAEDecoderAdapter
+from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
 from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
@@ -117,8 +117,7 @@ _PRESETS: dict[tuple[int, ...], dict] = {
         "sp": (1, 0),
         "tp": (4, 1),
         "encoder_tp": (4, 1),
-        "vae_height": (4, 1),
-        "vae_width": (2, 0),
+        "vae_tp": (4, 1),
         "num_links": 1,
     },
     (4, 8): {
@@ -126,8 +125,7 @@ _PRESETS: dict[tuple[int, ...], dict] = {
         "sp": (4, 0),
         "tp": (4, 1),
         "encoder_tp": (4, 1),
-        "vae_height": (8, 1),
-        "vae_width": (4, 0),
+        "vae_tp": (4, 1),
         "num_links": 4,
     },
 }
@@ -161,7 +159,7 @@ class FiboPipelineConfig:
         num_links: int | None = None,
         dit_parallel_config: DiTParallelConfig | None = None,
         encoder_parallel_config: EncoderParallelConfig | None = None,
-        vae_parallel_config: VaeHWParallelConfig | None = None,
+        vae_parallel_config: VAEParallelConfig | None = None,
         use_torch_text_encoder: bool = False,
         use_torch_vae_decoder: bool = False,
         height: int = 1024,
@@ -179,8 +177,7 @@ class FiboPipelineConfig:
             dit_parallel_config=dit_parallel_config
             or DiTParallelConfig.from_tuples(cfg=preset["cfg"], sp=preset["sp"], tp=preset["tp"]),
             encoder_parallel_config=encoder_parallel_config or EncoderParallelConfig.from_tuple(preset["encoder_tp"]),
-            vae_parallel_config=vae_parallel_config
-            or VaeHWParallelConfig.from_tuples(height=preset["vae_height"], width=preset["vae_width"]),
+            vae_parallel_config=vae_parallel_config or VAEParallelConfig.from_tuple(preset["vae_tp"]),
             use_torch_text_encoder=use_torch_text_encoder,
             use_torch_vae_decoder=use_torch_vae_decoder,
             height=height,
@@ -254,12 +251,7 @@ class FiboPipeline(PipelineAPIMixin):
             )
 
             logger.info("creating VAE decoder...")
-            # FIBO uses Wan 2.2's VAE (AutoencoderKLWan), which shares its architecture and config
-            # shape with the QwenImage VAE — same z_dim=16, dim_mult=(1,2,4,4), num_res_blocks=2,
-            # temperal_downsample=(False, True, True). The QwenImage adapter is reusable as-is
-            # apart from instantiating AutoencoderKLQwenImage on a FIBO checkpoint, which works
-            # because the Wan-style state-dict layout matches.
-            self._vae = QwenImageVAEDecoderAdapter(
+            self._vae = FiboVAEDecoderAdapter(
                 checkpoint_name=config.checkpoint_name,
                 parallel_config=config.vae_parallel_config,
                 use_torch=config.use_torch_vae_decoder,
