@@ -189,9 +189,6 @@ class FiboTransformer(Module):
             for _ in range(num_single_layers)
         )
 
-        # DimFusion: one caption projection per block. Each maps a SmolLM3 hidden state into the
-        # upper half of the DiT's prompt channel space; ``_dimfusion_inject`` combines it with the
-        # running encoder_hidden_states before every block as ``prompt * mask + projection``.
         self.caption_projection = ModuleList(
             FiboCaptionProjection(
                 text_encoder_dim=text_encoder_dim,
@@ -202,11 +199,8 @@ class FiboTransformer(Module):
             for _ in range(num_layers + num_single_layers)
         )
 
-        # DimFusion lower-half mask: a fixed ``(1, 1, inner_dim)`` tensor with ones in
-        # ``[0, inner_dim // 2)`` and zeros in ``[inner_dim // 2, inner_dim)``, TP-sharded along
-        # the last dim. Multiplying the running prompt by this mask zeros out the upper-half
-        # channels (which the matching ``caption_projection`` will refill with the real text
-        # projection), while leaving the lower-half channels untouched.
+        # DimFusion lower-half mask, TP-sharded along the last dim. See ``FiboCaptionProjection``
+        # and ``_dimfusion_inject``.
         torch_mask = torch.cat(
             [torch.ones(inner_dim // 2, dtype=torch.float32), torch.zeros(inner_dim // 2, dtype=torch.float32)]
         ).reshape(1, 1, inner_dim)
@@ -276,10 +270,7 @@ class FiboTransformer(Module):
         spatial = self.x_embedder(spatial)
         prompt = self.context_embedder(prompt)
 
-        # Pre-project all SmolLM3 layers up front (mirrors the diffusers reference, which
-        # populates ``new_text_encoder_layers`` before entering the block loop). Each result has
-        # the same shape and TP layout as ``prompt``; the lower-half channels are zero by virtue
-        # of ``FiboCaptionProjection``'s zero-padded weights.
+        # Mirrors the diffusers reference's ``new_text_encoder_layers`` pre-pass.
         projected_layers = [self.caption_projection[i](layer) for i, layer in enumerate(text_encoder_layers)]
 
         block_id = 0
@@ -385,12 +376,7 @@ class FiboCheckpoint:
         # transformer torch model.
         self.pos_embed = BriaFiboEmbedND(theta=config.rope_theta, axes_dim=config.axes_dims_rope)
 
-        # Total number of DiT blocks the transformer will instantiate — the pipeline pads/trims
-        # the SmolLM3 hidden-state list to exactly this length before each forward.
         self.num_blocks: int = config.num_layers + config.num_single_layers
-
-        # Latent channel count (= VAE output channels). FIBO defaults to ``do_patching=False`` in
-        # the diffusers pipeline, so the VAE's z-dim goes straight to the transformer.
         self.latent_channels: int = config.in_channels
 
     def build(

@@ -156,9 +156,8 @@ class FiboPipeline(PipelineAPIMixin):
         self._combiner = CFGCombiner(self._devices)
         self._scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(config.checkpoint_name, subfolder="scheduler")
         self._solvers = (EulerSolver(), EulerSolver()) if self._cfg_parallel else (EulerSolver(),)
-        # Matches diffusers FIBO's image processor: rounds image dims to multiples of 32 (twice the
-        # VAE compression). The factor of 2 is for compatibility with the optional do_patching=True
-        # path, even though we never take it.
+        # The ``* 2`` rounds image dims to a multiple of 32 to keep the optional ``do_patching=True``
+        # path (a 2x2 pre-pack) usable, even though we never take it.
         self._image_processor = VaeImageProcessor(vae_scale_factor=_VAE_SCALE_FACTOR * 2)
 
         logger.info("creating transformer...")

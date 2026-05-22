@@ -114,7 +114,6 @@ def test_fibo_pipeline(
         ),
     )
 
-    # Setup CI environment
     if is_ci_env:
         monkeypatch.setenv("TT_DIT_CACHE_DIR", "/tmp/TT_DIT_CACHE")
         if traced:
