@@ -2,35 +2,6 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-# Outstanding work before this pipeline runs (ordered roughly by when you'd hit each):
-#
-# TODO(fibo-6): Joint attention mask. ``prompt_mask`` is accepted but unused — neither
-#     ``TransformerBlock`` nor ``Flux1SingleTransformerBlock`` currently accept a mask. Either
-#     thread one through, or accept the PCC hit from padding tokens participating in attention.
-#
-# TODO(fibo-9): VAE mesh reshape. ``_decode_latents`` wraps the VAE call in
-#     ``self._reshape_encoder()``, which sets up the encoder's TP layout. The Wan VAE wants an
-#     HW-parallel layout instead. Add a separate ``_reshape_vae()`` context manager driven by
-#     ``config.vae_parallel_config.height_parallel`` / ``width_parallel`` (mirror QwenImage's
-#     ``_reshape_vae``).
-#
-# TODO(fibo-11): ``num_inference_steps`` has no default. FIBO's diffusers pipeline defaults to 50;
-#     ours makes the caller pass it. Default it.
-#
-# TODO(fibo-12): Stack per-layer text-encoder tensors for the tracer. ``_traced_step`` currently
-#     gets 57 distinct tensor inputs per step (one per SmolLM3 hidden state); stacking them into
-#     a single ``[57, B, S, D]`` tensor would simplify trace capture and replay once DimFusion is
-#     wired up.
-#
-# TODO(fibo-13): Drop ``axes_dims_rope`` from ``FiboTransformer.__init__``. It's passed through
-#     from the checkpoint config but never actually used — RoPE is computed externally on CPU via
-#     ``FiboCheckpoint.pos_embed``. ``transformer_flux1`` has the same dead arg (commented-out
-#     ``FluxPosEmbed``); we inherited the pattern but should clean it up.
-#
-# TODO(fibo-18): Validate the ``vae_tp`` preset value for the ``(4, 8)`` mesh row. Currently
-#     ``(4, 1)`` (matching the (2, 4) row) but not checked against actual VAE behavior on a
-#     4x8 mesh; could plausibly want ``(8, 1)`` to use the full axis.
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -81,14 +52,6 @@ _PRESETS: dict[tuple[int, ...], dict] = {
         "encoder_tp": (4, 1),
         "vae_tp": (4, 1),
         "num_links": 1,
-    },
-    (4, 8): {
-        "cfg": (2, 1),
-        "sp": (4, 0),
-        "tp": (4, 1),
-        "encoder_tp": (4, 1),
-        "vae_tp": (4, 1),
-        "num_links": 4,
     },
 }
 
@@ -279,7 +242,7 @@ class FiboPipeline(PipelineAPIMixin):
         logger.info("encoding prompts...")
         on_event(SectionStart("encoder"))
         with self._reshape_encoder():
-            torch_context, torch_layers, torch_mask = self._text_encoder.encode_cfg(
+            torch_context, torch_layers, _ = self._text_encoder.encode_cfg(
                 prompts,
                 negative_prompts,
                 num_images_per_prompt=num_images_per_prompt,
@@ -312,7 +275,6 @@ class FiboPipeline(PipelineAPIMixin):
         latents = self._random_latents(batch_size=prompt_count * num_images_per_prompt, seed=seed)
         context = distribute_cfg(torch_context, devices=self._devices, on_host=traced)
         layers = [distribute_cfg(layer, devices=self._devices, on_host=traced) for layer in torch_layers]
-        mask = distribute_cfg(torch_mask, devices=self._devices, on_host=traced)
 
         prompt_sequence_length = torch_context.shape[1]
         spatial_rope_cos, spatial_rope_sin, prompt_rope_cos, prompt_rope_sin = self._prepare_rope(
@@ -343,7 +305,6 @@ class FiboPipeline(PipelineAPIMixin):
                     text_encoder_layers=[layer[idx] for layer in layers]
                     if step == 0
                     else tracer.inputs["text_encoder_layers"],
-                    prompt_mask=mask[idx] if step == 0 else tracer.inputs["prompt_mask"],
                     timestep=timestep,
                     spatial_rope=(spatial_rope_cos[idx], spatial_rope_sin[idx])
                     if step == 0

@@ -100,7 +100,6 @@ def test_transformer(
     spatial = torch.randn([batch_size, spatial_seq_len, in_channels])
     prompt = torch.randn([batch_size, prompt_seq_len, joint_attention_dim])
     text_encoder_layers = [torch.randn([batch_size, prompt_seq_len, text_encoder_dim]) for _ in range(total_num_blocks)]
-    prompt_mask = torch.ones([batch_size, prompt_seq_len])
     timestep = torch.full([batch_size], fill_value=500.0)
 
     ids = _build_ids(prompt_seq_len=prompt_seq_len, latents_height=latents_height, latents_width=latents_width)
@@ -113,7 +112,6 @@ def test_transformer(
     tt_spatial = tensor.from_torch(spatial, device=mesh_device, mesh_axes=[None, sp_axis, None])
     tt_prompt = tensor.from_torch(prompt, device=mesh_device)
     tt_text_encoder_layers = [tensor.from_torch(layer, device=mesh_device) for layer in text_encoder_layers]
-    tt_prompt_mask = tensor.from_torch(prompt_mask, device=mesh_device)
     tt_timestep = tensor.from_torch(timestep.unsqueeze(-1), dtype=ttnn.float32, device=mesh_device)
 
     tt_spatial_rope_cos = tensor.from_torch(spatial_rope_cos, device=mesh_device, mesh_axes=[sp_axis, None])
@@ -126,7 +124,6 @@ def test_transformer(
         spatial=tt_spatial,
         prompt=tt_prompt,
         text_encoder_layers=tt_text_encoder_layers,
-        prompt_mask=tt_prompt_mask,
         timestep=tt_timestep,
         spatial_rope=(tt_spatial_rope_cos, tt_spatial_rope_sin),
         prompt_rope=(tt_prompt_rope_cos, tt_prompt_rope_sin),

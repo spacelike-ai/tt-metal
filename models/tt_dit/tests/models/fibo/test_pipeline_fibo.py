@@ -62,18 +62,6 @@ from models.tt_dit.pipelines.fibo.pipeline_fibo import FiboPipeline, FiboPipelin
             "2x4cfg1sp0tp1",
             id="2x4cfg1sp0tp1",
         ),
-        pytest.param(
-            (4, 8),
-            (2, 1),
-            (4, 0),
-            (4, 1),
-            (4, 1),
-            (4, 1),
-            ttnn.Topology.Linear,
-            4,
-            "4x8cfg1sp0tp1",
-            id="4x8cfg1sp0tp1",
-        ),
     ],
     indirect=["mesh_device"],
 )

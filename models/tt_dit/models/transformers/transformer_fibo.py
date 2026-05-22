@@ -25,8 +25,6 @@ from models.tt_dit.utils.substate import rename_substate
 from models.tt_dit.utils.tensor import bf16_tensor
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from models.tt_dit.parallel.config import DiTParallelConfig
     from models.tt_dit.parallel.manager import CCLManager
 
@@ -120,7 +118,6 @@ class FiboTransformer(Module):
         joint_attention_dim: int,
         text_encoder_dim: int,
         out_channels: int,
-        axes_dims_rope: Sequence[int],  # noqa: ARG002 — kept for parity with Flux; rope is built on CPU
         mesh_device: ttnn.MeshDevice,
         ccl_manager: CCLManager | None,
         parallel_config: DiTParallelConfig,
@@ -248,7 +245,6 @@ class FiboTransformer(Module):
         spatial: ttnn.Tensor,
         prompt: ttnn.Tensor,
         text_encoder_layers: list[ttnn.Tensor],
-        prompt_mask: ttnn.Tensor,  # noqa: ARG002 — TODO: thread joint attention mask through blocks
         timestep: ttnn.Tensor,
         spatial_rope: tuple[ttnn.Tensor, ttnn.Tensor],
         prompt_rope: tuple[ttnn.Tensor, ttnn.Tensor],
@@ -264,7 +260,6 @@ class FiboTransformer(Module):
             text_encoder_layers: Per-block SmolLM3 hidden states, padded/trimmed to exactly
                 ``num_layers + num_single_layers`` entries. Each has shape
                 [batch, prompt_sequence_length, text_encoder_dim].
-            prompt_mask: Per-token mask for ``prompt``. Currently unused; see TODO.
             timestep: Tensor with shape [batch, 1].
             spatial_rope, prompt_rope: Cos/sin tuples for 3-axis RoPE.
         """
@@ -427,7 +422,6 @@ class FiboCheckpoint:
             joint_attention_dim=config.joint_attention_dim,
             text_encoder_dim=config.text_encoder_dim,
             out_channels=config.in_channels,
-            axes_dims_rope=config.axes_dims_rope,
             mesh_device=device,
             ccl_manager=ccl_manager,
             parallel_config=parallel_config,
