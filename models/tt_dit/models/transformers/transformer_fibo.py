@@ -394,6 +394,10 @@ class FiboCheckpoint:
         # the SmolLM3 hidden-state list to exactly this length before each forward.
         self.num_blocks: int = config.num_layers + config.num_single_layers
 
+        # Latent channel count (= VAE output channels). FIBO defaults to ``do_patching=False`` in
+        # the diffusers pipeline, so the VAE's z-dim goes straight to the transformer.
+        self.latent_channels: int = config.in_channels
+
     def build(
         self,
         *,

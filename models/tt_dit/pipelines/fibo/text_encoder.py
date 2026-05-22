@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-# Beginning-of-text token id used by SmolLM3 when the user prompt is empty.
 _BOT_TOKEN_ID = 128000
 
 
@@ -70,13 +69,6 @@ class TextEncoder:
         traced: bool,
         on_event: PipelineEventCallback = null_callback,
     ) -> tuple[torch.Tensor, list[torch.Tensor], torch.Tensor]:
-        """Encode prompts (and optionally negatives) into FIBO's text representation.
-
-        Returns ``(embeds, layers, mask)`` where ``embeds`` is the concatenation of the last two
-        SmolLM3 hidden states (DiT context input), ``layers`` is the full per-layer hidden state
-        tuple (DimFusion input), and ``mask`` is the attention mask. When CFG is enabled the
-        batch dimension is laid out as ``[negative, positive]``.
-        """
         assert len(prompts) == len(negative_prompts), "prompts and negative_prompts must have the same length"
 
         all_prompts = [*negative_prompts, *prompts] if cfg_enabled else list(prompts)
@@ -104,6 +96,10 @@ class TextEncoder:
             hidden_states = [tensor.to_torch(h) for h in tt_hidden_states]
         on_event(SectionEnd("smollm3_encoding"))
 
+        mask_inv = ~mask.unsqueeze(-1).bool()
+        for h in hidden_states:
+            h.masked_fill_(mask_inv, 0)
+
         hidden_states = [h.repeat_interleave(num_images_per_prompt, dim=0) for h in hidden_states]
         mask = mask.repeat_interleave(num_images_per_prompt, dim=0)
 
@@ -114,11 +110,6 @@ class TextEncoder:
         return embeds, hidden_states, mask
 
     def _tokenize(self, prompts: Sequence[str], *, max_sequence_length: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Tokenize to fixed length so traced encoder runs don't change shape.
-
-        Rows for empty prompts are replaced with all-``_BOT_TOKEN_ID`` and mask=1 at every
-        position, matching FIBO's diffusers reference (``get_prompt_embeds``).
-        """
         tokenized = self._tokenizer(
             list(prompts),
             padding="max_length",
@@ -127,12 +118,13 @@ class TextEncoder:
             add_special_tokens=True,
             return_tensors="pt",
         )
-        input_ids: torch.Tensor = tokenized.input_ids
-        attention_mask: torch.Tensor = tokenized.attention_mask
+
+        input_ids = tokenized.input_ids
+        attention_mask = tokenized.attention_mask
 
         empty_rows = torch.tensor([p == "" for p in prompts], dtype=torch.bool)
-        if empty_rows.any():
-            input_ids[empty_rows] = _BOT_TOKEN_ID
-            attention_mask[empty_rows] = 1
+        input_ids[empty_rows, 0] = _BOT_TOKEN_ID
+        attention_mask[empty_rows, 0] = 1
+        attention_mask[empty_rows, 1:] = 0
 
         return input_ids, attention_mask

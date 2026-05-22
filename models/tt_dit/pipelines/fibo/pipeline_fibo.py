@@ -4,13 +4,6 @@
 
 # Outstanding work before this pipeline runs (ordered roughly by when you'd hit each):
 #
-# TODO(fibo-2): Patchify mismatch. FIBO's transformer config has ``patch_size=1`` and
-#     ``in_channels=64``, but the Wan VAE outputs 16 channels. The 4x channel expansion is a 2x2
-#     spatial patching the diffusers FIBO pipeline does **outside** the transformer (it calls this
-#     ``do_patching``). Today ``_random_latents`` uses ``transformer.patchify`` with ``patch_size=1``
-#     and 16 channels reach the transformer when it expects 64. Add pipeline-level 2x2 patching
-#     separate from ``transformer.patchify``.
-#
 # TODO(fibo-6): Joint attention mask. ``prompt_mask`` is accepted but unused — neither
 #     ``TransformerBlock`` nor ``Flux1SingleTransformerBlock`` currently accept a mask. Either
 #     thread one through, or accept the PCC hit from padding tokens participating in attention.
@@ -20,11 +13,6 @@
 #     HW-parallel layout instead. Add a separate ``_reshape_vae()`` context manager driven by
 #     ``config.vae_parallel_config.height_parallel`` / ``width_parallel`` (mirror QwenImage's
 #     ``_reshape_vae``).
-#
-# TODO(fibo-10): Un-patchify mismatch. Companion to TODO(fibo-2): once we add pipeline-level 2x2
-#     patching on the input side, the output side needs to undo it before handing 16-channel
-#     latents to the VAE. ``transformer.unpatchify`` with ``patch_size=1`` leaves the spatial
-#     tensor at 64 channels; the VAE expects 16.
 #
 # TODO(fibo-11): ``num_inference_steps`` has no default. FIBO's diffusers pipeline defaults to 50;
 #     ours makes the caller pass it. Default it.
@@ -75,11 +63,11 @@ if TYPE_CHECKING:
 
     from PIL import Image
 
-# Wan 2.2 VAE compresses 16x in each spatial dimension; FIBO additionally patchifies 2x2 inside
-# the transformer.
+# Wan 2.2 VAE compresses 16x in each spatial dimension. FIBO's diffusers pipeline defaults to
+# ``do_patching=False``, so the VAE's z-dim channels go straight to the transformer without any
+# pipeline-level 2x2 packing; the transformer's own ``patch_size=1`` just flattens H×W into a
+# sequence dimension.
 _VAE_SCALE_FACTOR = 16
-_PATCH_SIZE = 2
-_LATENT_CHANNELS = 16
 _DEFAULT_CHECKPOINT = "briaai/FIBO"
 # Diffusers' FIBO pipeline defaults to 3000; we bump to the next tile-aligned length so the
 # SmolLM3 encoder doesn't internally pad and waste compute.
@@ -205,7 +193,10 @@ class FiboPipeline(PipelineAPIMixin):
         self._combiner = CFGCombiner(self._devices)
         self._scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(config.checkpoint_name, subfolder="scheduler")
         self._solvers = (EulerSolver(), EulerSolver()) if self._cfg_parallel else (EulerSolver(),)
-        self._image_processor = VaeImageProcessor(vae_scale_factor=_VAE_SCALE_FACTOR * _PATCH_SIZE)
+        # Matches diffusers FIBO's image processor: rounds image dims to multiples of 32 (twice the
+        # VAE compression). The factor of 2 is for compatibility with the optional do_patching=True
+        # path, even though we never take it.
+        self._image_processor = VaeImageProcessor(vae_scale_factor=_VAE_SCALE_FACTOR * 2)
 
         logger.info("creating transformer...")
         self._checkpoint = FiboCheckpoint(config.checkpoint_name)
@@ -231,6 +222,7 @@ class FiboPipeline(PipelineAPIMixin):
                 use_torch=config.use_torch_vae_decoder,
                 ccl_manager=self._ccl_managers[0],
             )
+            self._vae.reload_weights()
 
         for d in self._devices:
             ttnn.synchronize_device(d)
@@ -280,7 +272,7 @@ class FiboPipeline(PipelineAPIMixin):
 
         latents_height = self._height // _VAE_SCALE_FACTOR
         latents_width = self._width // _VAE_SCALE_FACTOR
-        latents_sequence_length = (latents_height // _PATCH_SIZE) * (latents_width // _PATCH_SIZE)
+        latents_sequence_length = latents_height * latents_width
 
         on_event(SectionStart("total"))
 
@@ -303,7 +295,7 @@ class FiboPipeline(PipelineAPIMixin):
         # earliest ones (keep the latest); when there are FEWER, duplicate the last layer to fill.
         target_layers = self._checkpoint.num_blocks
         if len(torch_layers) >= target_layers:
-            torch_layers = torch_layers[len(torch_layers) - target_layers:]
+            torch_layers = torch_layers[len(torch_layers) - target_layers :]
         else:
             torch_layers = torch_layers + [torch_layers[-1]] * (target_layers - len(torch_layers))
 
@@ -405,8 +397,8 @@ class FiboPipeline(PipelineAPIMixin):
         ``[prompt_seq + img_seq, head_dim]``; we split at ``prompt_sequence_length`` and ship the
         spatial half SP-sharded, the prompt half replicated.
         """
-        h = latents_height // _PATCH_SIZE
-        w = latents_width // _PATCH_SIZE
+        h = latents_height
+        w = latents_width
 
         img_ids = torch.zeros(h, w, 3)
         img_ids[..., 1] = torch.arange(h)[:, None]
@@ -435,7 +427,12 @@ class FiboPipeline(PipelineAPIMixin):
     def _random_latents(self, batch_size: int, seed: int) -> list[ttnn.Tensor]:
         torch.manual_seed(seed)
 
-        shape = [batch_size, _LATENT_CHANNELS, self._height // _VAE_SCALE_FACTOR, self._width // _VAE_SCALE_FACTOR]
+        shape = [
+            batch_size,
+            self._checkpoint.latent_channels,
+            self._height // _VAE_SCALE_FACTOR,
+            self._width // _VAE_SCALE_FACTOR,
+        ]
 
         # We let randn generate a permuted latent tensor in float32, so that the generated noise
         # matches the reference implementation.

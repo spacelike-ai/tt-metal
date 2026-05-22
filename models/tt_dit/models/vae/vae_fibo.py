@@ -360,6 +360,7 @@ class FiboVAEDecoderAdapter:
     def reload_weights(self) -> None:
         if self._decoder is None:
             return
+
         cache.load_model(
             self._decoder,
             get_torch_state_dict=self._load_torch_state_dict,
