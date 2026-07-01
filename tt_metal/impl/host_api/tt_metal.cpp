@@ -66,6 +66,7 @@
 #include <experimental/fabric/control_plane.hpp>
 #include "impl/buffers/circular_buffer.hpp"
 #include <tt-metalium/experimental/tensor/mesh_tensor.hpp>
+#include <internal/service/service_core_manager.hpp>
 
 #ifdef TT_METAL_USE_EMULE
 #include "impl/emulation/emulated_program_runner.hpp"
@@ -429,8 +430,10 @@ void DispatchCompiledProgramToDevice(IDevice* device, Program& program) {
         "Program has no logical cores to dispatch to device {}. Ensure the program has kernels.",
         device_id);
 
-    detail::WriteRuntimeArgsToDevice(device, program, /*force_slow_dispatch=*/false);
+    // First configure (allocate buffers + write configs/binaries), then write runtime args.
+    // This allows us to allocate ephemeral scratchpad buffers, and pass their locations as implicit CRTAs.
     detail::ConfigureDeviceWithProgram(device, program, /*force_slow_dispatch=*/false);
+    detail::WriteRuntimeArgsToDevice(device, program, /*force_slow_dispatch=*/false);
 
     MetalContext::instance().get_cluster().dram_barrier(device_id);
     MetalContext::instance().get_cluster().l1_barrier(device_id);
@@ -840,8 +843,11 @@ void LaunchProgram(IDevice* device, Program& program, bool wait_until_cores_done
             auto& dm = MetalContext::instance().device_manager();
             const bool fd_active = dm->is_dispatch_firmware_active();
             const bool rt_done = dm->is_rt_profiler_device_init_complete(device->id());
+            // Scope the service bypass to this device
+            const bool service_active =
+                !tt::tt_metal::MetalContext::instance().get_service_core_manager().claimed_cores(device->id()).empty();
             TT_ASSERT(
-                !(fd_active && rt_done),
+                !(fd_active && rt_done) || service_active,
                 "Cannot force slow dispatch while fast dispatch firmware is active and real-time profiler init has "
                 "completed on this device.");
         }
@@ -857,8 +863,10 @@ void LaunchProgram(IDevice* device, Program& program, bool wait_until_cores_done
             program.impl().finalize_offsets(device);
         }
 
-        detail::WriteRuntimeArgsToDevice(device, program, force_slow_dispatch);
+        // First configure (allocate buffers + write configs/binaries), then write runtime args.
+        // This allows us to allocate ephemeral scratchpad buffers, and pass their locations as implicit CRTAs.
         detail::ConfigureDeviceWithProgram(device, program, force_slow_dispatch);
+        detail::WriteRuntimeArgsToDevice(device, program, force_slow_dispatch);
 
         auto device_id = device->id();
 
