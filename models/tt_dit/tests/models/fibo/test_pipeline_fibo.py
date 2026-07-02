@@ -9,6 +9,7 @@ import pytest
 from loguru import logger
 
 import ttnn
+from models.common.utility_functions import run_for_blackhole, run_for_wormhole_b0
 from models.perf.benchmarking_utils import BenchmarkProfiler
 from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
 from models.tt_dit.pipelines.events import profiler_event_callback
@@ -21,7 +22,7 @@ from models.tt_dit.pipelines.fibo.pipeline_fibo import FiboPipeline, FiboPipelin
 )
 @pytest.mark.parametrize(
     "device_params",
-    [{"fabric_config": ttnn.FabricConfig.FABRIC_1D, "l1_small_size": 32768, "trace_region_size": 31000000}],
+    [{"fabric_config": ttnn.FabricConfig.FABRIC_1D, "l1_small_size": 32768, "trace_region_size": 34000000}],
     indirect=True,
 )
 @pytest.mark.parametrize(("width", "height", "num_inference_steps"), [(1024, 1024, 20)])
@@ -39,28 +40,43 @@ from models.tt_dit.pipelines.fibo.pipeline_fibo import FiboPipeline, FiboPipelin
     ),
     [
         pytest.param(
-            (2, 4),
-            (2, 0),
-            (1, 0),
-            (4, 1),
-            (4, 1),
-            (4, 1),
+            (2, 2),  # mesh_device
+            (1, 0),  # cfg
+            (1, 0),  # sp
+            (2, 1),  # tp
+            (2, 1),  # encoder_tp
+            (2, 1),  # vae_tp
+            ttnn.Topology.Linear,
+            1,
+            "2x2cfg0sp0tp1",
+            id="2x2cfg0sp0tp1",
+            marks=run_for_blackhole(),
+        ),
+        pytest.param(
+            (2, 4),  # mesh_device
+            (2, 0),  # cfg
+            (1, 0),  # sp
+            (4, 1),  # tp
+            (4, 1),  # encoder_tp
+            (4, 1),  # vae_tp
             ttnn.Topology.Linear,
             1,
             "2x4cfg0sp0tp1",
             id="2x4cfg0sp0tp1",
+            marks=run_for_wormhole_b0(),
         ),
         pytest.param(
-            (2, 4),
-            (2, 1),
-            (2, 0),
-            (2, 1),
-            (4, 1),
-            (4, 1),
+            (2, 4),  # mesh_device
+            (2, 1),  # cfg
+            (2, 0),  # sp
+            (2, 1),  # tp
+            (4, 1),  # encoder_tp
+            (4, 1),  # vae_tp
             ttnn.Topology.Linear,
             1,
             "2x4cfg1sp0tp1",
             id="2x4cfg1sp0tp1",
+            marks=run_for_wormhole_b0(),
         ),
     ],
     indirect=["mesh_device"],
