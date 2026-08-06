@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -319,7 +320,28 @@ class Attention(Module):
         k = self.reorder_for_attention(k, b, self.num_heads, head_dim)
         v = self.reorder_for_attention(v, b, self.num_heads, head_dim)
 
-        x = ttnn.transformer.scaled_dot_product_attention(q, k, v, is_causal=False)
+        centre_v = os.environ.get("VAE_CENTRE_V")
+        if centre_v:
+            # Attention weights sum to 1, so sum_j p_j (v_j - v_bar) = out - v_bar: removing any
+            # fixed vector from V and adding it back is exact. It matters because this V is a
+            # groupnorm'd feature map -- one dominant shared direction plus a small per-token
+            # residual -- and that common mode is what accumulates coherently in the bf16 pack onto
+            # cb_out_im across k chunks.
+            #
+            # "bias" takes only v_j's guaranteed token-independent part, to_v.bias, which is free
+            # (weights only, no reduce). "mean" also takes Wv @ x_bar, the data-driven part of the
+            # shared direction. The gap between them is how much of the common mode is data.
+            if centre_v == "bias":
+                v_bias = self.reorder_for_attention(
+                    self.to_v(ttnn.multiply(x, 0.0)), b, self.num_heads, head_dim
+                )
+                v_bar = ttnn.mean(v_bias, dim=2, keepdim=True)  # every token identical: this is bv
+            else:
+                v_bar = ttnn.mean(v, dim=2, keepdim=True)
+            x = ttnn.transformer.scaled_dot_product_attention(q, k, ttnn.subtract(v, v_bar), is_causal=False)
+            x = ttnn.add(x, v_bar)
+        else:
+            x = ttnn.transformer.scaled_dot_product_attention(q, k, v, is_causal=False)
         x = ttnn.reshape(ttnn.permute(x, (0, 2, 1, 3)), (b, h, w, inner_dim))
 
         for to_out in self.to_out:

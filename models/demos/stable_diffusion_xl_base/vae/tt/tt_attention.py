@@ -2,6 +2,8 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import torch
 
 import ttnn
@@ -122,6 +124,9 @@ class TtAttention(LightweightModule):
         assert encoder_hidden_states is None, "VAE does self attention only"
         encoder_hidden_states = hidden_states
 
+        centre_v = os.environ.get("VAE_CENTRE_V")
+        zero_in = ttnn.multiply(hidden_states, 0.0) if centre_v == "bias" else None
+
         qkv_fused = ttnn.linear(
             hidden_states,
             self.tt_qkv_weights,
@@ -140,6 +145,31 @@ class TtAttention(LightweightModule):
         )
         ttnn.deallocate(qkv_fused)
 
+        v_bar = None
+        if centre_v:
+            # Attention weights sum to 1, so sum_j p_j (v_j - v_bar) = out - v_bar: removing any
+            # fixed vector from V and adding it back is exact. The VAE's V is a groupnorm'd feature
+            # map -- one dominant shared direction plus a small residual -- and that common mode is
+            # what the bf16 pack-accumulate onto cb_out_im drifts on, coherently, across k chunks.
+            # "bias" takes only the token-independent part (the qkv bias, recovered by projecting a
+            # zeroed input so it lands in the same head layout); "mean" also takes Wv @ x_bar.
+            if centre_v == "bias":
+                qkv_bias_only = ttnn.linear(
+                    zero_in,
+                    self.tt_qkv_weights,
+                    bias=self.tt_qkv_bias,
+                    dtype=ttnn.bfloat16,
+                    compute_kernel_config=self.compute_kernel_config,
+                )
+                v_bias = ttnn.experimental.nlp_create_qkv_heads(
+                    qkv_bias_only, num_heads=self.heads, transpose_k_heads=False,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                )[2]
+                v_bar = ttnn.mean(v_bias, dim=2, keepdim=True)
+            else:
+                v_bar = ttnn.mean(v_heads, dim=2, keepdim=True)
+            v_heads = ttnn.subtract(v_heads, v_bar)
+
         hidden_states = ttnn.transformer.scaled_dot_product_attention(
             q_heads,
             k_heads,
@@ -149,6 +179,8 @@ class TtAttention(LightweightModule):
             program_config=self.sdpa_program_config,
             compute_kernel_config=self.sdpa_compute_kernel_config,
         )
+        if v_bar is not None:
+            hidden_states = ttnn.add(hidden_states, v_bar)
         hidden_states = ttnn.experimental.nlp_concat_heads(hidden_states, memory_config=ttnn.L1_MEMORY_CONFIG)
 
         hidden_states = ttnn.linear(
