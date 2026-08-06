@@ -1202,6 +1202,66 @@ inline bool sdpa_first_half_unmasked(
 }
 
 /**
+ * Writes cb_kt_sub = cb_kt_in - c, where c is the mean key taken from the first K chunk.
+ *
+ * Qwen2.5-VL's k_proj bias survives RoPE almost unrotated (||k_bar|| matches ||bk|| to four
+ * figures), leaving a persistent mean key that every query dots against -- ~7e4 on the raw scores
+ * of its sink heads, which is past fp16 DEST's 65504 ceiling, so those scores saturate rather than
+ * merely losing precision. Softmax is shift-invariant along the key axis, so subtracting ANY fixed
+ * vector from K is exact. That is what makes this cheap: c need not be the true mean over all keys,
+ * and need not agree between cores, so it can come from the first chunk and K is read once.
+ *
+ * K^T is [DHt, KT_stride] tiles, so the mean is a REDUCE_ROW and removing it is a bcast-cols
+ * subtract -- both patterns the kernel already uses for the running row max.
+ */
+template <uint32_t DHt, uint32_t KT_stride, uint32_t cb_kt_in, uint32_t cb_kt_sub, uint32_t cb_k_mean,
+          uint32_t cb_scale>
+static void sdpa_strip_k_mean(const bool is_first_iter) {
+    constexpr uint32_t kt_tiles = DHt * KT_stride;
+    // reduce_c's scalar operand is 1.0, so it returns a sum; scale it to a mean here.
+    constexpr uint32_t inv_keys = __builtin_bit_cast(uint32_t, 1.0f / static_cast<float>(KT_stride * 32));
+
+    CircularBuffer cb_mean(cb_k_mean);
+    CircularBuffer cb_sub(cb_kt_sub);
+
+    if (is_first_iter) {
+        reduce_c<PoolType::SUM, ReduceDim::REDUCE_ROW, cb_kt_in, cb_scale, DHt>(
+            cb_k_mean, cb_k_mean, KT_stride, false);
+        cb_mean.wait_front(DHt);
+        copy_tile_to_dst_init_short(cb_k_mean);
+        binop_with_scalar_tile_init();
+        pack_reconfig_data_format(cb_k_mean);
+        for (uint32_t i = 0; i < DHt; i++) {
+            tile_regs_acquire();
+            copy_tile(cb_k_mean, 0, 0);
+            MATH((mul_unary_tile(0, inv_keys)));
+            tile_regs_commit();
+            cb_mean.pop_front(1);
+            cb_mean.reserve_back(1);
+            tile_regs_wait();
+            pack_tile(0, cb_k_mean);
+            tile_regs_release();
+            cb_mean.push_back(1);
+        }
+    }
+    cb_mean.wait_front(DHt);
+
+    sub_bcast_cols_init_short(cb_kt_in, cb_k_mean);
+    cb_sub.reserve_back(kt_tiles);
+    for (uint32_t d = 0; d < DHt; d++) {
+        for (uint32_t j = 0; j < KT_stride; j++) {
+            tile_regs_acquire();
+            sub_tiles_bcast_cols(cb_kt_in, cb_k_mean, d * KT_stride + j, d, 0);
+            tile_regs_commit();
+            tile_regs_wait();
+            pack_tile(0, cb_kt_sub);
+            tile_regs_release();
+        }
+    }
+    cb_sub.push_back(kt_tiles);
+}
+
+/**
  * One K-chunk iteration of the streaming SDPA algorithm (v2 — no row buffers).
  * Phase 1: Q@KT directly into cb_qkt_im with cb_push_back_hold_wr_ptr, in-place sub_exp.
  * Phase 2: Drain + QKT@V with SALAD corrections, streaming normalization on last K iter.
@@ -1241,7 +1301,9 @@ template <
     uint32_t sliding_window_size = 0,
     bool use_attention_sink = false,
     uint32_t cb_attention_sink = INVALID_CB,
-    bool use_provided_mask = false>
+    bool use_provided_mask = false,
+    uint32_t cb_k_mean = INVALID_CB,
+    uint32_t cb_kt_sub = INVALID_CB>
 static void sdpa_inner_loop_step(
     AccumulatorHalf& prev,
     AccumulatorHalf& cur,
@@ -1296,14 +1358,24 @@ static void sdpa_inner_loop_step(
     // cb_push_back_hold_wr_ptr makes each row visible to UNPACK without advancing wr_ptr.
     CircularBuffer(cb_kt_in).wait_front(DHt * KT_stride);
 
+    constexpr bool strip_k_mean = cb_kt_sub != cb_q_in;
+    // Phase 1 matmuls read the mean-stripped copy when enabled. Phase 2's latent-V path reads the
+    // reader's K^T buffer directly, which is why the strip writes to a second CB rather than in
+    // place -- and why it is incompatible with aliasing V onto K^T.
+    constexpr uint32_t cb_kt_mm = strip_k_mean ? cb_kt_sub : cb_kt_in;
+    if constexpr (strip_k_mean) {
+        static_assert(!kt_inplace_v, "mean-key subtraction cannot alias V onto K^T");
+        sdpa_strip_k_mean<DHt, KT_stride, cb_kt_in, cb_kt_sub, cb_k_mean, cb_identity_scale_in>(is_first_iter);
+    }
+
     for (uint32_t q_subblock = 0; q_subblock < q_num_subblocks; q_subblock++) {
         MaybeDeviceZoneScopedN(profiling_enabled, "Softmax(Q@KT)");
         CircularBuffer(cb_q_in).wait_front(q_wait_tiles);
         kt_index_offset = 0;
 
         sdpa_maybe_pack_reconfig_data_format<cb_normalized_out, cb_qkt_im>();
-        sdpa_maybe_reconfig_data_format<cb_qkt_im, cb_kt_in, cb_identity_scale_in, cb_q_in>();
-        mm_no_mop_init_short(cb_q_in, cb_kt_in, true, actual_sbw, qkt_subblock_h, in0_block_w);
+        sdpa_maybe_reconfig_data_format<cb_qkt_im, cb_kt_mm, cb_identity_scale_in, cb_q_in>();
+        mm_no_mop_init_short(cb_q_in, cb_kt_mm, true, actual_sbw, qkt_subblock_h, in0_block_w);
         // Configure pack once before the kt loop for cb_qkt_im. Both sub_exp
         // and blocked_matmul_and_pack skip their internal configure (same cb+width).
         // sub_exp's configure_single_tile_pack(reduce_cb) clobbers the global to 1,
@@ -1346,7 +1418,7 @@ static void sdpa_inner_loop_step(
         for (uint32_t kt_subblock = 0; kt_subblock < kt_num_full_subblocks; ++kt_subblock) {
             if (q_subblock > 0) {
                 uint32_t prev_q_subblock = q_subblock - 1;
-                sdpa_maybe_reconfig_data_format<cb_kt_in, cb_qkt_im, cb_q_in, cb_qkt_im>();
+                sdpa_maybe_reconfig_data_format<cb_kt_mm, cb_qkt_im, cb_q_in, cb_qkt_im>();
                 sub_exp_block_bcast_cols<profiling_enabled, scale_fp32>(
                     cb_qkt_im,
                     cur.max,
@@ -1358,14 +1430,14 @@ static void sdpa_inner_loop_step(
                     actual_sbw,
                     /*skip_pack_configure=*/true);
                 sdpa_maybe_pack_reconfig_data_format<cb_recip_scratch, cb_qkt_im>();
-                sdpa_maybe_reconfig_data_format<cb_qkt_im, cb_kt_in, cb_qkt_im, cb_q_in>();
-                mm_no_mop_reinit_short(cb_q_in, cb_kt_in, true, actual_sbw, qkt_subblock_h, in0_block_w);
+                sdpa_maybe_reconfig_data_format<cb_qkt_im, cb_kt_mm, cb_qkt_im, cb_q_in>();
+                mm_no_mop_reinit_short(cb_q_in, cb_kt_mm, true, actual_sbw, qkt_subblock_h, in0_block_w);
             }
             {
                 MaybeDeviceZoneScopedN(profiling_enabled, "Q@KT MM+Pack");
                 blocked_matmul_and_pack<true, KT_stride, KT_stride>(
                     cb_q_in,
-                    cb_kt_in,
+                    cb_kt_mm,
                     cb_qkt_im,
                     q_index_offset,
                     kt_index_offset,
@@ -1385,7 +1457,7 @@ static void sdpa_inner_loop_step(
             }
         }
         // Restore float16b for mask/reduce after Q@KT.
-        sdpa_maybe_reconfig_data_format<cb_kt_in, cb_qkt_im, cb_q_in, cb_qkt_im>();
+        sdpa_maybe_reconfig_data_format<cb_kt_mm, cb_qkt_im, cb_q_in, cb_qkt_im>();
 
         // Mask stamp/apply: L1-accumulate the mask onto cb_qkt_im for this row group. A dense
         // user-provided mask and the structured lightweight palette are mutually exclusive — the
@@ -1489,6 +1561,14 @@ static void sdpa_inner_loop_step(
 
     // In-place latent-V reads K^T again in Phase 2, so defer the K^T pop until after the
     // softmax@V matmul (handled where the materialized-V pop would normally fire).
+    if constexpr (strip_k_mean) {
+        CircularBuffer(cb_kt_sub).pop_front(DHt * KT_stride);
+        // c is recomputed for each q chunk (is_first_iter fires once per k loop), so release it at
+        // the end of the loop -- otherwise the next q chunk's reduce_c blocks reserving a full CB.
+        if (is_last_iter) {
+            CircularBuffer(cb_k_mean).pop_front(DHt);
+        }
+    }
     if constexpr (!kt_inplace_v) {
         CircularBuffer(cb_kt_in).pop_front(DHt * KT_stride);
     }
@@ -1915,7 +1995,9 @@ template <
     bool is_causal_sdpa = false,
     bool use_attention_sink = false,
     uint32_t cb_attention_sink = INVALID_CB,
-    bool use_provided_mask = false>
+    bool use_provided_mask = false,
+    uint32_t cb_k_mean = INVALID_CB,
+    uint32_t cb_kt_sub = INVALID_CB>
 void sdpa_standard_v2(
     const uint32_t q_chunks_per_core,
     const uint32_t k_num_chunks,
@@ -2058,7 +2140,9 @@ void sdpa_standard_v2(
                 sliding_window_size,
                 use_attention_sink,
                 cb_attention_sink,
-                use_provided_mask>(
+                use_provided_mask,
+                cb_k_mean,
+                cb_kt_sub>(
                 prev,
                 cur,
                 is_last,

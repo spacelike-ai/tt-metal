@@ -19,6 +19,7 @@
 #include <optional>
 #include <string>
 #include <cmath>
+#include <cstdlib>
 
 using namespace tt::constants;
 using namespace tt::tt_metal;
@@ -172,6 +173,15 @@ ChunkedParams compute_chunked_params(
 
 tt::DataFormat fp32_dest_intermediate_dataformat(bool fp32_dest_acc_en) {
     return fp32_dest_acc_en ? tt::DataFormat::Float32 : tt::DataFormat::Float16_b;
+}
+
+// Debug hook, off unless the environment says otherwise. cb_qk_im and cb_sum are both widened by
+// fp32_dest_acc_en, and that flag also selects the streaming kernel, so nothing on stock silicon can
+// say which of the two intermediates the accuracy comes from. These force either one down to bf16
+// while leaving the dest width -- and therefore the compute path -- alone.
+bool env_forces_bf16(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
 }  // namespace
@@ -697,8 +707,12 @@ ProgramDescriptor SDPAOperation::SDPAProgramFactory::create_descriptor(
     tt::DataFormat im_df =
         tt::DataFormat::Float16_b;  // Keep most intermediates in bf16 to save L1; opt-in fp32 per-CB below.
     tt::DataFormat stats_df = im_df;
-    tt::DataFormat qk_im_df = fp32_dest_intermediate_dataformat(fp32_dest_acc_en);
-    tt::DataFormat sum_df = fp32_dest_intermediate_dataformat(fp32_dest_acc_en);
+    tt::DataFormat qk_im_df = env_forces_bf16("TT_SDPA_QK_IM_BF16")
+                                  ? tt::DataFormat::Float16_b
+                                  : fp32_dest_intermediate_dataformat(fp32_dest_acc_en);
+    tt::DataFormat sum_df = env_forces_bf16("TT_SDPA_SUM_BF16")
+                                ? tt::DataFormat::Float16_b
+                                : fp32_dest_intermediate_dataformat(fp32_dest_acc_en);
     // salad_correct_fused inits mul_bcast_cols with out CB and applies it to sum CB too —
     // both must share the same data format for the unpack config to be correct.
     TT_ASSERT(
@@ -800,6 +814,23 @@ ProgramDescriptor SDPAOperation::SDPAProgramFactory::create_descriptor(
     // No row buffers needed — cb_push_back_hold_wr_ptr writes directly to cb_qkt_im.
     if (use_streaming_compute) {
         cb_ids.recip_scratch = allocate_tile_cb(1, im_tile_size, im_df);
+    }
+
+    // Opt-in mean-key subtraction. Qwen2.5-VL's k_proj bias survives RoPE almost unrotated, leaving
+    // a persistent mean key worth ~7e4 on the raw scores of a few heads -- past fp16 DEST's 65504
+    // ceiling, so those scores saturate outright unless fp32_dest_acc_en is on. Subtracting any
+    // fixed vector from K shifts a whole row of scores equally, so removing the mean is exact, and
+    // doing it inside the kernel avoids the DRAM round-trip a separate ttnn op would cost.
+    const bool strip_k_mean = use_streaming_compute && env_forces_bf16("TT_SDPA_STRIP_K_MEAN");
+    if (strip_k_mean) {
+        cb_ids.k_mean = allocate_tile_cb(DHt, im_tile_size, im_df);
+        cb_ids.kt_sub = allocate_tile_cb(DHt * Sk_chunk_t, im_tile_size, im_df);
+    } else {
+        // Like cu_window_seqlens, these ids must stay well-formed even when unused: an inactive id
+        // would constexpr-fault on the kernel's tile-size lookup. Aliasing q_in is also how the
+        // kernel detects the feature is off.
+        cb_ids.k_mean = cb_ids.q_in;
+        cb_ids.kt_sub = cb_ids.q_in;
     }
 
     cb_ids.qk_im = allocate_tile_cb(qk_tiles, qk_im_tile_size, qk_im_df);

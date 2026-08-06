@@ -34,6 +34,10 @@ struct CBIds {
     uint32_t sum_B = inactive;
     uint32_t exp_max_diff = inactive;
     uint32_t cu_window_seqlens = inactive;  // windowed mode only
+    // Mean-key subtraction (streaming path, opt-in): k_mean holds the per-head-dim mean taken from
+    // the first K chunk, kt_sub the K^T with it removed. Both inactive when the feature is off.
+    uint32_t k_mean = inactive;
+    uint32_t kt_sub = inactive;
 
     std::vector<uint32_t> reader_compile_time_args() const {
         return {q_in, k_in, v_in, mask_in, attention_sink, page_table, chunk_start_idx_compute, chunk_start_idx_writer};
@@ -62,7 +66,9 @@ struct CBIds {
             max_B,
             sum_A,
             sum_B,
-            exp_max_diff};
+            exp_max_diff,
+            k_mean,
+            kt_sub};
     }
 };
 

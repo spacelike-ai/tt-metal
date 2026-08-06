@@ -90,6 +90,8 @@ void kernel_main() {
     constexpr uint32_t cb_sum_A = get_compile_time_arg_val(cb_arg_offset + 15);
     constexpr uint32_t cb_sum_B = get_compile_time_arg_val(cb_arg_offset + 16);
     constexpr uint32_t cb_exp_max_diff = get_compile_time_arg_val(cb_arg_offset + 17);
+    constexpr uint32_t cb_k_mean = get_compile_time_arg_val(cb_arg_offset + 18);
+    constexpr uint32_t cb_kt_sub = get_compile_time_arg_val(cb_arg_offset + 19);
     uint32_t chunked_q_chunk_offset = 0;
     CircularBuffer cb_chunk_start_idx_obj(cb_chunk_start_idx);
     CircularBuffer cb_identity_scale_in_obj(cb_identity_scale_in);
@@ -179,7 +181,9 @@ void kernel_main() {
             is_causal,
             use_attention_sink,
             cb_attention_sink,
-            use_provided_mask>(
+            use_provided_mask,
+            cb_k_mean,
+            cb_kt_sub>(
             global_q_count,
             k_num_chunks,
             cb_out_im_A,
