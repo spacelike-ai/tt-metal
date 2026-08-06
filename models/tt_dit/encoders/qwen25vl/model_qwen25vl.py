@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -268,9 +269,9 @@ class Qwen25VlAttention(Module):
         )
 
         self._sdpa_compute_kernel_config = ttnn.WormholeComputeKernelConfig(
-            math_fidelity=ttnn.MathFidelity.HiFi4,
+            math_fidelity=ttnn.MathFidelity.HiFi2 if os.environ.get("QWEN_HIFI2") else ttnn.MathFidelity.HiFi4,
             math_approx_mode=False,
-            fp32_dest_acc_en=True,
+            fp32_dest_acc_en=not os.environ.get("QWEN_NO_FP32_DEST"),
             # packer_l1_acc=True,
         )
 
@@ -347,6 +348,8 @@ class Qwen25VlAttention(Module):
         attention_bias: ttnn.Tensor | None,
         pos_embeds: tuple[ttnn.Tensor, ttnn.Tensor],
     ) -> ttnn.Tensor:
+        x_zero = ttnn.multiply(x, 0.0) if os.environ.get("QWEN_SINK_STATIC") else None
+
         x = self.qkv_proj.forward(x)
 
         q, k, v = ttnn.experimental.nlp_create_qkv_heads(
@@ -360,6 +363,32 @@ class Qwen25VlAttention(Module):
         cos, sin = pos_embeds
         q = _apply_rope(q, cos, sin)
         k = _apply_rope(k, cos, sin)
+
+        if os.environ.get("QWEN_SINK_FIX"):
+            # This checkpoint's k_proj bias sits almost entirely in RoPE's non-rotating band, so it
+            # survives as a persistent mean key that every query dots against -- a ~7e4 offset on
+            # the raw scores of five sink heads (detect_sinks.py). Softmax ignores it, but SDPA has
+            # to hold O(1) margins on top of it in cb_qk_im and in DEST, where they do not survive.
+            # Subtracting any fixed vector from K shifts a whole row of scores by the same amount,
+            # so this is exact; the mean key is the choice that cancels the offset.
+            # QWEN_SINK_CHUNK restricts the mean to the first k chunk, which is what the in-kernel
+            # version can afford (K read once). Isolates that choice from the kernel's indexing.
+            if x_zero is not None:
+                # Weights-only c: with a zeroed input the projection emits the bias alone, so this
+                # is exactly RoPE(bk) averaged over the actual positions -- k_bar from the
+                # checkpoint, in the model's own head layout, with no data contribution at all.
+                kb = ttnn.experimental.nlp_create_qkv_heads(
+                    ttnn.unsqueeze(self.qkv_proj.forward(x_zero), 1),
+                    num_heads=self._num_local_heads,
+                    num_kv_heads=self._num_local_kv_heads,
+                    transpose_k_heads=False,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                )[1]
+                c = ttnn.mean(_apply_rope(kb, cos, sin), dim=2, keepdim=True)
+            else:
+                src = k[:, :, :MAX_CHUNK_SIZE, :] if os.environ.get("QWEN_SINK_CHUNK") else k
+                c = ttnn.mean(src, dim=2, keepdim=True)
+            k = ttnn.subtract(k, c)
 
         x = ttnn.transformer.scaled_dot_product_attention(
             q,
