@@ -15,6 +15,7 @@
 #include <tt-metalium/tensor_accessor_args.hpp>
 #include <hostdevcommon/common_values.hpp>
 #include <bit>
+#include <cstdio>
 #include <map>
 #include <optional>
 #include <string>
@@ -175,14 +176,16 @@ tt::DataFormat fp32_dest_intermediate_dataformat(bool fp32_dest_acc_en) {
     return fp32_dest_acc_en ? tt::DataFormat::Float32 : tt::DataFormat::Float16_b;
 }
 
-// Debug hook, off unless the environment says otherwise. cb_qk_im and cb_sum are both widened by
+// Debug hooks, off unless the environment says otherwise. cb_qk_im and cb_sum are both widened by
 // fp32_dest_acc_en, and that flag also selects the streaming kernel, so nothing on stock silicon can
-// say which of the two intermediates the accuracy comes from. These force either one down to bf16
-// while leaving the dest width -- and therefore the compute path -- alone.
-bool env_forces_bf16(const char* name) {
+// say which of the two intermediates the accuracy comes from. The overrides below pin individual
+// CBs, in both directions -- two force bf16, two force fp32 -- so the helper is named for what it
+// reads rather than for what any one caller does with the answer.
+bool env_flag_set(const char* name) {
     const char* value = std::getenv(name);
     return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
+
 
 }  // namespace
 
@@ -706,11 +709,20 @@ ProgramDescriptor SDPAOperation::SDPAProgramFactory::create_descriptor(
         (input_tensor_q.dtype() == DataType::FLOAT32) ? tt::DataFormat::Float32 : tt::DataFormat::Float16_b;
     tt::DataFormat im_df =
         tt::DataFormat::Float16_b;  // Keep most intermediates in bf16 to save L1; opt-in fp32 per-CB below.
-    tt::DataFormat stats_df = im_df;
-    tt::DataFormat qk_im_df = env_forces_bf16("TT_SDPA_QK_IM_BF16")
+    // cb_max holds the running row maximum, and a bf16 one undershoots the true maximum by up to
+    // one ULP. That undershoot is the entire input to the exp's saturation, so this width -- not
+    // fp32_dest_acc_en -- is what decides whether the pin is reachable at all. There is no build
+    // flag for it, so this env override exists to measure the alternative on silicon rather than
+    // only in the model. Opt-in, and off by default: it widens three CBs, not one.
+    // Widening all three together does NOT work: cb_exp_max_diff is consumed by
+    // mul_block_bcast_cols_inplace against cb_out_im, which stays bf16, and the unpack config
+    // needs them to agree. So the max buffers are separable from the rescale buffer.
+    tt::DataFormat stats_df = env_flag_set("TT_SDPA_STATS_FP32") ? tt::DataFormat::Float32 : im_df;
+    tt::DataFormat max_df = env_flag_set("TT_SDPA_MAX_FP32") ? tt::DataFormat::Float32 : stats_df;
+    tt::DataFormat qk_im_df = env_flag_set("TT_SDPA_QK_IM_BF16")
                                   ? tt::DataFormat::Float16_b
                                   : fp32_dest_intermediate_dataformat(fp32_dest_acc_en);
-    tt::DataFormat sum_df = env_forces_bf16("TT_SDPA_SUM_BF16")
+    tt::DataFormat sum_df = env_flag_set("TT_SDPA_SUM_BF16")
                                 ? tt::DataFormat::Float16_b
                                 : fp32_dest_intermediate_dataformat(fp32_dest_acc_en);
     // salad_correct_fused inits mul_bcast_cols with out CB and applies it to sum CB too —
@@ -757,6 +769,29 @@ ProgramDescriptor SDPAOperation::SDPAProgramFactory::create_descriptor(
     };
     const auto allocate_tile_cb = [&](uint32_t num_tiles, uint32_t tile_size, tt::DataFormat data_format) -> uint32_t {
         return allocate_cb(tile_size, num_tiles, data_format);
+    };
+
+    // "Inert" and "never applied" are the same observation from outside, so a run that turns one of
+    // the format overrides on can be asked afterwards what it allocated. This reads back the
+    // CBDescriptor that was actually pushed, not the variable that fed it, so a format selected and
+    // then not honoured downstream still shows up. Off unless TT_SDPA_REPORT_CB_FORMATS is set.
+    const auto report_cb = [&](const char* label, uint32_t cb_index) {
+        if (!env_flag_set("TT_SDPA_REPORT_CB_FORMATS")) {
+            return;
+        }
+        for (const auto& cb : desc.cbs) {
+            const auto& format = cb.format_descriptors.front();
+            if (format.buffer_index == cb_index) {
+                std::fprintf(
+                    stderr,
+                    "TT_SDPA_CB %s format=%d page_size=%u total=%u\n",
+                    label,
+                    static_cast<int>(format.data_format),
+                    static_cast<unsigned>(format.page_size),
+                    static_cast<unsigned>(cb.total_size));
+                return;
+            }
+        }
     };
 
     cb_ids.q_in = allocate_tile_cb(q_tiles, q_tile_size, q_df);
@@ -821,7 +856,7 @@ ProgramDescriptor SDPAOperation::SDPAProgramFactory::create_descriptor(
     // ceiling, so those scores saturate outright unless fp32_dest_acc_en is on. Subtracting any
     // fixed vector from K shifts a whole row of scores equally, so removing the mean is exact, and
     // doing it inside the kernel avoids the DRAM round-trip a separate ttnn op would cost.
-    const bool strip_k_mean = use_streaming_compute && env_forces_bf16("TT_SDPA_STRIP_K_MEAN");
+    const bool strip_k_mean = use_streaming_compute && env_flag_set("TT_SDPA_STRIP_K_MEAN");
     if (strip_k_mean) {
         cb_ids.k_mean = allocate_tile_cb(DHt, im_tile_size, im_df);
         cb_ids.kt_sub = allocate_tile_cb(DHt * Sk_chunk_t, im_tile_size, im_df);
@@ -836,11 +871,14 @@ ProgramDescriptor SDPAOperation::SDPAProgramFactory::create_descriptor(
     cb_ids.qk_im = allocate_tile_cb(qk_tiles, qk_im_tile_size, qk_im_df);
     cb_ids.out_im_A = allocate_tile_cb(out_im_tiles, im_tile_size, im_df);
     cb_ids.out_im_B = allocate_tile_cb(out_im_tiles, im_tile_size, im_df);
-    cb_ids.max_A = allocate_tile_cb(statistics_tiles, stats_tile_size, stats_df);
-    cb_ids.max_B = allocate_tile_cb(statistics_tiles, stats_tile_size, stats_df);
+    cb_ids.max_A = allocate_tile_cb(statistics_tiles, tt::tile_size(max_df), max_df);
+    cb_ids.max_B = allocate_tile_cb(statistics_tiles, tt::tile_size(max_df), max_df);
+    report_cb("max_A", cb_ids.max_A);
     cb_ids.sum_A = allocate_tile_cb(statistics_tiles, sum_tile_size, sum_df);
     cb_ids.sum_B = allocate_tile_cb(statistics_tiles, sum_tile_size, sum_df);
     cb_ids.exp_max_diff = allocate_tile_cb(statistics_tiles, stats_tile_size, stats_df);
+    report_cb("exp_max_diff", cb_ids.exp_max_diff);
+    report_cb("qk_im", cb_ids.qk_im);
     cb_ids.out = allocate_tile_cb(out0_t, out_tile_size, out_df);
 
     const auto reader_cb_compile_time_args = cb_ids.reader_compile_time_args();
