@@ -32,11 +32,7 @@ def test_vision_block_inference(
     reset_seeds,
     ensure_gc,
 ):
-    n_layers = 27
     dtype = ttnn.bfloat8_b
-    pccs = [0.99] * n_layers
-    pccs[24:] = [0.85] * (n_layers - 24)
-    print(pccs)
     batch_size = 1  # For prefill we only support batch_size = 1
 
     # Example inputs
@@ -50,6 +46,15 @@ def test_vision_block_inference(
 
     model_args = VisionModelArgs(mesh_device, dummy_weights=True, max_batch_size=batch_size, max_seq_len=seq_len)
     reference_whole_model = model_args.reference_vision_model()
+
+    n_layers = model_args.hf_config.vision_config.depth
+    # The last three blocks accumulate the most error, so hold them to a looser bound.
+    pccs = [0.99] * n_layers
+    pccs[-3:] = [0.85] * min(3, n_layers)
+    if model_args.base_model_name == "FIBO-vlm":
+        # FIBO-vlm's block 0 has norm2 gains up to 16.9 where every other block stays near 3, which
+        # costs bfloat8_b precision on the MLP input. The full tower still reaches 0.94 (test_model.py).
+        pccs[0] = 0.98
 
     all_passing = True
     for layer_num in range(n_layers):

@@ -20,9 +20,15 @@ Performance collected from [demo/demo.py](demo/demo.py) with the `batch-1` test 
 | Model             | Device      | Speed (t/s/u) | TTFT (ms) |
 |-------------------|-------------|---------------|-----------|
 | qwen3_vl-32b    | T3K          | 18.72         | 1828.41   |
+| fibo-vlm        | T3K          | 40.40         | 784.28    |
+| fibo-vlm        | N300         | 31.74         | 715.68    |
+| fibo-vlm        | N150         | 23.59         | 117.82    |
 
 ## Vision Performance
 
 | Model             | Device      | Speed (t/s/u) | TTFT (ms) |
 |-------------------|-------------|---------------|-----------|
 | qwen3_vl-32b    | T3K          | 1148.41        | 2400     |
+| fibo-vlm        | T3K          | 2149.66        | 825.55   |
+| fibo-vlm        | N300         | 2128.73        | 733.29   |
+| fibo-vlm        | N150         | 2372.21        | 878.46   |

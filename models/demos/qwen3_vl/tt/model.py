@@ -155,6 +155,19 @@ class VisionTransformer(LightweightModule):
         return x, deepstack_feature_list
 
 
+def mesh_partition_and_free(tensor, dim, num_devices):
+    """Partitions a tensor across the mesh and frees the unpartitioned input.
+
+    On a single-device mesh ttnn.mesh_partition hands its input straight back, so freeing the
+    input there would deallocate the tensor being returned.
+    """
+    if num_devices == 1:
+        return tensor
+    partitioned = ttnn.mesh_partition(tensor, dim)
+    ttnn.deallocate(tensor)
+    return partitioned
+
+
 class DropInVisionTransformer(torch.nn.Module):
     """Wraps VisionTransformer to be a drop-in replacement for
     Qwen2_5_VisionTransformerPretrainedModel. It uses the reference model
@@ -304,13 +317,14 @@ class DropInVisionTransformer(torch.nn.Module):
             # 1. Extract the relevant output part and adjust shape (matching test logic)
             out_hidden_size = self.model_args.hf_config.vision_config.out_hidden_size
             # Output shape from TT is [1, B=1, S, H_out_padded], slice H and squeeze B, batch dims
+            # These reshapes alias their inputs, so tt_out / deepstack_visual_embeds must not be
+            # deallocated here: that would free the buffers the reshaped views are reading from.
+            # mesh_partition_and_free releases them once it has copied the data out.
             final_output = ttnn.reshape(tt_out[:, 0:1, :, :out_hidden_size], (-1, out_hidden_size))
-            ttnn.deallocate(tt_out)
             deepstack_visual_embeds_output = [
                 ttnn.reshape(deepstack_visual_embeds[i][:, 0:1, :, :out_hidden_size], (-1, out_hidden_size))
                 for i in range(len(deepstack_visual_embeds))
             ]
-            [ttnn.deallocate(deepstack_visual_embeds[i]) for i in range(len(deepstack_visual_embeds))]
 
             if self.debug:
                 logger.info(f"DropInVisionTransformer: Debug enabled, running reference model...")
@@ -320,13 +334,12 @@ class DropInVisionTransformer(torch.nn.Module):
 
             # 2. Convert the output to the desired tensor sharding format
             # TODO: Modify this once we implement TP+DP to use just convert to desired output sharding
-            final_output_sharded = ttnn.mesh_partition(final_output, 1)
-            ttnn.deallocate(final_output)
+            num_devices = self.model_args.num_devices
+            final_output_sharded = mesh_partition_and_free(final_output, 1, num_devices)
             deepstack_visual_embeds_sharded = [
-                ttnn.mesh_partition(deepstack_visual_embeds_output[i], 1)
+                mesh_partition_and_free(deepstack_visual_embeds_output[i], 1, num_devices)
                 for i in range(len(deepstack_visual_embeds_output))
             ]
-            [ttnn.deallocate(deepstack_visual_embeds_output[i]) for i in range(len(deepstack_visual_embeds_output))]
 
             # 3. Aggregate in batched users list
             final_outputs.append(final_output_sharded)
@@ -427,14 +440,15 @@ class DropInVisionTransformer(torch.nn.Module):
 
         # Postprocessing - extract relevant output and adjust shape
         out_hidden_size = self.model_args.hf_config.vision_config.out_hidden_size
+        # These reshapes alias their inputs, so tt_out / deepstack_visual_embeds must not be
+        # deallocated here: that would free the buffers the reshaped views are reading from.
+        # mesh_partition_and_free releases them once it has copied the data out.
         final_output = ttnn.reshape(tt_out[:, 0:1, :, :out_hidden_size], (-1, out_hidden_size))
-        ttnn.deallocate(tt_out)
 
         deepstack_visual_embeds_output = [
             ttnn.reshape(deepstack_visual_embeds[i][:, 0:1, :, :out_hidden_size], (-1, out_hidden_size))
             for i in range(len(deepstack_visual_embeds))
         ]
-        [ttnn.deallocate(deepstack_visual_embeds[i]) for i in range(len(deepstack_visual_embeds))]
 
         if self.debug:
             logger.info(f"DropInVisionTransformer: Debug enabled, running reference model...")
@@ -443,14 +457,13 @@ class DropInVisionTransformer(torch.nn.Module):
             logger.info(f"DropInVisionTransformer: PCC to reference model: {pcc}")
 
         # Convert the output to the desired tensor sharding format
-        final_output_sharded = ttnn.mesh_partition(final_output, 1)
-        ttnn.deallocate(final_output)
+        num_devices = self.model_args.num_devices
+        final_output_sharded = mesh_partition_and_free(final_output, 1, num_devices)
 
         deepstack_visual_embeds_sharded = [
-            ttnn.mesh_partition(deepstack_visual_embeds_output[i], 1)
+            mesh_partition_and_free(deepstack_visual_embeds_output[i], 1, num_devices)
             for i in range(len(deepstack_visual_embeds_output))
         ]
-        [ttnn.deallocate(deepstack_visual_embeds_output[i]) for i in range(len(deepstack_visual_embeds_output))]
 
         return final_output_sharded, deepstack_visual_embeds_sharded
 
