@@ -11,7 +11,7 @@ import torch
 from diffusers import AutoencoderKLWan
 
 import ttnn
-from models.tt_dit.blocks.vae import (
+from models.tt_dit.models.vae.vae import (
     VaeContext,
     VaeConv2d,
     VaeMidBlock,
@@ -78,8 +78,6 @@ class FiboVaeDecoder(Module):
             num_channels=dims[0],
             norm=VaeNormDescRms(eps=eps),
             ctx=ctx,
-            attn_q_chunk_size=64,
-            attn_k_chunk_size=64,
         )
 
         self.up_blocks = ModuleList([])
@@ -94,7 +92,7 @@ class FiboVaeDecoder(Module):
             )
             self.up_blocks.append(up_block)
 
-        self.conv_norm_out = VaeRmsNorm(out_dim, eps=eps, ctx=ctx)
+        self.conv_norm_out = VaeRmsNorm(out_dim, eps=eps, ctx=ctx, activation_fn="silu")
         self.conv_out = VaeConv2d(out_dim, out_channels, kernel_size=3, padding=1, tensor_parallel=False, ctx=ctx)
 
         self._tp_axis = ctx.tp_axis
@@ -123,7 +121,6 @@ class FiboVaeDecoder(Module):
             z = block.forward(z)
 
         z = self.conv_norm_out.forward(z)
-        z = ttnn.silu(z)
 
         if self._ccl_manager is not None:
             z = self._ccl_manager.all_gather(z, dim=-1, mesh_axis=self._tp_axis, use_hyperparams=True)

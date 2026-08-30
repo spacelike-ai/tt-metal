@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from types import MappingProxyType
 
 import torch
 
@@ -431,9 +433,14 @@ class VaeResnetBlock(Module):
 
 
 class VaeAttention(Module):
-    # SDPA chunk sizes keyed by (is_blackhole, h_factor, w_factor, tp_factor). Empty by default;
-    # callers populate per-config tuning. Resolution priority: map > constructor args > default.
-    sdpa_chunk_size_map: dict[tuple, tuple[int, int]] = {}
+    # SDPA chunk sizes keyed by (is_blackhole, num_channels, h_factor, w_factor, tp_factor).
+    # Resolution priority: map > constructor args > default.
+    sdpa_chunk_size_map: Mapping[tuple, tuple[int, int]] = MappingProxyType(
+        {
+            (False, 1024, 1, 1, 4): (64, 64),
+            (False, 1024, 1, 1, 8): (64, 64),
+        }
+    )
     default_sdpa_chunk_size: tuple[int, int] = (128, 128)
 
     def __init__(
@@ -464,7 +471,7 @@ class VaeAttention(Module):
         tp_factor = ctx.device.shape[ctx.tp_axis] if ctx.tp_axis is not None else 1
         self._tp_factor = tp_factor
         resolved_q_chunk, resolved_k_chunk = self.sdpa_chunk_size_map.get(
-            (is_blackhole(), ctx.h_factor, ctx.w_factor, tp_factor),
+            (is_blackhole(), num_channels, ctx.h_factor, ctx.w_factor, tp_factor),
             (
                 q_chunk_size if q_chunk_size is not None else self.default_sdpa_chunk_size[0],
                 k_chunk_size if k_chunk_size is not None else self.default_sdpa_chunk_size[1],
