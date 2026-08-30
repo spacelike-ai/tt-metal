@@ -368,6 +368,7 @@ class FiboVAEDecoderAdapter:
             subfolder="vae",
             parallel_config=self._parallel_config,
             mesh_shape=tuple(self._device.shape),
+            mesh_device=self._device,
         )
 
     def _load_torch_state_dict(self) -> dict[str, torch.Tensor]:
