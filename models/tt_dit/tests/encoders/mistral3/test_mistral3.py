@@ -98,6 +98,7 @@ def test_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, masked: b
         subfolder="text_encoder",
         parallel_config=parallel_config,
         mesh_shape=tuple(mesh_device.shape),
+        mesh_device=mesh_device,
     )
 
     # This makes unmasked generation more similar in the two implementations, possibly because
@@ -221,6 +222,7 @@ def test_guided_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, ma
         subfolder="text_encoder",
         parallel_config=parallel_config,
         mesh_shape=tuple(mesh_device.shape),
+        mesh_device=mesh_device,
     )
 
     # This makes unmasked generation more similar in the two implementations, possibly because
@@ -367,6 +369,7 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, batch_size: int, skip_laye
         subfolder="text_encoder",
         parallel_config=parallel_config,
         mesh_shape=tuple(mesh_device.shape),
+        mesh_device=mesh_device,
     )
 
     tokens = torch.randint(0, config.vocab_size, [batch_size, sequence_length])
