@@ -48,13 +48,13 @@ def test_vision_block_inference(
     reference_whole_model = model_args.reference_vision_model()
 
     n_layers = model_args.hf_config.vision_config.depth
-    # The last three blocks accumulate the most error, so hold them to a looser bound.
-    pccs = [0.99] * n_layers
-    pccs[-3:] = [0.85] * min(3, n_layers)
-    if model_args.base_model_name == "FIBO-vlm":
-        # FIBO-vlm's block 0 has norm2 gains up to 16.9 where every other block stays near 3, which
-        # costs bfloat8_b precision on the MLP input. The full tower still reaches 0.94 (test_model.py).
-        pccs[0] = 0.98
+    # Block 0 is the only one fed the raw patch embedding instead of a residual stream, so its
+    # inputs span a much wider dynamic range: FIBO-vlm's norm2 gains reach 16.9 where every other
+    # block stays near 3, which costs bfloat8_b precision. Each bound is the worst measured
+    # (1 - PCC) across Qwen3-VL-32B and FIBO-vlm times 1.15, rounded down to two digits past the
+    # leading nines: 0.98891 for block 0, 0.99848 for the rest.
+    pccs = [0.9982] * n_layers
+    pccs[0] = 0.987
 
     all_passing = True
     for layer_num in range(n_layers):

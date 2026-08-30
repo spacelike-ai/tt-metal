@@ -29,6 +29,6 @@ Performance collected from [demo/demo.py](demo/demo.py) with the `batch-1` test 
 | Model             | Device      | Speed (t/s/u) | TTFT (ms) |
 |-------------------|-------------|---------------|-----------|
 | qwen3_vl-32b    | T3K          | 1148.41        | 2400     |
-| fibo-vlm        | T3K          | 2149.66        | 825.55   |
-| fibo-vlm        | N300         | 2128.73        | 733.29   |
-| fibo-vlm        | N150         | 2372.21        | 878.46   |
+| fibo-vlm        | T3K          | 1972.20        | 787.67   |
+| fibo-vlm        | N300         | 2013.67        | 667.11   |
+| fibo-vlm        | N150         | 2187.24        | 881.64   |
