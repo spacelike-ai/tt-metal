@@ -74,7 +74,7 @@ struct BufferDistributionSpecInputs {
 };
 
 struct MeshBufferAllocationExpected {
-    std::vector<CoreCoord> cores;
+    std::vector<tt::tt_metal::CoreCoord> cores;
     size_t num_cores;
     size_t num_dev_pages;
     size_t aligned_size;
@@ -446,7 +446,7 @@ INSTANTIATE_TEST_SUITE_P(
                     .physical_shard_shape = tt::tt_metal::Shape{1, 64, 96},
                     .page_shape = tt::tt_metal::Shape2D{32, 32},
                     .bytes_per_element = 1.0625,  // Headers for block float amortized over elements
-                    .grid = CoreRangeSet(tt::stl::Span<const CoreRange>(
+                    .grid = CoreRangeSet(ttsl::Span<const CoreRange>(
                         {CoreRange({4, 6}, {6, 6}), CoreRange({1, 1}, {1, 1}), CoreRange({0, 3}, {3, 3})})),
                     .shard_orientation = ShardOrientation::ROW_MAJOR,
                     .buffer_type = BufferType::L1,
@@ -516,7 +516,7 @@ INSTANTIATE_TEST_SUITE_P(
                     .page_shape = tt::tt_metal::Shape2D{32, 32},
                     .bytes_per_element = 2,
                     .grid = CoreRangeSet(
-                        tt::stl::Span<const CoreRange>({CoreRange({0, 0}, {2, 0}), CoreRange({0, 1}, {1, 1})})),
+                        ttsl::Span<const CoreRange>({CoreRange({0, 0}, {2, 0}), CoreRange({0, 1}, {1, 1})})),
                     .shard_orientation = ShardOrientation::ROW_MAJOR,
                     .buffer_type = BufferType::L1,
                 },
@@ -537,7 +537,7 @@ INSTANTIATE_TEST_SUITE_P(
 // Device-free check of the shard->core placement formula for both 1D strategies.
 // 8 single-page shards over 2 cores (R = 4 shards per core). Round-robin spreads
 // consecutive shards across cores; CONTIGUOUS_1D (shard-contiguous) packs a contiguous run per core.
-TEST(BufferDistributionSpecContiguous, ShardContiguousVsRoundRobinPlacement) {
+TEST(BufferDistributionSpecContiguous, CPU_ShardContiguousVsRoundRobinPlacement) {
     const tt::tt_metal::Shape tensor_in_pages{8, 1};
     const tt::tt_metal::Shape shard_in_pages{1, 1};
     const CoreRangeSet grid(CoreRange({0, 0}, {1, 0}));  // 2 cores
@@ -563,7 +563,7 @@ TEST(BufferDistributionSpecContiguous, ShardContiguousVsRoundRobinPlacement) {
 }
 
 // CONTIGUOUS_1D requires a uniform shards-per-core; an indivisible count must fatal.
-TEST(BufferDistributionSpecContiguous, ShardContiguousRequiresUniformShardsPerCore) {
+TEST(BufferDistributionSpecContiguous, CPU_ShardContiguousRequiresUniformShardsPerCore) {
     const tt::tt_metal::Shape tensor_in_pages{7, 1};  // 7 shards over 2 cores -> not uniform
     const tt::tt_metal::Shape shard_in_pages{1, 1};
     const CoreRangeSet grid(CoreRange({0, 0}, {1, 0}));  // 2 cores

@@ -198,9 +198,18 @@ std::optional<DeviceAddr> FreeListOpt::allocate_at_address(DeviceAddr absolute_s
     // Find the relevant size segregated list
     size_t size_segregated_index = get_size_segregated_index(block_size_[target_block_index]);
     std::vector<size_t>& segregated_list = free_blocks_segregated_by_size_[size_segregated_index];
-    auto it = std::find(segregated_list.begin(), segregated_list.end(), target_block_index);
-    TT_ASSERT(it != segregated_list.end(), "Block not found in size segregated list");
-    segregated_list.erase(it);
+    // Precondition: insert_block_to_segregated_list() keeps each list sorted ascending by block
+    // address, which the lower_bound below relies on. Assert it (debug-only) instead of silently
+    // assuming it.
+    const auto by_address = [this](size_t a, size_t b) { return block_address_[a] < block_address_[b]; };
+    TT_ASSERT(
+        std::is_sorted(segregated_list.begin(), segregated_list.end(), by_address),
+        "Size segregated list must be sorted by block address");
+    auto it = std::lower_bound(segregated_list.begin(), segregated_list.end(), target_block_index, by_address);
+    TT_ASSERT(it != segregated_list.end() && *it == target_block_index, "Block not found in size segregated list");
+    if (it != segregated_list.end() && *it == target_block_index) {
+        segregated_list.erase(it);
+    }
 
     size_t offset = start_address - block_address_[target_block_index];
     // Allocated addresses cache is invalidated by allocate_in_block
@@ -332,6 +341,12 @@ std::vector<std::pair<DeviceAddr, DeviceAddr>> FreeListOpt::available_addresses(
     size_t alloc_size = align(std::max(size_bytes, min_allocation_size_));
     size_t size_segregated_index = get_size_segregated_index(alloc_size);
     std::vector<std::pair<DeviceAddr, DeviceAddr>> addresses;
+
+    size_t max_candidate_blocks = 0;
+    for (size_t i = size_segregated_index; i < size_segregated_count; i++) {
+        max_candidate_blocks += free_blocks_segregated_by_size_[i].size();
+    }
+    addresses.reserve(max_candidate_blocks);
 
     for (size_t i = size_segregated_index; i < size_segregated_count; i++) {
         for (size_t block_index : free_blocks_segregated_by_size_[i]) {
@@ -507,20 +522,17 @@ MemoryBlockTable FreeListOpt::get_memory_block_table() const {
     return blocks;
 }
 
-void FreeListOpt::shrink_size(DeviceAddr shrink_size, bool bottom_up) {
-    if (shrink_size == 0) {
-        return;
-    }
+size_t FreeListOpt::find_block_to_shrink(DeviceAddr shrink_size, bool bottom_up) const {
     TT_FATAL(bottom_up, "Shrinking from the top is currently not supported");
     TT_FATAL(
-        shrink_size <= this->max_size_bytes_,
+        shrink_size < this->max_size_bytes_,
         "Shrink size {} must be smaller than max size {}",
         shrink_size,
         max_size_bytes_);
 
     // loop and scan the block list to find if the shrink cut into any allocated block
     size_t block_to_shrink = -1;
-    DeviceAddr shrunk_address = shrink_size_ + shrink_size;
+    const DeviceAddr shrunk_address = shrink_size_ + shrink_size;
     // TODO: There must be a way to force the beginning of all blocks be at index 0
     for (size_t i = 0; i < block_address_.size(); i++) {
         if (!meta_block_is_allocated_[i]) {
@@ -534,20 +546,38 @@ void FreeListOpt::shrink_size(DeviceAddr shrink_size, bool bottom_up) {
                 block_address_[i]);
         } else if (block_address_[i] <= shrunk_address && block_address_[i] + block_size_[i] >= shrunk_address) {
             block_to_shrink = i;
-            break;
         }
     }
 
     TT_FATAL(block_to_shrink != -1, "Shrink size {} does not align with any block. This must be a bug", shrunk_address);
+    return block_to_shrink;
+}
+
+void FreeListOpt::validate_shrink_size(DeviceAddr shrink_size, bool bottom_up) const {
+    if (shrink_size != 0) {
+        this->find_block_to_shrink(shrink_size, bottom_up);
+    }
+}
+
+void FreeListOpt::shrink_size(DeviceAddr shrink_size, bool bottom_up) {
+    if (shrink_size == 0) {
+        return;
+    }
+    const size_t block_to_shrink = this->find_block_to_shrink(shrink_size, bottom_up);
 
     // Find the relevant size segregated list
     size_t size_segregated_index = get_size_segregated_index(block_size_[block_to_shrink]);
     std::vector<size_t>& segregated_list = free_blocks_segregated_by_size_[size_segregated_index];
-    for (size_t i = 0; i < segregated_list.size(); i++) {
-        if (segregated_list[i] == block_to_shrink) {
-            segregated_list.erase(segregated_list.begin() + i);
-            break;
-        }
+    // Precondition: insert_block_to_segregated_list() keeps each list sorted ascending by block
+    // address, which the lower_bound below relies on. Assert it (debug-only) instead of silently
+    // assuming it.
+    const auto by_address = [this](size_t a, size_t b) { return block_address_[a] < block_address_[b]; };
+    TT_ASSERT(
+        std::is_sorted(segregated_list.begin(), segregated_list.end(), by_address),
+        "Size segregated list must be sorted by block address");
+    auto it = std::lower_bound(segregated_list.begin(), segregated_list.end(), block_to_shrink, by_address);
+    if (it != segregated_list.end() && *it == block_to_shrink) {
+        segregated_list.erase(it);
     }
 
     // Shrink the block
