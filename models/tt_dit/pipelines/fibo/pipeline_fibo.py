@@ -19,7 +19,7 @@ from models.tt_dit.models.transformers.transformer_fibo import FiboCheckpoint
 from models.tt_dit.models.vae.vae_fibo import FiboVAEDecoderAdapter
 from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, Flux2VaeParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
-from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
+from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg, submesh_shape
 from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
 from models.tt_dit.pipelines.fibo.text_encoder import TextEncoder
 from models.tt_dit.pipelines.pipeline_api import PipelineAPIMixin
@@ -98,15 +98,18 @@ class FiboPipelineConfig:
         """Build a fully populated config, picking parallelism defaults from ``mesh_shape``."""
         preset = _PRESETS.get(tuple(mesh_shape), {}) if mesh_shape is not None else {}
 
+        dit_parallel_config = dit_parallel_config or DiTParallelConfig.from_tuples(
+            cfg=preset["cfg"], sp=preset["sp"], tp=preset["tp"]
+        )
+
         return cls(
             topology=topology,
             num_links=num_links or preset["num_links"],
-            dit_parallel_config=dit_parallel_config
-            or DiTParallelConfig.from_tuples(cfg=preset["cfg"], sp=preset["sp"], tp=preset["tp"]),
+            dit_parallel_config=dit_parallel_config,
             encoder_parallel_config=encoder_parallel_config or EncoderParallelConfig.from_tuple(preset["encoder_tp"]),
             vae_parallel_config=vae_parallel_config
             or Flux2VaeParallelConfig.from_axes(
-                mesh_shape,
+                submesh_shape(dit_parallel_config),
                 tp_axis=preset["vae_tp_axis"],
                 h_axis=preset["vae_h_axis"],
                 w_axis=preset["vae_w_axis"],
@@ -185,14 +188,14 @@ class FiboPipeline(PipelineAPIMixin):
                 use_torch=config.use_torch_text_encoder,
             )
 
-            logger.info("creating VAE decoder...")
-            self._vae = FiboVAEDecoderAdapter(
-                checkpoint_name=config.checkpoint_name,
-                parallel_config=config.vae_parallel_config,
-                use_torch=config.use_torch_vae_decoder,
-                ccl_manager=self._ccl_managers[0],
-            )
-            self._vae.reload_weights()
+        logger.info("creating VAE decoder...")
+        self._vae = FiboVAEDecoderAdapter(
+            checkpoint_name=config.checkpoint_name,
+            parallel_config=config.vae_parallel_config,
+            use_torch=config.use_torch_vae_decoder,
+            ccl_manager=self._ccl_managers[0],
+        )
+        self._vae.reload_weights()
 
         self._synchronize_devices()
 
@@ -428,8 +431,7 @@ class FiboPipeline(PipelineAPIMixin):
             width=self._width // _VAE_SCALE_FACTOR,
         )
 
-        with self._reshape_encoder():
-            decoded_output = self._vae.decode(torch_latents, traced=traced)
+        decoded_output = self._vae.decode(torch_latents, traced=traced)
 
         image = self._image_processor.postprocess(decoded_output, output_type="pt")
         assert isinstance(image, torch.Tensor)

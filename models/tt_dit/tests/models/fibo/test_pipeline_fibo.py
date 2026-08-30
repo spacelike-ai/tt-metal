@@ -12,6 +12,7 @@ import ttnn
 from models.common.utility_functions import run_for_blackhole, run_for_wormhole_b0
 from models.perf.benchmarking_utils import BenchmarkProfiler
 from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, Flux2VaeParallelConfig
+from models.tt_dit.pipelines.cfg import submesh_shape
 from models.tt_dit.pipelines.events import profiler_event_callback
 from models.tt_dit.pipelines.fibo.pipeline_fibo import FiboPipeline, FiboPipelineConfig
 
@@ -45,6 +46,7 @@ from models.tt_dit.pipelines.fibo.pipeline_fibo import FiboPipeline, FiboPipelin
         "tp",
         "encoder_tp",
         "vae_h_axis",
+        "vae_w_axis",
         "topology",
         "num_links",
         "mesh_test_id",
@@ -57,6 +59,7 @@ from models.tt_dit.pipelines.fibo.pipeline_fibo import FiboPipeline, FiboPipelin
             (2, 1),  # tp
             (2, 1),  # encoder_tp
             1,  # vae_h_axis
+            None,  # vae_w_axis
             ttnn.Topology.Linear,
             1,
             "2x2cfg0sp0tp1",
@@ -70,6 +73,7 @@ from models.tt_dit.pipelines.fibo.pipeline_fibo import FiboPipeline, FiboPipelin
             (4, 1),  # tp
             (4, 1),  # encoder_tp
             1,  # vae_h_axis
+            None,  # vae_w_axis
             ttnn.Topology.Linear,
             1,
             "2x4cfg0sp0tp1",
@@ -82,7 +86,8 @@ from models.tt_dit.pipelines.fibo.pipeline_fibo import FiboPipeline, FiboPipelin
             (2, 0),  # sp
             (2, 1),  # tp
             (4, 1),  # encoder_tp
-            1,  # vae_h_axis
+            0,  # vae_h_axis
+            1,  # vae_w_axis
             ttnn.Topology.Linear,
             1,
             "2x4cfg1sp0tp1",
@@ -116,6 +121,7 @@ def test_fibo_pipeline(
     tp: tuple[int, int],
     encoder_tp: tuple[int, int],
     vae_h_axis: int,
+    vae_w_axis: int | None,
     topology: ttnn.Topology,
     num_links: int,
     no_prompt: bool,
@@ -126,12 +132,15 @@ def test_fibo_pipeline(
     model_location_generator,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    dit_parallel_config = DiTParallelConfig.from_tuples(cfg=cfg, sp=sp, tp=tp)
     pipeline = FiboPipeline(
         device=mesh_device,
         config=FiboPipelineConfig.default(
-            dit_parallel_config=DiTParallelConfig.from_tuples(cfg=cfg, sp=sp, tp=tp),
+            dit_parallel_config=dit_parallel_config,
             encoder_parallel_config=EncoderParallelConfig.from_tuple(encoder_tp),
-            vae_parallel_config=Flux2VaeParallelConfig.from_axes(mesh_device, h_axis=vae_h_axis),
+            vae_parallel_config=Flux2VaeParallelConfig.from_axes(
+                submesh_shape(dit_parallel_config), h_axis=vae_h_axis, w_axis=vae_w_axis
+            ),
             num_links=num_links,
             topology=topology,
             height=height,
