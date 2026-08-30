@@ -16,13 +16,11 @@ _CHECKPOINT = "briaai/FIBO"
 
 
 @pytest.mark.parametrize(
-    ("mesh_device", "tp_axis", "h_axis", "w_axis"),
+    ("mesh_device", "h_axis", "w_axis"),
     [
-        pytest.param((2, 4), 1, None, None, id="2x4_tp1"),
-        pytest.param((2, 4), 1, 0, None, id="2x4_tp1_h0"),
-        pytest.param((2, 4), None, 0, 1, id="2x4_h0_w1"),
-        pytest.param((4, 8), 1, None, None, id="4x8_tp1"),
-        pytest.param((4, 8), 1, 0, None, id="4x8_tp1_h0"),
+        pytest.param((1, 4), 1, None, id="1x4_h4"),
+        pytest.param((2, 2), 0, 1, id="2x2_h0_w1"),
+        pytest.param((2, 4), 0, 1, id="2x4_h0_w1"),
     ],
     indirect=["mesh_device"],
 )
@@ -45,7 +43,6 @@ _CHECKPOINT = "briaai/FIBO"
 def test_vae(
     *,
     mesh_device: ttnn.MeshDevice,
-    tp_axis: int | None,
     h_axis: int | None,
     w_axis: int | None,
     height: int,
@@ -55,7 +52,7 @@ def test_vae(
     torch.manual_seed(0)
 
     ccl_manager = CCLManager(mesh_device, topology=ttnn.Topology.Linear)
-    parallel_config = Flux2VaeParallelConfig.from_axes(mesh_device, tp_axis=tp_axis, h_axis=h_axis, w_axis=w_axis)
+    parallel_config = Flux2VaeParallelConfig.from_axes(mesh_device, h_axis=h_axis, w_axis=w_axis)
 
     logger.info("constructing tt VAE...")
     tt_vae = FiboVAEDecoderAdapter(
@@ -76,7 +73,7 @@ def test_vae(
 
     # Latents are laid out (B, H, W, C) for the adapter's decode signature. Shape derived from
     # the loaded VAE config so we don't carry stale values when checkpoints change.
-    batch_size = 1 if tp_axis is not None else 2  # batch size > 1 hangs with TP
+    batch_size = 2
     latents_h = height // tt_vae.spatial_compression_ratio
     latents_w = width // tt_vae.spatial_compression_ratio
     latents = torch.randn(batch_size, latents_h, latents_w, tt_vae.z_dim, dtype=torch.float32)
