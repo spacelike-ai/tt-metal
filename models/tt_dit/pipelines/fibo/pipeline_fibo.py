@@ -278,7 +278,7 @@ class FiboPipeline(PipelineAPIMixin):
         self._scheduler.set_timesteps(sigmas=sigmas, mu=mu)
         sigmas = self._scheduler.sigmas.tolist()
         for solver in self._solvers:
-            solver.set_schedule(sigmas)
+            solver.set_schedule(sigmas=sigmas)
         timesteps = self._scheduler.timesteps
 
         logger.info("preparing inputs...")
