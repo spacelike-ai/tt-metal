@@ -11,7 +11,7 @@ from loguru import logger
 import ttnn
 from models.common.utility_functions import run_for_blackhole, run_for_wormhole_b0
 from models.perf.benchmarking_utils import BenchmarkProfiler
-from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
+from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, Flux2VaeParallelConfig
 from models.tt_dit.pipelines.events import profiler_event_callback
 from models.tt_dit.pipelines.fibo.pipeline_fibo import FiboPipeline, FiboPipelineConfig
 
@@ -44,7 +44,7 @@ from models.tt_dit.pipelines.fibo.pipeline_fibo import FiboPipeline, FiboPipelin
         "sp",
         "tp",
         "encoder_tp",
-        "vae_tp",
+        "vae_h_axis",
         "topology",
         "num_links",
         "mesh_test_id",
@@ -56,7 +56,7 @@ from models.tt_dit.pipelines.fibo.pipeline_fibo import FiboPipeline, FiboPipelin
             (1, 0),  # sp
             (2, 1),  # tp
             (2, 1),  # encoder_tp
-            (2, 1),  # vae_tp
+            1,  # vae_h_axis
             ttnn.Topology.Linear,
             1,
             "2x2cfg0sp0tp1",
@@ -69,7 +69,7 @@ from models.tt_dit.pipelines.fibo.pipeline_fibo import FiboPipeline, FiboPipelin
             (1, 0),  # sp
             (4, 1),  # tp
             (4, 1),  # encoder_tp
-            (4, 1),  # vae_tp
+            1,  # vae_h_axis
             ttnn.Topology.Linear,
             1,
             "2x4cfg0sp0tp1",
@@ -82,7 +82,7 @@ from models.tt_dit.pipelines.fibo.pipeline_fibo import FiboPipeline, FiboPipelin
             (2, 0),  # sp
             (2, 1),  # tp
             (4, 1),  # encoder_tp
-            (4, 1),  # vae_tp
+            1,  # vae_h_axis
             ttnn.Topology.Linear,
             1,
             "2x4cfg1sp0tp1",
@@ -115,7 +115,7 @@ def test_fibo_pipeline(
     sp: tuple[int, int],
     tp: tuple[int, int],
     encoder_tp: tuple[int, int],
-    vae_tp: tuple[int, int],
+    vae_h_axis: int,
     topology: ttnn.Topology,
     num_links: int,
     no_prompt: bool,
@@ -131,7 +131,7 @@ def test_fibo_pipeline(
         config=FiboPipelineConfig.default(
             dit_parallel_config=DiTParallelConfig.from_tuples(cfg=cfg, sp=sp, tp=tp),
             encoder_parallel_config=EncoderParallelConfig.from_tuple(encoder_tp),
-            vae_parallel_config=VAEParallelConfig.from_tuple(vae_tp),
+            vae_parallel_config=Flux2VaeParallelConfig.from_axes(mesh_device, h_axis=vae_h_axis),
             num_links=num_links,
             topology=topology,
             height=height,

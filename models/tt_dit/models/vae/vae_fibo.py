@@ -19,10 +19,11 @@ from models.tt_dit.models.vae.vae import (
     VaeResnetBlock,
     VaeRmsNorm,
     VaeUpsampler,
+    _all_gather_hw,
 )
 from models.tt_dit.layers.linear import Linear
 from models.tt_dit.layers.module import Module, ModuleList
-from models.tt_dit.parallel.config import VAEParallelConfig
+from models.tt_dit.parallel.config import Flux2VaeParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.utils import cache, tensor
 from models.tt_dit.utils.substate import pop_substate, rename_substate
@@ -52,14 +53,22 @@ class FiboVaeDecoder(Module):
         num_res_blocks: int = 2,
         out_channels: int = 3,
         patch_size: int = 1,
-        parallel_config: VAEParallelConfig | None,
+        parallel_config: Flux2VaeParallelConfig,
         device: ttnn.MeshDevice,
         ccl_manager: CCLManager | None,
     ) -> None:
         super().__init__()
 
+        tp = parallel_config.tp_parallel
+        wp = parallel_config.w_parallel
+        hp = parallel_config.h_parallel
+
         ctx = VaeContext(
-            tp_axis=parallel_config.tensor_parallel.mesh_axis if parallel_config is not None else None,
+            tp_axis=tp.mesh_axis if tp is not None else None,
+            h_mesh_axis=hp.mesh_axis if hp is not None else None,
+            h_factor=hp.factor if hp is not None else 1,
+            w_mesh_axis=wp.mesh_axis if wp is not None else None,
+            w_factor=wp.factor if wp is not None else 1,
             device=device,
             ccl_manager=ccl_manager,
         )
@@ -95,8 +104,7 @@ class FiboVaeDecoder(Module):
         self.conv_norm_out = VaeRmsNorm(out_dim, eps=eps, ctx=ctx, activation_fn="silu")
         self.conv_out = VaeConv2d(out_dim, out_channels, kernel_size=3, padding=1, tensor_parallel=False, ctx=ctx)
 
-        self._tp_axis = ctx.tp_axis
-        self._ccl_manager = ctx.ccl_manager
+        self._ctx = ctx
         self._patch_size = patch_size
         self._image_channels = out_channels // (patch_size * patch_size)
 
@@ -122,15 +130,16 @@ class FiboVaeDecoder(Module):
 
         z = self.conv_norm_out.forward(z)
 
-        if self._ccl_manager is not None:
-            z = self._ccl_manager.all_gather(z, dim=-1, mesh_axis=self._tp_axis, use_hyperparams=True)
+        if self._ctx.ccl_manager is not None and self._ctx.tp_axis is not None:
+            z = self._ctx.ccl_manager.all_gather(z, dim=-1, mesh_axis=self._ctx.tp_axis, use_hyperparams=True)
 
         z = self.conv_out.forward(z)
 
         if self._patch_size > 1:
             z = _unpatchify(z, patch_size=self._patch_size, out_channels=self._image_channels)
 
-        return ttnn.clamp(z, min=-1.0, max=1.0)
+        z = ttnn.clamp(z, min=-1.0, max=1.0)
+        return _all_gather_hw(self._ctx, z)
 
 
 class FiboVaeUpBlock(Module):
@@ -312,7 +321,7 @@ class FiboVAEDecoderAdapter:
         self,
         *,
         checkpoint_name: str,
-        parallel_config: VAEParallelConfig | None,
+        parallel_config: Flux2VaeParallelConfig,
         ccl_manager: CCLManager,
         use_torch: bool,
     ) -> None:
@@ -374,12 +383,33 @@ class FiboVAEDecoderAdapter:
 
     @torch.no_grad()
     def decode(self, latents: torch.Tensor, *, traced: bool) -> torch.Tensor:  # noqa: ARG002 — tracing TBD
+        _, h, w, _ = latents.shape
+
         latents = latents / self._latents_scaling + self._latents_shift
 
         if self._torch_vae is not None:
             return self._torch_vae.decode(latents.permute(0, 3, 1, 2).unsqueeze(2)).sample[:, :, 0]
 
-        tt_latents = tensor.from_torch(latents, device=self._device, layout=ttnn.TILE_LAYOUT)
+        hp = self._parallel_config.h_parallel
+        wp = self._parallel_config.w_parallel
+        if hp is not None and h % hp.factor != 0:
+            msg = f"latent height {h} not divisible by {hp.factor}"
+            raise ValueError(msg)
+        if wp is not None and w % wp.factor != 0:
+            msg = f"latent width {w} not divisible by {wp.factor}"
+            raise ValueError(msg)
+
+        tt_latents = tensor.from_torch(
+            latents,
+            device=self._device,
+            layout=ttnn.TILE_LAYOUT,
+            mesh_axes=[
+                None,
+                hp.mesh_axis if hp is not None else None,
+                wp.mesh_axis if wp is not None else None,
+                None,
+            ],
+        )
         tt_out = self._decoder.forward(tt_latents)
         torch_out = tensor.to_torch(tt_out)
         return torch_out.permute(0, 3, 1, 2)

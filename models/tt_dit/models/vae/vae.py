@@ -341,24 +341,24 @@ class VaeConv2d(Module):
             # neighbor_pad_async requires ROW_MAJOR; conv handles either layout.
             if x.layout != ttnn.ROW_MAJOR_LAYOUT:
                 x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
-            # Squeeze the leading batch dim (N=1 for VAE) — matches vae_flux2_new and the
-            # neighbor_pad kernel's expected rank for HW exchange. dims shift down by 1.
-            x = ttnn.squeeze(x, 0)  # [H_local, W_local, C]
+            # Unsqueeze to matches the neighbor_pad kernel's expected rank for HW exchange. dims
+            # shift up by 1.
+            x = ttnn.unsqueeze(x, 0)  # [1, N, H_local, W_local, C]
             dims, pad_left, pad_right, axes, sems, links = [], [], [], [], [], []
             if self._h_sharded:
-                dims.append(0)
+                dims.append(2)
                 pad_left.append(self._padding)
                 pad_right.append(self._padding)
                 axes.append(self._ctx.h_mesh_axis)
                 sems.append(ccl.get_np_ping_pong_semaphore(self._ctx.h_mesh_axis))
-                links.append(_get_neighbor_pad_num_links(ccl, x, 0))
+                links.append(_get_neighbor_pad_num_links(ccl, x, 2))
             if self._w_sharded:
-                dims.append(1)
+                dims.append(3)
                 pad_left.append(self._padding)
                 pad_right.append(self._padding)
                 axes.append(self._ctx.w_mesh_axis)
                 sems.append(ccl.get_np_ping_pong_semaphore(self._ctx.w_mesh_axis))
-                links.append(_get_neighbor_pad_num_links(ccl, x, 1))
+                links.append(_get_neighbor_pad_num_links(ccl, x, 3))
             x = ccl.neighbor_pad(
                 x,
                 dims=dims,
@@ -369,7 +369,7 @@ class VaeConv2d(Module):
                 neighbor_sems=sems,
                 num_links=links,
             )
-            x = ttnn.unsqueeze(x, 0)  # back to [N=1, H_local+pad, W_local+pad, C]
+            x = ttnn.squeeze(x, 0)  # back to [N, H_local+pad, W_local+pad, C]
 
         if self._use_conv3d:
             result = self.inner.forward(x)
@@ -433,12 +433,11 @@ class VaeResnetBlock(Module):
 
 
 class VaeAttention(Module):
-    # SDPA chunk sizes keyed by (is_blackhole, num_channels, h_factor, w_factor, tp_factor).
+    # SDPA chunk sizes keyed by (is_blackhole, num_channels).
     # Resolution priority: map > constructor args > default.
-    sdpa_chunk_size_map: Mapping[tuple, tuple[int, int]] = MappingProxyType(
+    sdpa_chunk_size_map: Mapping[tuple[bool, int], tuple[int, int]] = MappingProxyType(
         {
-            (False, 1024, 1, 1, 4): (64, 64),
-            (False, 1024, 1, 1, 8): (64, 64),
+            (False, 1024): (64, 64),
         }
     )
     default_sdpa_chunk_size: tuple[int, int] = (128, 128)
@@ -471,7 +470,7 @@ class VaeAttention(Module):
         tp_factor = ctx.device.shape[ctx.tp_axis] if ctx.tp_axis is not None else 1
         self._tp_factor = tp_factor
         resolved_q_chunk, resolved_k_chunk = self.sdpa_chunk_size_map.get(
-            (is_blackhole(), num_channels, ctx.h_factor, ctx.w_factor, tp_factor),
+            (is_blackhole(), num_channels),
             (
                 q_chunk_size if q_chunk_size is not None else self.default_sdpa_chunk_size[0],
                 k_chunk_size if k_chunk_size is not None else self.default_sdpa_chunk_size[1],

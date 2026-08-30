@@ -17,7 +17,7 @@ from loguru import logger
 import ttnn
 from models.tt_dit.models.transformers.transformer_fibo import FiboCheckpoint
 from models.tt_dit.models.vae.vae_fibo import FiboVAEDecoderAdapter
-from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, VAEParallelConfig
+from models.tt_dit.parallel.config import DiTParallelConfig, EncoderParallelConfig, Flux2VaeParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.pipelines.cfg import CFGCombiner, create_submeshes, distribute_cfg
 from models.tt_dit.pipelines.events import PipelineEventCallback, SectionEnd, SectionStart, null_callback
@@ -50,7 +50,9 @@ _PRESETS: dict[tuple[int, ...], dict] = {
         "sp": (1, 0),
         "tp": (4, 1),
         "encoder_tp": (4, 1),
-        "vae_tp": (4, 1),
+        "vae_tp_axis": None,
+        "vae_h_axis": 1,
+        "vae_w_axis": None,
         "num_links": 1,
     },
 }
@@ -63,7 +65,7 @@ class FiboPipelineConfig:
 
     dit_parallel_config: DiTParallelConfig
     encoder_parallel_config: EncoderParallelConfig
-    vae_parallel_config: VAEParallelConfig
+    vae_parallel_config: Flux2VaeParallelConfig
 
     use_torch_text_encoder: bool
     use_torch_vae_decoder: bool
@@ -84,7 +86,7 @@ class FiboPipelineConfig:
         num_links: int | None = None,
         dit_parallel_config: DiTParallelConfig | None = None,
         encoder_parallel_config: EncoderParallelConfig | None = None,
-        vae_parallel_config: VAEParallelConfig | None = None,
+        vae_parallel_config: Flux2VaeParallelConfig | None = None,
         use_torch_text_encoder: bool = False,
         use_torch_vae_decoder: bool = False,
         height: int = 1024,
@@ -102,7 +104,13 @@ class FiboPipelineConfig:
             dit_parallel_config=dit_parallel_config
             or DiTParallelConfig.from_tuples(cfg=preset["cfg"], sp=preset["sp"], tp=preset["tp"]),
             encoder_parallel_config=encoder_parallel_config or EncoderParallelConfig.from_tuple(preset["encoder_tp"]),
-            vae_parallel_config=vae_parallel_config or VAEParallelConfig.from_tuple(preset["vae_tp"]),
+            vae_parallel_config=vae_parallel_config
+            or Flux2VaeParallelConfig.from_axes(
+                mesh_shape,
+                tp_axis=preset["vae_tp_axis"],
+                h_axis=preset["vae_h_axis"],
+                w_axis=preset["vae_w_axis"],
+            ),
             use_torch_text_encoder=use_torch_text_encoder,
             use_torch_vae_decoder=use_torch_vae_decoder,
             height=height,
