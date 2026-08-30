@@ -51,6 +51,7 @@ class VisionTransformer(LightweightModule):
         self.args = args
         self.dtype = dtype
         self.weight_cache_path = weight_cache_path
+        self._cu_window_seqlens_cache = {}
 
         # Create transformation matrix for RoPE QK prefill
         transformation_mat_torch = get_rot_transformation_mat(
@@ -120,23 +121,59 @@ class VisionTransformer(LightweightModule):
         x = self.args.prepare_residual_tensor_prefill(x)
         return x
 
+    def window_seqlens(self, unpadded_seq_len, seq_len, cu_seqlens=None):
+        """Builds the SDPA window boundaries that keep queries off the padding.
+
+        The sequence is padded up to a multiple of 2048, and attention over that tail is not
+        harmless: a LayerNorm emits its bias for a zero row, so the pad keys are numerically
+        indistinguishable from real tokens and take real softmax mass away from them. Making the
+        padding its own window confines every real query to the real keys.
+
+        `cu_seqlens` additionally separates a user's images from each other, which the reference
+        model attends to independently. That only matters for forward_single_user, which passes a
+        whole grid at once; DropInVisionTransformer.forward loops over grid rows, so there its
+        boundaries reduce to the same [0, unpadded_seq_len] used when it is not given.
+        """
+        seq_len = int(seq_len)
+        bounds = [0, int(unpadded_seq_len)] if cu_seqlens is None else [int(b) for b in cu_seqlens]
+        # A grid with t > 1 makes cu_seqlens count every frame (t*h*w) while unpadded_seq_len counts
+        # only one (h*w), so the boundaries can run past the end of the tensor. Drop those rather
+        # than hand the op something out of range.
+        bounds = [b for b in bounds if b < seq_len] + [seq_len]
+        key = tuple(bounds)
+        cached = self._cu_window_seqlens_cache.get(key)
+        if cached is None:
+            cached = self._cu_window_seqlens_cache[key] = ttnn.from_torch(
+                torch.tensor(bounds, dtype=torch.int32),
+                dtype=ttnn.uint32,
+                layout=ttnn.ROW_MAJOR_LAYOUT,
+                device=self.args.mesh_device,
+                mesh_mapper=ttnn.ReplicateTensorToMesh(self.args.mesh_device),
+            )
+        return cached
+
     def forward(
         self,
         x,
         unpadded_seq_len,
         rot_mats,
+        cu_seqlens=None,
     ):
         """
         Forward pass through the Vision Transformer blocks.
 
         Args:
             x (ttnn.Tensor): Input tensor [batch_size, 1, seq_len, hidden_dim]
-            cu_seqlens (torch.Tensor): Cumulative sequence lengths
+            unpadded_seq_len (int): Sequence length before padding
             rot_mats (list): Rotation matrices for positional embeddings
+            cu_seqlens (torch.Tensor): Per-image cumulative sequence lengths; the padding is
+                excluded from attention whether or not this is given
 
         Returns:
             ttnn.Tensor: Output tensor
         """
+        cu_window_seqlens = self.window_seqlens(unpadded_seq_len, x.shape[-2], cu_seqlens)
+
         # Forward through each block
         deepstack_feature_list = []
         for i, block in enumerate(self.blocks):
@@ -144,6 +181,7 @@ class VisionTransformer(LightweightModule):
             x = block(
                 x,
                 rot_mats=rot_mats,
+                cu_window_seqlens=cu_window_seqlens,
             )
             if i in self.deepstack_visual_indices:
                 idx = self.deepstack_visual_indices.index(i)
@@ -304,6 +342,7 @@ class DropInVisionTransformer(torch.nn.Module):
                 tt_input,
                 unpadded_seq_len=unpadded_seq_len,
                 rot_mats=rot_mats,  # Use rot_mats generated in this forward pass
+                cu_seqlens=cu_seqlens,
             )
 
             # deallocate device tensors that are not needed by decode
@@ -429,6 +468,7 @@ class DropInVisionTransformer(torch.nn.Module):
             tt_input,
             unpadded_seq_len=unpadded_seq_len,
             rot_mats=rot_mats,
+            cu_seqlens=cu_seqlens,
         )
 
         # Deallocate device tensors that are not needed
