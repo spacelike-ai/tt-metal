@@ -26,7 +26,7 @@ _CHECKPOINT = "briaai/FIBO"
 )
 @pytest.mark.parametrize(
     "device_params",
-    [{"fabric_config": ttnn.FabricConfig.FABRIC_1D, "l1_small_size": 32768}],
+    [{"fabric_config": ttnn.FabricConfig.FABRIC_1D, "l1_small_size": 32768, "trace_region_size": 8000000}],
     indirect=True,
 )
 @pytest.mark.parametrize(

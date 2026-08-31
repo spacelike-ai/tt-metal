@@ -173,7 +173,6 @@ def test_fibo_pipeline(
                 num_inference_steps=num_inference_steps,
                 seed=seed,
                 traced=traced,
-                vae_traced=False,
                 encoder_traced=False,
                 on_event=profiler_event_callback(benchmark_profiler, 0),
             )

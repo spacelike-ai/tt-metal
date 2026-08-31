@@ -27,6 +27,7 @@ from models.tt_dit.parallel.config import Flux2VaeParallelConfig
 from models.tt_dit.parallel.manager import CCLManager
 from models.tt_dit.utils import cache, tensor
 from models.tt_dit.utils.substate import pop_substate, rename_substate
+from models.tt_dit.utils.tracing import Tracer
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -345,6 +346,9 @@ class FiboVAEDecoderAdapter:
         if use_torch:
             self._torch_vae = AutoencoderKLWan.from_pretrained(checkpoint_name, subfolder="vae")
             self._decoder = None
+            self._tracer = None
+            self._tt_latents_std = None
+            self._tt_latents_mean = None
         else:
             self._torch_vae = None
             self._decoder = FiboVaeDecoder(
@@ -359,6 +363,9 @@ class FiboVAEDecoderAdapter:
                 parallel_config=parallel_config,
                 ccl_manager=ccl_manager,
             )
+            self._tracer = Tracer(self._rescale_and_decode, device=self._device, clone_prep_inputs=False)
+            self._tt_latents_std = tensor.from_torch(torch.tensor(hf_config["latents_std"]), device=self._device)
+            self._tt_latents_mean = tensor.from_torch(torch.tensor(hf_config["latents_mean"]), device=self._device)
 
     def is_loaded(self) -> bool:
         return self._torch_vae is not None or any(p.is_loaded() for p in self._decoder.parameters())
@@ -381,13 +388,16 @@ class FiboVAEDecoderAdapter:
         torch_vae = AutoencoderKLWan.from_pretrained(self._name, subfolder="vae")
         return torch_vae.state_dict()
 
+    def _rescale_and_decode(self, z: ttnn.Tensor) -> ttnn.Tensor:
+        z = z * self._tt_latents_std + self._tt_latents_mean
+        return self._decoder.forward(z)
+
     @torch.no_grad()
-    def decode(self, latents: torch.Tensor, *, traced: bool) -> torch.Tensor:  # noqa: ARG002 — tracing TBD
+    def decode(self, latents: torch.Tensor, *, traced: bool) -> torch.Tensor:
         _, h, w, _ = latents.shape
 
-        latents = latents / self._latents_scaling + self._latents_shift
-
         if self._torch_vae is not None:
+            latents = latents / self._latents_scaling + self._latents_shift
             return self._torch_vae.decode(latents.permute(0, 3, 1, 2).unsqueeze(2)).sample[:, :, 0]
 
         hp = self._parallel_config.h_parallel
@@ -410,6 +420,6 @@ class FiboVAEDecoderAdapter:
                 None,
             ],
         )
-        tt_out = self._decoder.forward(tt_latents)
+        tt_out = self._tracer(tt_latents, traced=traced)
         torch_out = tensor.to_torch(tt_out)
         return torch_out.permute(0, 3, 1, 2)
