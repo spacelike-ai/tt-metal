@@ -39,6 +39,10 @@ class TextEncoder:
         self._device = device
         self._tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint_name, subfolder="tokenizer")
 
+        sp = parallel_config.sequence_parallel
+        self._sp_axis = sp.mesh_axis if sp is not None and sp.factor != 1 else None
+        self._sp_factor = device.shape[self._sp_axis] if self._sp_axis is not None else 1
+
         if use_torch:
             self._torch_encoder = transformers.AutoModelForCausalLM.from_pretrained(
                 checkpoint_name,
@@ -84,7 +88,12 @@ class TextEncoder:
             )
             hidden_states = list(outputs.hidden_states)
         else:
-            tt_tokens = tensor.from_torch(tokens, device=self._device, dtype=ttnn.uint32)
+            tt_tokens = tensor.from_torch(
+                tokens,
+                device=self._device,
+                dtype=ttnn.uint32,
+                mesh_axes=[None, self._sp_axis],
+            )
             tt_mask = tensor.from_torch(mask, device=self._device)
             tt_hidden_states = self._tracer(
                 tt_tokens,
@@ -93,7 +102,7 @@ class TextEncoder:
                 output_hidden_states=True,
                 traced=traced,
             )
-            hidden_states = [tensor.to_torch(h) for h in tt_hidden_states]
+            hidden_states = [tensor.to_torch(h, mesh_axes=[None, self._sp_axis, None]) for h in tt_hidden_states]
         on_event(SectionEnd("smollm3_encoding"))
 
         mask_inv = ~mask.unsqueeze(-1).bool()

@@ -16,14 +16,16 @@ from models.tt_dit.utils.check import assert_quality
 
 
 @pytest.mark.parametrize(
-    "mesh_device",
+    ("mesh_device", "sp_axis"),
     [
-        pytest.param((1, 1), id="1x1"),
-        pytest.param((1, 2), id="1x2"),
-        pytest.param((1, 4), id="1x4"),
-        pytest.param((1, 8), id="1x8"),
+        pytest.param((1, 1), None, id="1x1"),
+        pytest.param((1, 2), None, id="1x2"),
+        pytest.param((1, 4), None, id="1x4"),
+        pytest.param((1, 8), None, id="1x8"),
+        pytest.param((2, 2), 0, id="2x2sp"),
+        pytest.param((2, 4), 0, id="2x4sp"),
     ],
-    indirect=True,
+    indirect=["mesh_device"],
 )
 @pytest.mark.parametrize(
     "device_params",
@@ -37,20 +39,18 @@ from models.tt_dit.utils.check import assert_quality
         pytest.param(False, id="unmasked"),
     ],
 )
-def test_transformer(*, mesh_device: ttnn.MeshDevice, masked: bool) -> None:
+def test_transformer(*, mesh_device: ttnn.MeshDevice, sp_axis: int | None, masked: bool) -> None:
     torch.manual_seed(0)
 
     batch_size = 2
     sequence_length = 512
     tp_axis = 1
+    sp_factor = mesh_device.shape[sp_axis] if sp_axis is not None else 1
 
     ccl_manager = CCLManager(mesh_device, topology=ttnn.Topology.Linear)
-    parallel_config = (
-        EncoderParallelConfig(
-            tensor_parallel=ParallelFactor(factor=mesh_device.shape[tp_axis], mesh_axis=tp_axis),
-        )
-        if tp_axis is not None
-        else None
+    parallel_config = EncoderParallelConfig(
+        tensor_parallel=ParallelFactor(factor=mesh_device.shape[tp_axis], mesh_axis=tp_axis),
+        sequence_parallel=ParallelFactor(factor=sp_factor, mesh_axis=sp_axis) if sp_axis is not None else None,
     )
 
     model = SmolLm3Checkpoint("briaai/FIBO").build(
@@ -65,7 +65,12 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, masked: bool) -> None:
     lengths = torch.randint(sequence_length // 4, 3 * sequence_length // 4, [batch_size])
     mask = torch.arange(sequence_length).flip([0]) < lengths.unsqueeze(1) if masked else None
 
-    tt_tokens = tensor.from_torch(tokens, device=mesh_device, dtype=ttnn.uint32)
+    tt_tokens = tensor.from_torch(
+        tokens,
+        device=mesh_device,
+        dtype=ttnn.uint32,
+        mesh_axes=[None, sp_axis],
+    )
     tt_mask = tensor.from_torch(mask, device=mesh_device) if mask is not None else None
 
     logger.info("running ttnn model...")
@@ -75,7 +80,7 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, masked: bool) -> None:
         skip_final_linear=True,
         output_hidden_states=True,
     )
-    tt_hidden_states_torch = [tensor.to_torch(t) for t in tt_hidden_states]
+    tt_hidden_states_torch = [tensor.to_torch(t, mesh_axes=[None, sp_axis, None]) for t in tt_hidden_states]
 
     logger.info("running torch model...")
     torch_mask_input = mask if mask is not None else torch.ones_like(tokens)

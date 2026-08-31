@@ -106,7 +106,8 @@ class FiboPipelineConfig:
             topology=topology,
             num_links=num_links or preset["num_links"],
             dit_parallel_config=dit_parallel_config,
-            encoder_parallel_config=encoder_parallel_config or EncoderParallelConfig.from_tuple(preset["encoder_tp"]),
+            encoder_parallel_config=encoder_parallel_config
+            or EncoderParallelConfig.from_tuples(tp=preset["encoder_tp"], sp=preset["encoder_sp"]),
             vae_parallel_config=vae_parallel_config
             or Flux2VaeParallelConfig.from_axes(
                 submesh_shape(dit_parallel_config),
@@ -148,6 +149,7 @@ class FiboPipeline(PipelineAPIMixin):
         self._cfg_parallel = config.dit_parallel_config.cfg_parallel.factor != 1
         self._sp_axis = config.dit_parallel_config.sequence_parallel.mesh_axis
         self._encoder_tp = config.encoder_parallel_config.tensor_parallel
+        self._encoder_sp = config.encoder_parallel_config.sequence_parallel
         self._height = config.height
         self._width = config.width
         self._cfg_enabled = config.cfg_enabled

@@ -37,6 +37,7 @@ class TransformerContext:
     device: ttnn.MeshDevice
     tp_axis: int | None
     ccl_manager: CCLManager | None
+    sp_axis: int | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -75,15 +76,28 @@ class TransformerEncoder(Module):
     ) -> None:
         super().__init__()
 
+        sp = parallel_config.sequence_parallel if parallel_config is not None else None
+        if sp is not None and sp.factor == 1:
+            sp = None
+
         ctx = TransformerContext(
             device=device,
             tp_axis=parallel_config.tensor_parallel.mesh_axis if parallel_config is not None else None,
             ccl_manager=ccl_manager,
+            sp_axis=sp.mesh_axis if sp is not None else None,
         )
 
         if ctx.tp_axis is not None and ctx.ccl_manager is None:
             msg = "ccl_manager must be provided if tensor parallelism is used"
             raise ValueError(msg)
+
+        if ctx.sp_axis is not None:
+            if ctx.ccl_manager is None:
+                msg = "ccl_manager must be provided if sequence parallelism is used"
+                raise ValueError(msg)
+            if ctx.sp_axis == ctx.tp_axis:
+                msg = "sequence and tensor parallelism cannot share a mesh axis"
+                raise ValueError(msg)
 
         self._nope_set = set(config.nope_layer_indices)
         for idx in self._nope_set:
@@ -121,10 +135,11 @@ class TransformerEncoder(Module):
 
         self._device = ctx.device
         self._tp_axis = ctx.tp_axis
+        self._sp_axis = ctx.sp_axis
+        self._sp_factor = device.shape[ctx.sp_axis] if ctx.sp_axis is not None else 1
         self._ccl_manager = ctx.ccl_manager
         self._cached_position_embeddings = {}
-        self._cached_causal_cond = {}  # (max_seq_len,) -> [1, 1, max_seq_len, max_seq_len] bool tensor
-        self._cached_attn_zeros = {}  # (batch, query_length, kv_length, dtype) -> zeros tensor
+        self._cached_causal_cond = {}  # (max_seq_len,) -> [1, 1, max_seq_len, max_seq_len] 0/1 tensor
 
     # TODO: Remove the mask buffer generation from the function to prevent trace assertion errors.
     @traced_function(device=lambda self: self._device, clone_prep_inputs=False)
@@ -144,17 +159,29 @@ class TransformerEncoder(Module):
         else:
             batch_size, seq_len = tokens.shape
 
+        if self._sp_axis is not None:
+            if cache is not None:
+                msg = "the cache/decode path does not support sequence parallelism"
+                raise ValueError(msg)
+
+            if _padded_sequence_length(seq_len) != seq_len:
+                msg = (
+                    f"sequence parallelism currently requires an already padded sequence; "
+                    f"got local length {seq_len}, expected {_padded_sequence_length(seq_len)}"
+                )
+                raise ValueError(msg)
+
         device = tokens.device()
         dtype = self.token_embedding.weight.dtype
 
         start_pos = cache.position if cache is not None else 0
 
-        # There should be no need for a mask when start_pos is zero, but
+        # There should be no need for a mask when start_pos is zero and SP is off, but
         # `ttnn.transformer.scaled_dot_product_attention` produces incorrect results when the
         # sequence length is not a multiple of the tile size.
-        if mask is None and start_pos == 0 and seq_len % 32 != 0:
+        if mask is None and start_pos == 0 and (seq_len % 32 != 0 or self._sp_axis is not None):
             mask = ttnn.ones(
-                [batch_size, start_pos + seq_len],
+                [batch_size, start_pos + seq_len * self._sp_factor],
                 dtype=ttnn.bfloat16,
                 layout=ttnn.TILE_LAYOUT,
                 device=device,
@@ -173,7 +200,7 @@ class TransformerEncoder(Module):
         if mask is not None:
             assert mask.shape[0] == batch_size
             if start_pos == 0:
-                assert mask.shape[1] == seq_len
+                assert mask.shape[1] == seq_len * self._sp_factor
 
             attn_bias = self._prepare_attn_bias(
                 mask,
@@ -237,27 +264,29 @@ class TransformerEncoder(Module):
     def get_embeddings(self, start, sequence_length, device: ttnn.MeshDevice) -> tuple[ttnn.Tensor, ttnn.Tensor]:
         cache_key = (start, sequence_length)
         if cache_key not in self._cached_position_embeddings:
-            positions = _make_positions(start=start, sequence_length=sequence_length, device=device)
+            positions = _make_positions(
+                start=start,
+                sequence_length=sequence_length * self._sp_factor,
+                sp_axis=self._sp_axis,
+                device=device,
+            )
             cos, sin = self.pos_embedding.forward(positions, dtype=self.token_embedding.weight.dtype)
             self._cached_position_embeddings[cache_key] = (cos, sin)
         return self._cached_position_embeddings[cache_key]
 
     def _get_causal_cond(self, max_seq_len: int, device: ttnn.MeshDevice) -> ttnn.Tensor:
-        """Return a [1, 1, max_seq_len, max_seq_len] bool tensor (True = keep).
+        """Return a [1, 1, max_seq_len, max_seq_len] bfloat4_b 0/1 tensor (1 = keep).
 
         Built once per max_seq_len and cached; avoids calling ttnn.tril inside a trace.
-        Entry [q, k] is True when k <= q (standard lower-triangular causal mask).
+        Entry [q, k] is 1 when k <= q (standard lower-triangular causal mask).
         """
         if max_seq_len not in self._cached_causal_cond:
-            row = ttnn.reshape(
-                ttnn.arange(0, max_seq_len, dtype=ttnn.int32, layout=ttnn.TILE_LAYOUT, device=device),
-                [1, 1, max_seq_len, 1],
-            )
-            col = ttnn.reshape(
-                ttnn.arange(0, max_seq_len, dtype=ttnn.int32, layout=ttnn.TILE_LAYOUT, device=device),
-                [1, 1, 1, max_seq_len],
-            )
-            self._cached_causal_cond[max_seq_len] = ttnn.le(col, row)
+            local_seq_len = max_seq_len // self._sp_factor
+            col = _make_positions(start=0, sequence_length=max_seq_len, device=device)
+            col = ttnn.reshape(col, [1, 1, 1, max_seq_len])
+            row = _make_positions(start=0, sequence_length=max_seq_len, device=device, sp_axis=self._sp_axis)
+            row = ttnn.reshape(row, [1, 1, local_seq_len, 1])
+            self._cached_causal_cond[max_seq_len] = ttnn.typecast(ttnn.le(col, row), ttnn.bfloat4_b)
         return self._cached_causal_cond[max_seq_len]
 
     def _prepare_attn_bias(
@@ -271,8 +300,8 @@ class TransformerEncoder(Module):
     ) -> ttnn.Tensor:
         """Build the additive attention bias from a padding mask without using ttnn.tril.
 
-        Uses a pre-built causal condition tensor (cached on self) and ttnn.where so that
-        no dynamic allocation happens inside a captured trace on subsequent calls.
+        Uses a pre-built causal condition tensor (cached on self) so that no dynamic allocation
+        happens inside a captured trace on subsequent calls.
         """
         batch_size = mask.shape[0]
 
@@ -291,12 +320,8 @@ class TransformerEncoder(Module):
         # i.e. keep k <= q + query_pos  →  use rows [query_pos : query_pos+query_length]
         causal = causal[:, :, query_pos : query_pos + query_length, :kv_length]
 
-        zeros_key = tuple(mask.shape)
-        if zeros_key not in self._cached_attn_zeros:
-            self._cached_attn_zeros[zeros_key] = ttnn.zeros_like(mask)
-        zeros = self._cached_attn_zeros[zeros_key]
-
-        mask = ttnn.where(causal, mask, zeros)
+        # The product inherits the condition's bfloat4_b, which ttnn.pad cannot pad
+        mask = ttnn.typecast(causal * mask, ttnn.bfloat16)
 
         return (mask - 1.0) * math.inf
 
@@ -488,6 +513,8 @@ class Attention(Module):
         self._cache_id = cache_id
         self._tp_axis = ctx.tp_axis
         self._tp_factor = tp_factor
+        self._sp_axis = ctx.sp_axis
+        self._sp_factor = ctx.device.shape[ctx.sp_axis] if ctx.sp_axis is not None else 1
         self._device = ctx.device
         self._ccl_manager = ctx.ccl_manager
 
@@ -558,9 +585,10 @@ class Attention(Module):
         batch_size, padded_q_seq_len, _ = x.shape
 
         if attn_bias is not None:
+            kv_len = padded_q_seq_len * self._sp_factor
             expected_shape = (
-                (1, 1, padded_q_seq_len, padded_q_seq_len),
-                (batch_size, 1, padded_q_seq_len, padded_q_seq_len),
+                (1, 1, padded_q_seq_len, kv_len),
+                (batch_size, 1, padded_q_seq_len, kv_len),
             )
             assert (
                 attn_bias.shape in expected_shape
@@ -584,6 +612,10 @@ class Attention(Module):
             q = _apply_rope(q, cos, sin)
             k = _apply_rope(k, cos, sin)
 
+        if self._sp_axis is not None:
+            k = self._ccl_manager.all_gather_persistent_buffer(k, dim=2, mesh_axis=self._sp_axis, use_hyperparams=True)
+            v = self._ccl_manager.all_gather_persistent_buffer(v, dim=2, mesh_axis=self._sp_axis, use_hyperparams=True)
+
         if cache is not None:
             cache.prefill(self._cache_id, k, v)
 
@@ -601,7 +633,7 @@ class Attention(Module):
             v,
             attn_mask=attn_bias,
             is_causal=attn_bias is None,
-            program_config=self._sdpa_program_config(padded_q_seq_len, padded_q_seq_len),
+            program_config=self._sdpa_program_config(padded_q_seq_len, padded_kv_seq_len),
             compute_kernel_config=self._sdpa_compute_kernel_config,
         )
         del q, k, v
@@ -626,6 +658,10 @@ class Attention(Module):
         pos_embeds: tuple[ttnn.Tensor, ttnn.Tensor] | None,
         cache: Cache,
     ) -> ttnn.Tensor:
+        if self._sp_axis is not None:
+            msg = "decode mode does not support sequence parallelism"
+            raise ValueError(msg)
+
         if len(x.shape) != 2:
             msg = "decode mode expects input shape of (batch_size, embed_size)"
             raise ValueError(msg)
@@ -879,16 +915,23 @@ def _rotate_half(x: ttnn.Tensor) -> ttnn.Tensor:
     return ttnn.concat([ttnn.neg(x2), x1], dim=-1)
 
 
-def _make_positions(*, start: int, sequence_length: int, device: ttnn.MeshDevice) -> ttnn.Tensor:
+def _make_positions(
+    *, start: int, sequence_length: int, device: ttnn.MeshDevice, sp_axis: int | None = None
+) -> ttnn.Tensor:
     pos = ttnn.arange(start, start + sequence_length, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=device)
-    return ttnn.unsqueeze(pos, 0)
+    pos = ttnn.unsqueeze(pos, 0)
 
     # If the attention mask had holes, i.e., contained zeros between ones, this would have to be
     # done instead:
     # mask = ttnn.clone(mask, dtype=ttnn.float32)
     # # equivalent to: pos = mask.cumsum(1) - 1; pos.masked_fill_(mask == 0, 1)
     # pos = (ttnn.cumsum(mask, 1) - 2) * mask + 1
-    # return pos[:, start:]
+    # pos = pos[:, start:]
+
+    if sp_axis is not None:
+        pos = ttnn.mesh_partition(pos, dim=1, cluster_axis=sp_axis)
+
+    return pos
 
 
 def _sample(prob: torch.Tensor, *, top_k: int | None = None, top_p: float = 1, num_samples: int = 1) -> torch.Tensor:
