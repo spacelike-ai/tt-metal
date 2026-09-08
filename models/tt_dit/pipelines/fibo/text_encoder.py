@@ -88,21 +88,30 @@ class TextEncoder:
             )
             hidden_states = list(outputs.hidden_states)
         else:
-            tt_tokens = tensor.from_torch(
-                tokens,
-                device=self._device,
-                dtype=ttnn.uint32,
-                mesh_axes=[None, self._sp_axis],
-            )
-            tt_mask = tensor.from_torch(mask, device=self._device)
-            tt_hidden_states = self._tracer(
-                tt_tokens,
-                mask=tt_mask,
-                skip_final_linear=True,
-                output_hidden_states=True,
-                traced=traced,
-            )
-            hidden_states = [tensor.to_torch(h, mesh_axes=[None, self._sp_axis, None]) for h in tt_hidden_states]
+            # One batch-2 encode was measured to be slower than two batch-1 encodes.
+            splits = [len(negative_prompts), len(prompts)] if cfg_enabled else [len(prompts)]
+            hidden_parts = []
+            start = 0
+            for count in splits:
+                tt_tokens = tensor.from_torch(
+                    tokens[start : start + count],
+                    device=self._device,
+                    dtype=ttnn.uint32,
+                    mesh_axes=[None, self._sp_axis],
+                )
+                tt_mask = tensor.from_torch(mask[start : start + count], device=self._device)
+                tt_hidden_states = self._tracer(
+                    tt_tokens,
+                    mask=tt_mask,
+                    skip_final_linear=True,
+                    output_hidden_states=True,
+                    traced=traced,
+                )
+                hidden_parts.append(
+                    [tensor.to_torch(h, mesh_axes=[None, self._sp_axis, None]) for h in tt_hidden_states]
+                )
+                start += count
+            hidden_states = [torch.cat(parts, dim=0) for parts in zip(*hidden_parts, strict=True)]
         on_event(SectionEnd("smollm3_encoding"))
 
         mask_inv = ~mask.unsqueeze(-1).bool()
