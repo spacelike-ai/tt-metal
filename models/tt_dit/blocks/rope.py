@@ -50,9 +50,10 @@ class RotaryEmbedding(Module):
             # https://github.com/huggingface/transformers/blob/47b0e478f324b54f177ea7998a0791870fdd0324/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py#L513
             # https://github.com/huggingface/transformers/blob/47b0e478f324b54f177ea7998a0791870fdd0324/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py#L577-L583
 
-        freqs = ttnn.unsqueeze(positions, 2) @ ttnn.unsqueeze(k, 0)  # outer product
+        # Use multiply instead of matmul for improved accuracy.
+        freqs = ttnn.unsqueeze(positions, 2) * ttnn.unsqueeze(k, 0)  # outer product
         emb = ttnn.concat([freqs, freqs], dim=-1)
         cos = ttnn.cos(emb)
         sin = ttnn.sin(emb)
 
-        return ttnn.clone(cos, dtype=dtype), ttnn.clone(sin, dtype=dtype)
+        return ttnn.typecast(cos, dtype), ttnn.typecast(sin, dtype)
