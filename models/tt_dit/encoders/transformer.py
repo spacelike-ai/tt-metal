@@ -813,17 +813,7 @@ class TransformerRmsNorm(Module):
         state["inner.weight"] = state.pop("weight")
 
     def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        dtype = x.dtype
-        if dtype not in (ttnn.bfloat4_b, ttnn.bfloat8_b):
-            # reduce L1 memory requirements
-            x = ttnn.typecast(x, ttnn.bfloat8_b)
-
-        x = self.inner.forward(x, compute_kernel_config=self._compute_kernel_config)
-
-        if x.dtype != dtype:
-            x = ttnn.typecast(x, dtype)
-
-        return x
+        return self.inner.forward(x, compute_kernel_config=self._compute_kernel_config)
 
 
 class Cache:
