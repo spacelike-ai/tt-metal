@@ -40,10 +40,8 @@ if TYPE_CHECKING:
 # sequence dimension.
 _VAE_SCALE_FACTOR = 16
 _DEFAULT_CHECKPOINT = "briaai/FIBO"
-# Diffusers' FIBO pipeline defaults to 3000; we bump to the next length that satisfies the
-# sequence-parallel encoder's alignment (divisible by sp * 128), which also keeps the SmolLM3
-# encoder from internally padding and wasting compute.
-_DEFAULT_MAX_SEQUENCE_LENGTH = 3072
+# Prompt lengths the text encoder is traced at; must be divisible by sp * 128
+_DEFAULT_SEQUENCE_LENGTHS = (1024, 1536, 3072)
 
 _PRESETS: dict[tuple[int, ...], dict] = {
     (2, 4): {
@@ -52,7 +50,7 @@ _PRESETS: dict[tuple[int, ...], dict] = {
         "tp": (4, 1),
         "encoder_tp": (2, 1),
         # Trading encoder tp for sp measured 27% faster (719 -> 527 ms/encode at 3072 tokens,
-        # batch 2, traced). Requires max_sequence_length divisible by sp * 128.
+        # batch 2, traced). Requires sequence lengths divisible by sp * 128.
         "encoder_sp": (2, 0),
         "vae_tp_axis": None,
         "vae_h_axis": 1,
@@ -77,7 +75,7 @@ class FiboPipelineConfig:
     height: int
     width: int
     cfg_enabled: bool
-    max_sequence_length: int
+    sequence_lengths: tuple[int, ...]
 
     checkpoint_name: str
 
@@ -96,7 +94,7 @@ class FiboPipelineConfig:
         height: int = 1024,
         width: int = 1024,
         cfg_enabled: bool = True,
-        max_sequence_length: int = _DEFAULT_MAX_SEQUENCE_LENGTH,
+        sequence_lengths: tuple[int, ...] = _DEFAULT_SEQUENCE_LENGTHS,
         checkpoint_name: str = _DEFAULT_CHECKPOINT,
     ) -> FiboPipelineConfig:
         """Build a fully populated config, picking parallelism defaults from ``mesh_shape``."""
@@ -124,7 +122,7 @@ class FiboPipelineConfig:
             height=height,
             width=width,
             cfg_enabled=cfg_enabled,
-            max_sequence_length=max_sequence_length,
+            sequence_lengths=sequence_lengths,
             checkpoint_name=checkpoint_name,
         )
 
@@ -157,7 +155,6 @@ class FiboPipeline(PipelineAPIMixin):
         self._height = config.height
         self._width = config.width
         self._cfg_enabled = config.cfg_enabled
-        self._max_sequence_length = config.max_sequence_length
 
         logger.info(f"Parallel config: {config.dit_parallel_config}")
         logger.info(f"Original mesh shape: {device.shape}")
@@ -191,6 +188,7 @@ class FiboPipeline(PipelineAPIMixin):
                 device=self._devices[0],
                 ccl_manager=self._ccl_managers[0],
                 parallel_config=config.encoder_parallel_config,
+                sequence_lengths=config.sequence_lengths,
                 use_torch=config.use_torch_text_encoder,
             )
 
@@ -206,6 +204,8 @@ class FiboPipeline(PipelineAPIMixin):
         self._synchronize_devices()
 
         logger.info("pipeline allocation run...")
+        with self._reshape_encoder():
+            self._text_encoder.warmup()
         self(prompts=[""], num_inference_steps=2, traced=False, cfg_scale=2 if config.cfg_enabled else 1)
 
     def _reshape_encoder(self) -> AbstractContextManager[None]:
@@ -227,7 +227,6 @@ class FiboPipeline(PipelineAPIMixin):
         seed: int = 0,
         num_images_per_prompt: int = 1,
         cfg_scale: float = 5.0,
-        max_sequence_length: int | None = None,
         traced: bool = False,
         vae_traced: bool | None = None,
         encoder_traced: bool | None = None,
@@ -243,7 +242,6 @@ class FiboPipeline(PipelineAPIMixin):
         encoder_traced = encoder_traced if encoder_traced is not None else traced
         on_event = on_event if on_event is not None else null_callback
         negative_prompts = negative_prompts if negative_prompts is not None else [""] * prompt_count
-        max_sequence_length = max_sequence_length if max_sequence_length is not None else self._max_sequence_length
 
         assert num_images_per_prompt == 1, "generating multiple images is not supported"
         assert prompt_count == 1, "generating multiple images is not supported"
@@ -262,7 +260,6 @@ class FiboPipeline(PipelineAPIMixin):
                 negative_prompts,
                 num_images_per_prompt=num_images_per_prompt,
                 cfg_enabled=self._cfg_enabled,
-                max_sequence_length=max_sequence_length,
                 traced=encoder_traced,
                 on_event=on_event,
             )

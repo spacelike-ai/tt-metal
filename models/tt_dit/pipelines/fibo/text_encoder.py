@@ -25,7 +25,11 @@ _BOT_TOKEN_ID = 128000
 
 
 class TextEncoder:
-    """FIBO's SmolLM3 text encoder wrapper with PyTorch fallback."""
+    """FIBO's SmolLM3 text encoder wrapper with PyTorch fallback.
+
+    Each prompt is encoded on its own at the smallest of ``sequence_lengths`` it fits and padded
+    to the largest, which is the maximum prompt length. Every length is one trace.
+    """
 
     def __init__(
         self,
@@ -34,6 +38,7 @@ class TextEncoder:
         device: ttnn.MeshDevice,
         ccl_manager: CCLManager,
         parallel_config: EncoderParallelConfig,
+        sequence_lengths: Sequence[int],
         use_torch: bool,
     ) -> None:
         self._device = device
@@ -43,6 +48,15 @@ class TextEncoder:
         self._sp_axis = sp.mesh_axis if sp is not None and sp.factor != 1 else None
         self._sp_factor = device.shape[self._sp_axis] if self._sp_axis is not None else 1
 
+        for length in sequence_lengths:
+            if length % (128 * self._sp_factor) != 0:
+                msg = f"sequence length {length} must be a multiple of {128 * self._sp_factor}"
+                raise ValueError(msg)
+
+        self._sequence_lengths = sorted(sequence_lengths)
+        self._max_sequence_length = self._sequence_lengths[-1]
+        self._empty_prompt_output: tuple[list[torch.Tensor], torch.Tensor] | None = None
+
         if use_torch:
             self._torch_encoder = transformers.AutoModelForCausalLM.from_pretrained(
                 checkpoint_name,
@@ -51,7 +65,6 @@ class TextEncoder:
             )
             self._torch_encoder.eval()
             self._encoder = None
-            self._tracer = None
         else:
             self._torch_encoder = None
             self._encoder = SmolLm3Checkpoint(checkpoint_name).build(
@@ -59,7 +72,18 @@ class TextEncoder:
                 parallel_config=parallel_config,
                 ccl_manager=ccl_manager,
             )
-            self._tracer = Tracer(self._encoder.forward, device=device, prep_run=False)
+
+        self._tracers: dict[int, Tracer] = {}
+
+    def warmup(self) -> None:
+        """Runs every sequence length once untraced."""
+        if self._encoder is None:
+            return
+
+        for length in self._sequence_lengths:
+            tokens = torch.full((1, length), _BOT_TOKEN_ID, dtype=torch.int64)
+            mask = torch.ones((1, length), dtype=torch.int64)
+            self._encode_tokens(tokens, mask, traced=False)
 
     @torch.no_grad()
     def encode_cfg(
@@ -69,7 +93,6 @@ class TextEncoder:
         *,
         num_images_per_prompt: int,
         cfg_enabled: bool,
-        max_sequence_length: int,
         traced: bool,
         on_event: PipelineEventCallback = null_callback,
     ) -> tuple[torch.Tensor, list[torch.Tensor], torch.Tensor]:
@@ -77,10 +100,9 @@ class TextEncoder:
 
         all_prompts = [*negative_prompts, *prompts] if cfg_enabled else list(prompts)
 
-        tokens, mask = self._tokenize(all_prompts, max_sequence_length=max_sequence_length)
-
         on_event(SectionStart("smollm3_encoding"))
         if self._torch_encoder is not None:
+            tokens, mask = self._tokenize(all_prompts, sequence_length=self._max_sequence_length)
             outputs = self._torch_encoder.forward(
                 input_ids=tokens,
                 attention_mask=mask,
@@ -89,29 +111,14 @@ class TextEncoder:
             hidden_states = list(outputs.hidden_states)
         else:
             # One batch-2 encode was measured to be slower than two batch-1 encodes.
-            splits = [len(negative_prompts), len(prompts)] if cfg_enabled else [len(prompts)]
-            hidden_parts = []
-            start = 0
-            for count in splits:
-                tt_tokens = tensor.from_torch(
-                    tokens[start : start + count],
-                    device=self._device,
-                    dtype=ttnn.uint32,
-                    mesh_axes=[None, self._sp_axis],
-                )
-                tt_mask = tensor.from_torch(mask[start : start + count], device=self._device)
-                tt_hidden_states = self._tracer(
-                    tt_tokens,
-                    mask=tt_mask,
-                    skip_final_linear=True,
-                    output_hidden_states=True,
-                    traced=traced,
-                )
-                hidden_parts.append(
-                    [tensor.to_torch(h, mesh_axes=[None, self._sp_axis, None]) for h in tt_hidden_states]
-                )
-                start += count
-            hidden_states = [torch.cat(parts, dim=0) for parts in zip(*hidden_parts, strict=True)]
+            prompt_hidden_states = []
+            prompt_masks = []
+            for prompt in all_prompts:
+                hs, m = self._encode_prompt(prompt, traced=traced)
+                prompt_hidden_states.append(hs)
+                prompt_masks.append(m)
+            hidden_states = [torch.cat(layer) for layer in zip(*prompt_hidden_states, strict=True)]
+            mask = torch.cat(prompt_masks)
         on_event(SectionEnd("smollm3_encoding"))
 
         mask_inv = ~mask.unsqueeze(-1).bool()
@@ -127,11 +134,46 @@ class TextEncoder:
 
         return embeds, hidden_states, mask
 
-    def _tokenize(self, prompts: Sequence[str], *, max_sequence_length: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def _encode_prompt(self, prompt: str, *, traced: bool) -> tuple[list[torch.Tensor], torch.Tensor]:
+        # The negative prompt is usually empty, so its output is kept.
+        if prompt == "" and self._empty_prompt_output is not None:
+            return self._empty_prompt_output
+
+        tokens, mask = self._tokenize([prompt], sequence_length=self._max_sequence_length)
+        count = int(mask.sum())
+        length = min(length for length in self._sequence_lengths if length >= count)
+        hidden_states = self._encode_tokens(tokens[:, :length], mask[:, :length], traced=traced)
+        hidden_states = [_pad_sequence(h, self._max_sequence_length) for h in hidden_states]
+
+        if prompt == "":
+            self._empty_prompt_output = hidden_states, mask
+        return hidden_states, mask
+
+    def _encode_tokens(self, tokens: torch.Tensor, mask: torch.Tensor, *, traced: bool) -> list[torch.Tensor]:
+        assert self._encoder is not None
+
+        length = tokens.shape[1]
+        if length not in self._tracers:
+            self._tracers[length] = Tracer(self._encoder.forward, device=self._device, prep_run=False)
+
+        tt_tokens = tensor.from_torch(tokens, device=self._device, dtype=ttnn.uint32, mesh_axes=[None, self._sp_axis])
+        tt_mask = tensor.from_torch(mask, device=self._device)
+        tt_hidden_states = self._tracers[length](
+            tt_tokens,
+            mask=tt_mask,
+            skip_final_linear=True,
+            output_hidden_states=True,
+            traced=traced,
+        )
+
+        # The tracer reuses its output tensors on every call, so read back before the next one.
+        return [tensor.to_torch(h, mesh_axes=[None, self._sp_axis, None]) for h in tt_hidden_states]
+
+    def _tokenize(self, prompts: Sequence[str], *, sequence_length: int) -> tuple[torch.Tensor, torch.Tensor]:
         tokenized = self._tokenizer(
             list(prompts),
             padding="max_length",
-            max_length=max_sequence_length,
+            max_length=sequence_length,
             truncation=True,
             add_special_tokens=True,
             return_tensors="pt",
@@ -146,3 +188,7 @@ class TextEncoder:
         attention_mask[empty_rows, 1:] = 0
 
         return input_ids, attention_mask
+
+
+def _pad_sequence(x: torch.Tensor, length: int) -> torch.Tensor:
+    return torch.nn.functional.pad(x, (0, 0, 0, length - x.shape[1]))
