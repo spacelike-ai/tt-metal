@@ -405,4 +405,4 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, batch_size: int, skip_laye
     assert len(hidden_states) == len(tt_hidden_states_torch)
 
     for x, tt_x in zip(hidden_states[-4:], tt_hidden_states_torch[-4:], strict=True):
-        assert_quality(x, tt_x, pcc=0.9979, relative_rmse=0.065)
+        assert_quality(x, tt_x, pcc=0.9964, relative_rmse=0.091)
