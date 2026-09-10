@@ -24,6 +24,9 @@ from models.tt_dit.utils import tensor
 from models.tt_dit.utils.tracing import traced_function
 
 MAX_CHUNK_SIZE = 128
+# The decode kernel gets a 32-wide k-chunk wrong (https://github.com/tenstorrent/tt-metal/issues/56171),
+# so the cache length must be a multiple of the smallest chunk it gets right.
+WORKAROUND_MIN_DECODE_CHUNK_SIZE = 64
 
 
 @dataclass
@@ -363,6 +366,7 @@ class TransformerEncoder(Module):
         device = tokens.device()
 
         padded_seq_len = _padded_sequence_length(max_length - 1)
+        padded_seq_len = -(-padded_seq_len // WORKAROUND_MIN_DECODE_CHUNK_SIZE) * WORKAROUND_MIN_DECODE_CHUNK_SIZE
 
         if mask is not None:
             assert mask.shape == tokens.shape
@@ -729,7 +733,7 @@ class Attention(Module):
             cur_pos=[cache.position] * batch_size,
             attn_mask=attn_bias,
             is_causal=attn_bias is None,
-            program_config=self._sdpa_program_config(seq_len, k.shape[2]),
+            program_config=self._sdpa_decode_program_config(k.shape[2]),
             compute_kernel_config=self._sdpa_compute_kernel_config,
         )
         del q, k, v
@@ -769,6 +773,23 @@ class Attention(Module):
         return ttnn.SDPAProgramConfig(
             compute_with_storage_grid_size=grid_size,
             q_chunk_size=q_chunk_size,
+            k_chunk_size=kv_chunk_size,
+            exp_approx_mode=False,
+        )
+
+    def _sdpa_decode_program_config(self, kv_len: int) -> ttnn.SDPAProgramConfig:
+        # The decode kernel requires a power-of-two k-chunk that divides the cache length.
+        kv_chunk_size = MAX_CHUNK_SIZE
+        while kv_len % kv_chunk_size != 0:
+            kv_chunk_size //= 2
+
+        if kv_chunk_size < WORKAROUND_MIN_DECODE_CHUNK_SIZE:
+            msg = f"cache length must be a multiple of {WORKAROUND_MIN_DECODE_CHUNK_SIZE}, got {kv_len}"
+            raise ValueError(msg)
+
+        return ttnn.SDPAProgramConfig(
+            compute_with_storage_grid_size=self._device.compute_with_storage_grid_size(),
+            q_chunk_size=32,
             k_chunk_size=kv_chunk_size,
             exp_approx_mode=False,
         )
