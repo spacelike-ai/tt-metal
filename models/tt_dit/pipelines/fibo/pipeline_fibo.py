@@ -40,16 +40,20 @@ if TYPE_CHECKING:
 # sequence dimension.
 _VAE_SCALE_FACTOR = 16
 _DEFAULT_CHECKPOINT = "briaai/FIBO"
-# Diffusers' FIBO pipeline defaults to 3000; we bump to the next tile-aligned length so the
-# SmolLM3 encoder doesn't internally pad and waste compute.
-_DEFAULT_MAX_SEQUENCE_LENGTH = 3008
+# Diffusers' FIBO pipeline defaults to 3000; we bump to the next length that satisfies the
+# sequence-parallel encoder's alignment (divisible by sp * 128), which also keeps the SmolLM3
+# encoder from internally padding and wasting compute.
+_DEFAULT_MAX_SEQUENCE_LENGTH = 3072
 
 _PRESETS: dict[tuple[int, ...], dict] = {
     (2, 4): {
         "cfg": (2, 0),
         "sp": (1, 0),
         "tp": (4, 1),
-        "encoder_tp": (4, 1),
+        "encoder_tp": (2, 1),
+        # Trading encoder tp for sp measured 27% faster (719 -> 527 ms/encode at 3072 tokens,
+        # batch 2, traced). Requires max_sequence_length divisible by sp * 128.
+        "encoder_sp": (2, 0),
         "vae_tp_axis": None,
         "vae_h_axis": 1,
         "vae_w_axis": None,
