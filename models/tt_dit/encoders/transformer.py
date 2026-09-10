@@ -37,7 +37,7 @@ class TransformerContext:
     device: ttnn.MeshDevice
     tp_axis: int | None
     ccl_manager: CCLManager | None
-    sp_axis: int | None = None
+    sp_axis: int | None
 
 
 @dataclass(frozen=True, kw_only=True)
