@@ -38,6 +38,7 @@ class TransformerContext:
     tp_axis: int | None
     ccl_manager: CCLManager | None
     sp_axis: int | None
+    fsdp_axis: int | None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -80,11 +81,16 @@ class TransformerEncoder(Module):
         if sp is not None and sp.factor == 1:
             sp = None
 
+        fsdp = parallel_config.fsdp if parallel_config is not None else None
+        if fsdp is not None and fsdp.factor == 1:
+            fsdp = None
+
         ctx = TransformerContext(
             device=device,
             tp_axis=parallel_config.tensor_parallel.mesh_axis if parallel_config is not None else None,
             ccl_manager=ccl_manager,
             sp_axis=sp.mesh_axis if sp is not None else None,
+            fsdp_axis=fsdp.mesh_axis if fsdp is not None else None,
         )
 
         if ctx.tp_axis is not None and ctx.ccl_manager is None:
@@ -97,6 +103,14 @@ class TransformerEncoder(Module):
                 raise ValueError(msg)
             if ctx.sp_axis == ctx.tp_axis:
                 msg = "sequence and tensor parallelism cannot share a mesh axis"
+                raise ValueError(msg)
+
+        if ctx.fsdp_axis is not None:
+            if ctx.ccl_manager is None:
+                msg = "ccl_manager must be provided if FSDP is used"
+                raise ValueError(msg)
+            if ctx.fsdp_axis == ctx.tp_axis:
+                msg = "FSDP and tensor parallelism cannot share a mesh axis"
                 raise ValueError(msg)
 
         self._nope_set = set(config.nope_layer_indices)
@@ -490,9 +504,17 @@ class Attention(Module):
             bias=qkv_bias,
             mesh_device=ctx.device,
             mesh_axis=ctx.tp_axis,
+            fsdp_mesh_axis=ctx.fsdp_axis,
+            ccl_manager=ctx.ccl_manager,
         )
         self.o_proj = ColParallelLinear(
-            padded_heads * head_size, embed_size, bias=out_bias, mesh_device=ctx.device, mesh_axis=ctx.tp_axis
+            padded_heads * head_size,
+            embed_size,
+            bias=out_bias,
+            mesh_device=ctx.device,
+            mesh_axis=ctx.tp_axis,
+            fsdp_mesh_axis=ctx.fsdp_axis,
+            ccl_manager=ctx.ccl_manager,
         )
 
         self._sdpa_compute_kernel_config = ttnn.WormholeComputeKernelConfig(
@@ -761,10 +783,22 @@ class FeedForward(Module):
 
         # hidden_size is much greater than embed_size
         self.gate = ColParallelLinear(
-            embed_size, hidden_size, bias=False, mesh_device=ctx.device, mesh_axis=ctx.tp_axis
+            embed_size,
+            hidden_size,
+            bias=False,
+            mesh_device=ctx.device,
+            mesh_axis=ctx.tp_axis,
+            fsdp_mesh_axis=ctx.fsdp_axis,
+            ccl_manager=ctx.ccl_manager,
         )
         self.linear_in = ColParallelLinear(
-            embed_size, hidden_size, bias=False, mesh_device=ctx.device, mesh_axis=ctx.tp_axis
+            embed_size,
+            hidden_size,
+            bias=False,
+            mesh_device=ctx.device,
+            mesh_axis=ctx.tp_axis,
+            fsdp_mesh_axis=ctx.fsdp_axis,
+            ccl_manager=ctx.ccl_manager,
         )
         self.linear_out = RowParallelLinear(
             hidden_size,
@@ -772,6 +806,7 @@ class FeedForward(Module):
             bias=False,
             mesh_device=ctx.device,
             mesh_axis=ctx.tp_axis,
+            fsdp_mesh_axis=ctx.fsdp_axis,
             ccl_manager=ctx.ccl_manager,
         )
 

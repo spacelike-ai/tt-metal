@@ -37,15 +37,20 @@ class DiTGParallelConfigNoCFG(NamedTuple):
 class EncoderParallelConfig(NamedTuple):
     tensor_parallel: ParallelFactor
     sequence_parallel: ParallelFactor | None = None
+    fsdp: ParallelFactor | None = None
 
     @classmethod
     def from_tuple(cls, tp: tuple[int, int]) -> EncoderParallelConfig:
         return cls(tensor_parallel=ParallelFactor(*tp))
 
     @classmethod
-    def from_tuples(cls, *, tp: tuple[int, int], sp: tuple[int, int] | None) -> EncoderParallelConfig:
+    def from_tuples(
+        cls, *, tp: tuple[int, int], sp: tuple[int, int] | None, fsdp: tuple[int, int] | None = None
+    ) -> EncoderParallelConfig:
         return cls(
-            tensor_parallel=ParallelFactor(*tp), sequence_parallel=ParallelFactor(*sp) if sp is not None else None
+            tensor_parallel=ParallelFactor(*tp),
+            sequence_parallel=ParallelFactor(*sp) if sp is not None else None,
+            fsdp=ParallelFactor(*fsdp) if fsdp is not None else None,
         )
 
 
