@@ -531,7 +531,7 @@ def prepare_attention_bias(attention_mask: ttnn.Tensor) -> ttnn.Tensor:
 
     attention_mask = (attention_mask - 1.0) * math.inf
 
-    return ttnn.clone(attention_mask, dtype=ttnn.bfloat4_b)
+    return ttnn.typecast(attention_mask, ttnn.bfloat4_b)
 
 
 # adapted from https://github.com/huggingface/transformers/blob/v4.57.1/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py#L491

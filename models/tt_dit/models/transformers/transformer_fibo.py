@@ -287,7 +287,7 @@ class FiboTransformer(Module):
                 skip_time_embed_activation_fn=True,
             )
 
-        prompt = ttnn.clone(prompt, dtype=spatial.dtype)
+        prompt = ttnn.typecast(prompt, spatial.dtype)
 
         for block in self.single_transformer_blocks:
             prompt = self._dimfusion_inject(prompt, projected_layers[block_id])

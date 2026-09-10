@@ -816,12 +816,12 @@ class TransformerRmsNorm(Module):
         dtype = x.dtype
         if dtype not in (ttnn.bfloat4_b, ttnn.bfloat8_b):
             # reduce L1 memory requirements
-            x = ttnn.clone(x, dtype=ttnn.bfloat8_b)
+            x = ttnn.typecast(x, ttnn.bfloat8_b)
 
         x = self.inner.forward(x, compute_kernel_config=self._compute_kernel_config)
 
         if x.dtype != dtype:
-            x = ttnn.clone(x, dtype=dtype)
+            x = ttnn.typecast(x, dtype)
 
         return x
 
@@ -923,7 +923,7 @@ def _make_positions(
 
     # If the attention mask had holes, i.e., contained zeros between ones, this would have to be
     # done instead:
-    # mask = ttnn.clone(mask, dtype=ttnn.float32)
+    # mask = ttnn.typecast(mask, ttnn.float32)
     # # equivalent to: pos = mask.cumsum(1) - 1; pos.masked_fill_(mask == 0, 1)
     # pos = (ttnn.cumsum(mask, 1) - 2) * mask + 1
     # pos = pos[:, start:]
