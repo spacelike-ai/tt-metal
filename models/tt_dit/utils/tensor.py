@@ -218,10 +218,16 @@ def to_torch(
 ) -> torch.Tensor:
     """Converts a ttnn.Tensor to a torch.Tensor.
 
-    Strips away redundant data returned by calling ttnn.to_torch on a replicated tensor. If the
-    tensor is distributed and not on device, composer_device must be provided.
+    Concatenates the shards along the sharded dimensions and reads a single replica along the
+    replicated mesh axes, so redundant copies are not transferred. When the needed shards are not
+    all local, the read falls back to a mesh composer, which does transfer the redundant copies. A
+    distributed host tensor always takes that fallback.
+
+    If the tensor is distributed and not on device, composer_device must be provided.
+
+    mesh_axes indexes the physical device mesh, the same axes a collective's cluster_axis names.
     """
-    if x.tensor_topology().distribution_shape().mesh_size() == 1:
+    if len(x.tensor_topology().mesh_coords()) == 1:
         return ttnn.to_torch(x)
 
     if mesh_axes is None:
@@ -235,6 +241,75 @@ def to_torch(
     mesh_rank = len(list(composer_device.shape))
     mesh_axes = canonicalize_tensor_mesh_axes(mesh_axes, tensor_rank=len(x.shape), mesh_rank=mesh_rank)
 
+    output = _concat_shards(x, mesh_axes=mesh_axes)
+    if output is not None:
+        return output
+
+    return _compose(x, mesh_axes=mesh_axes, composer_device=composer_device)
+
+
+def _concat_shards(x: ttnn.Tensor, *, mesh_axes: Sequence[int | None]) -> torch.Tensor | None:
+    """Returns one replica off this host's devices, or None if it doesn't hold a whole replica."""
+    device = x.device()
+
+    # get_device_tensors runs an all-gather on a host tensor, so reading its shards costs the whole
+    # tensor anyway and picking a replica saves nothing. Leave those to the composer as well.
+    if device is None:
+        return None
+
+    mesh_shape = tuple(device.shape)
+    view = device.get_view()
+
+    # The mesh coordinates are device coordinates, in the order get_device_tensors returns the
+    # shards. They are the part of the topology every op preserves. Placements go stale, so the
+    # layout comes from mesh_axes instead.
+    shards = zip(x.tensor_topology().mesh_coords(), ttnn.get_device_tensors(x), strict=True)
+
+    # A map from local coordinates to the corresponding tensor.
+    local_shards = {tuple(coord): shard for coord, shard in shards if view.is_local(coord)}
+
+    # The indices this host owns along each mesh axis.
+    local_indices = [sorted({coord[ax] for coord in local_shards}) for ax in range(len(mesh_shape))]
+
+    # The indices to read along each mesh axis: all of a sharded axis, one replica of the others.
+    ranges = [indices if ax in mesh_axes else indices[:1] for ax, indices in enumerate(local_indices)]
+
+    local_shards_form_blocks = math.prod(len(indices) for indices in local_indices) == len(local_shards)
+    all_available_locally = all(
+        len(indices) == (mesh_shape[ax] if ax in mesh_axes else 1) for ax, indices in enumerate(ranges)
+    )
+
+    requires_fallback = not local_shards_form_blocks or not all_available_locally
+    if ttnn.distributed_context_is_initialized():
+        requires_fallback = any(ttnn.distributed_context_allgather_int(int(requires_fallback)))
+    if requires_fallback:
+        return None
+
+    placements = _invert_placements(mesh_axes, output_rank=len(mesh_shape))
+
+    def read_block(coord: tuple[int, ...]) -> torch.Tensor:
+        """Reads the block of shards below coord, concatenated along the mesh axes it spans."""
+        mesh_axis = len(coord)
+        if mesh_axis == len(mesh_shape):
+            return ttnn.to_torch(local_shards[coord])
+
+        parts = [read_block((*coord, index)) for index in ranges[mesh_axis]]
+        dim = placements[mesh_axis]
+        return parts[0] if dim is None else torch.cat(parts, dim=dim)
+
+    return read_block(())
+
+
+def _compose(
+    x: ttnn.Tensor,
+    *,
+    mesh_axes: Sequence[int | None],
+    composer_device: ttnn.MeshDevice,
+) -> torch.Tensor:
+    """Gathers the shards from all hosts with a mesh composer."""
+    # The composer concatenates along every mesh axis, so give each replicated axis a leading size-one
+    # tensor dim to concatenate along and drop the extra replicas again afterwards.
+    mesh_rank = len(list(composer_device.shape))
     replicated_mesh_axes = list(set(range(mesh_rank)) - {axis for axis in mesh_axes if axis is not None})
     mesh_axes = replicated_mesh_axes + list(mesh_axes)
 
