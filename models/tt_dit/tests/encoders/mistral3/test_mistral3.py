@@ -15,7 +15,7 @@ import ttnn
 
 from ....blocks.rope import RopeConfig
 from ....encoders.mistral3.model_mistral3 import Mistral3Encoder
-from ....encoders.transformer import TransformerEncoderConfig
+from ....encoders.transformer import WEIGHT_CACHE_DTYPE, TransformerEncoderConfig
 from ....parallel.config import EncoderParallelConfig, ParallelFactor
 from ....parallel.manager import CCLManager
 from ....utils import cache, tensor
@@ -99,6 +99,7 @@ def test_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, masked: b
         parallel_config=parallel_config,
         mesh_shape=tuple(mesh_device.shape),
         mesh_device=mesh_device,
+        dtype=WEIGHT_CACHE_DTYPE,
     )
 
     # This makes unmasked generation more similar in the two implementations, possibly because
@@ -223,6 +224,7 @@ def test_guided_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, ma
         parallel_config=parallel_config,
         mesh_shape=tuple(mesh_device.shape),
         mesh_device=mesh_device,
+        dtype=WEIGHT_CACHE_DTYPE,
     )
 
     # This makes unmasked generation more similar in the two implementations, possibly because
@@ -370,6 +372,7 @@ def test_transformer(*, mesh_device: ttnn.MeshDevice, batch_size: int, skip_laye
         parallel_config=parallel_config,
         mesh_shape=tuple(mesh_device.shape),
         mesh_device=mesh_device,
+        dtype=WEIGHT_CACHE_DTYPE,
     )
 
     tokens = torch.randint(0, config.vocab_size, [batch_size, sequence_length])

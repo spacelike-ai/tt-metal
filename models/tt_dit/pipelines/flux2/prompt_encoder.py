@@ -14,7 +14,7 @@ from loguru import logger
 import ttnn
 
 from ...encoders.mistral3.model_mistral3 import Mistral3Encoder
-from ...encoders.transformer import RopeConfig, TransformerEncoderConfig
+from ...encoders.transformer import WEIGHT_CACHE_DTYPE, RopeConfig, TransformerEncoderConfig
 from ...layers.module import Module
 from ...utils import cache, tensor
 from .system_messages import SYSTEM_MESSAGE, SYSTEM_MESSAGE_UPSAMPLING_T2I
@@ -85,7 +85,7 @@ class PromptEncoder:
             parallel_config=self._parallel_config,
             mesh_shape=tuple(self._device.shape),
             mesh_device=self._device,
-            dtype="bf16",
+            dtype=WEIGHT_CACHE_DTYPE,
             get_torch_state_dict=get_torch_state_dict,
         )
 

@@ -28,6 +28,9 @@ MAX_CHUNK_SIZE = 128
 # so the cache length must be a multiple of the smallest chunk it gets right.
 WORKAROUND_MIN_DECODE_CHUNK_SIZE = 64
 
+LINEAR_DTYPE = ttnn.bfloat8_b
+WEIGHT_CACHE_DTYPE = "bf8"
+
 
 @dataclass
 class GenerationOutput:
@@ -145,7 +148,12 @@ class TransformerEncoder(Module):
 
         # vocab_size is much greater than embed_size
         self.final_linear = ColParallelLinear(
-            config.embed_size, config.vocab_size, bias=False, mesh_device=ctx.device, mesh_axis=ctx.tp_axis
+            config.embed_size,
+            config.vocab_size,
+            bias=False,
+            mesh_device=ctx.device,
+            mesh_axis=ctx.tp_axis,
+            dtype=LINEAR_DTYPE,
         )
 
         self.config = config
@@ -513,6 +521,7 @@ class Attention(Module):
             mesh_axis=ctx.tp_axis,
             fsdp_mesh_axis=ctx.fsdp_axis,
             ccl_manager=ctx.ccl_manager,
+            dtype=LINEAR_DTYPE,
         )
         self.o_proj = ColParallelLinear(
             padded_heads * head_size,
@@ -522,6 +531,7 @@ class Attention(Module):
             mesh_axis=ctx.tp_axis,
             fsdp_mesh_axis=ctx.fsdp_axis,
             ccl_manager=ctx.ccl_manager,
+            dtype=LINEAR_DTYPE,
         )
 
         self._sdpa_compute_kernel_config = ttnn.WormholeComputeKernelConfig(
@@ -814,6 +824,7 @@ class FeedForward(Module):
             mesh_axis=ctx.tp_axis,
             fsdp_mesh_axis=ctx.fsdp_axis,
             ccl_manager=ctx.ccl_manager,
+            dtype=LINEAR_DTYPE,
         )
         self.linear_in = ColParallelLinear(
             embed_size,
@@ -823,6 +834,7 @@ class FeedForward(Module):
             mesh_axis=ctx.tp_axis,
             fsdp_mesh_axis=ctx.fsdp_axis,
             ccl_manager=ctx.ccl_manager,
+            dtype=LINEAR_DTYPE,
         )
         self.linear_out = RowParallelLinear(
             hidden_size,
@@ -832,6 +844,7 @@ class FeedForward(Module):
             mesh_axis=ctx.tp_axis,
             fsdp_mesh_axis=ctx.fsdp_axis,
             ccl_manager=ctx.ccl_manager,
+            dtype=LINEAR_DTYPE,
         )
 
         self._act_fn = ttnn.silu
