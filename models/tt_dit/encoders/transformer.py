@@ -170,7 +170,8 @@ class TransformerEncoder(Module):
         skip_final_linear: bool = False,
         output_hidden_states: bool = False,
     ) -> ttnn.Tensor | list[ttnn.Tensor]:
-        if cache is not None and cache.position != 0:
+        decode = cache is not None and cache.position != 0
+        if decode:
             (batch_size,) = tokens.shape
             seq_len = 1
         else:
@@ -253,6 +254,7 @@ class TransformerEncoder(Module):
                 attn_bias=attn_bias,
                 pos_embeds=None if i in self._nope_set else pos_embeds,
                 cache=cache,
+                decode=decode,
             )
 
             if (i + 1) % 10 == 0:
@@ -265,7 +267,7 @@ class TransformerEncoder(Module):
             x = x[:, :seq_len, :]
             hidden_states = [h[:, :seq_len, :] for h in hidden_states]
 
-        x = self.final_norm.forward(x)
+        x = self.final_norm.forward(x, decode=decode)
 
         if output_hidden_states:
             hidden_states.append(x)
@@ -462,14 +464,15 @@ class TransformerEncoderLayer(Module):
         attn_bias: ttnn.Tensor | None = None,
         pos_embeds: tuple[ttnn.Tensor, ttnn.Tensor] | None,
         cache: Cache | None = None,
+        decode: bool = False,
     ) -> ttnn.Tensor:
         residual = x
-        x = self.attn_norm.forward(x)
+        x = self.attn_norm.forward(x, decode=decode)
         x = self.attn.forward(x, attn_bias=attn_bias, pos_embeds=pos_embeds, cache=cache)
         x = x + residual
 
         residual = x
-        x = self.ff_norm.forward(x)
+        x = self.ff_norm.forward(x, decode=decode)
         x = self.ff.forward(x)
         x = x + residual
 
@@ -858,6 +861,8 @@ class TransformerRmsNorm(Module):
         )
 
         self.eps = eps
+        self._num_channels = num_channels
+        self._grid_size = ctx.device.compute_with_storage_grid_size()
 
         self._compute_kernel_config = ttnn.WormholeComputeKernelConfig(
             math_fidelity=ttnn.MathFidelity.HiFi4,
@@ -868,8 +873,43 @@ class TransformerRmsNorm(Module):
     def _prepare_torch_state(self, state: dict[str, torch.Tensor]) -> None:
         state["inner.weight"] = state.pop("weight")
 
-    def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        return self.inner.forward(x, compute_kernel_config=self._compute_kernel_config)
+    def forward(self, x: ttnn.Tensor, *, decode: bool = False) -> ttnn.Tensor:
+        if not decode:
+            return self.inner.forward(x, compute_kernel_config=self._compute_kernel_config)
+
+        # Sharded config taken from tt_transformers (`ModelArgs.create_sharded_norm_config`).
+        rows = x.padded_shape[-2]
+        grid = self._decode_grid()
+        block_w = self._num_channels // ttnn.TILE_SIZE // grid.num_cores
+
+        memory_config = ttnn.create_sharded_memory_config(
+            shape=[rows, block_w * ttnn.TILE_SIZE],
+            core_grid=grid,
+            strategy=ttnn.ShardStrategy.WIDTH,
+            use_height_and_width_as_shard_shape=True,
+        )
+        program_config = ttnn.LayerNormShardedMultiCoreProgramConfig(
+            compute_with_storage_grid_size=[grid.x, grid.y],
+            subblock_w=max(w for w in (4, 3, 2, 1) if block_w % w == 0),
+            block_h=rows // ttnn.TILE_SIZE,
+            block_w=block_w,
+            inplace=False,
+        )
+
+        x = ttnn.interleaved_to_sharded(x, memory_config)
+        x = self.inner.forward(x, compute_kernel_config=self._compute_kernel_config, program_config=program_config)
+        return ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
+
+    def _decode_grid(self) -> ttnn.CoreGrid:
+        """Picks the core grid closest to 32 cores over which the channel tiles divide evenly."""
+        tiles = self._num_channels // ttnn.TILE_SIZE
+        candidates = []
+        for rows in range(1, self._grid_size.y + 1):
+            for cols in range(1, self._grid_size.x + 1):
+                if tiles % (rows * cols) == 0:
+                    candidates.append((abs(rows * cols - 32), -rows * cols, rows, cols))
+        _, _, rows, cols = min(candidates)
+        return ttnn.CoreGrid(y=rows, x=cols)
 
 
 class Cache:
