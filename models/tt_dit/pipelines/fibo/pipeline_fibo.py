@@ -66,13 +66,27 @@ _DEFAULT_SEQUENCE_LENGTHS = (1024, 1536, 3072)
 # - Height or width makes little difference. Pick whichever the mesh shape makes convenient.
 # - Unlike the encoder, the decoder keeps gaining out to eight devices, where it was fastest.
 #   The gains are sublinear but had not flattened out.
-_PRESETS: dict[tuple[int, ...], dict] = {
+_PRESETS_WH: dict[tuple[int, ...], dict] = {
     (2, 4): {
         "cfg": (2, 0),
         "sp": (1, 0),
         "tp": (4, 1),
+        "encoder_tp": (4, 1),
+        "encoder_sp": None,
+        "vae_tp_axis": None,
+        "vae_h_axis": 1,
+        "vae_w_axis": None,
+        "num_links": 1,
+    },
+}
+
+_PRESETS_BH: dict[tuple[int, ...], dict] = {
+    (2, 2): {
+        "cfg": (1, 0),
+        "sp": (1, 0),
+        "tp": (2, 1),
         "encoder_tp": (2, 1),
-        "encoder_sp": (2, 0),
+        "encoder_sp": None,
         "vae_tp_axis": None,
         "vae_h_axis": 1,
         "vae_w_axis": None,
@@ -119,7 +133,8 @@ class FiboPipelineConfig:
         checkpoint_name: str = _DEFAULT_CHECKPOINT,
     ) -> FiboPipelineConfig:
         """Build a fully populated config, picking parallelism defaults from ``mesh_shape``."""
-        preset = _PRESETS.get(tuple(mesh_shape), {}) if mesh_shape is not None else {}
+        preset_dict = _PRESETS_BH if ttnn.device.is_blackhole() else _PRESETS_WH
+        preset = preset_dict.get(tuple(mesh_shape), {}) if mesh_shape is not None else {}
 
         dit_parallel_config = dit_parallel_config or DiTParallelConfig.from_tuples(
             cfg=preset["cfg"], sp=preset["sp"], tp=preset["tp"]
@@ -248,9 +263,9 @@ class FiboPipeline(PipelineAPIMixin):
         seed: int = 0,
         num_images_per_prompt: int = 1,
         cfg_scale: float = 5.0,
-        traced: bool = False,
+        traced: bool = True,
         vae_traced: bool | None = None,
-        encoder_traced: bool | None = None,
+        encoder_traced: bool | None = False,
         on_event: PipelineEventCallback | None = None,
     ) -> list[Image.Image]:
         prompt_count = len(prompts)
