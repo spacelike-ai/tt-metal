@@ -43,14 +43,35 @@ _DEFAULT_CHECKPOINT = "briaai/FIBO"
 # Prompt lengths the text encoder is traced at; must be divisible by sp * 128
 _DEFAULT_SEQUENCE_LENGTHS = (1024, 1536, 3072)
 
+# Rules of thumb for the encoder parallelism below, from sweeping the text encoder over every
+# mesh shape from one to eight devices on a T3K:
+#
+# - At equal device count, sequence parallelism beats tensor parallelism at every sequence
+#   length and by a wide margin. Tensor parallelism all-reduces activations at every linear
+#   layer, while sequence parallelism only gathers keys and values inside attention.
+# - Splitting the devices between the two still beats pouring them all into either one. At four
+#   devices, two by two won over both pure sequence parallelism and pure tensor parallelism,
+#   and by the widest margin at the shortest sequence length.
+# - Pure tensor parallelism scales negatively: four devices came out slower than one at the
+#   longest sequence length.
+# - Do not give the encoder more than four devices. Every eight-device shape lost to the best
+#   four-device one.
+# - Which physical chips a shape lands on is worth a substantial fraction of the runtime, so
+#   timings taken on different mesh shapes are not directly comparable.
+#
+# And for the VAE decoder, from the same sweep:
+#
+# - Split the image spatially, over height or width. Tensor parallelism lost at every device
+#   count, and mixing it into a spatial split cost more than it saved.
+# - Height or width makes little difference. Pick whichever the mesh shape makes convenient.
+# - Unlike the encoder, the decoder keeps gaining out to eight devices, where it was fastest.
+#   The gains are sublinear but had not flattened out.
 _PRESETS: dict[tuple[int, ...], dict] = {
     (2, 4): {
         "cfg": (2, 0),
         "sp": (1, 0),
         "tp": (4, 1),
         "encoder_tp": (2, 1),
-        # Trading encoder tp for sp measured 27% faster (719 -> 527 ms/encode at 3072 tokens,
-        # batch 2, traced). Requires sequence lengths divisible by sp * 128.
         "encoder_sp": (2, 0),
         "vae_tp_axis": None,
         "vae_h_axis": 1,
