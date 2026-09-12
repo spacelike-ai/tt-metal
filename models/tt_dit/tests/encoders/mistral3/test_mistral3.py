@@ -118,9 +118,6 @@ def test_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, masked: b
     tokens = out["input_ids"].to(torch_model.device)
     mask = out["attention_mask"].to(torch_model.device) if masked else None
 
-    tt_tokens = tensor.from_torch(tokens, device=mesh_device, dtype=ttnn.uint32)
-    tt_mask = tensor.from_torch(mask, device=mesh_device) if mask is not None else None
-
     generation_config.max_length = max_length
     generation_config.repetition_penalty = None  # repetition penalty is not implemented
     generation_config.return_dict_in_generate = True
@@ -130,20 +127,18 @@ def test_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, masked: b
 
     start_time = time.time()
     tt_out = model.generate(
-        tt_tokens,
-        mask=tt_mask,
+        tokens,
+        mask=mask,
         eos_tokens=generation_config.eos_token_id,
         max_length=generation_config.max_length,
         top_k=generation_config.top_k if generation_config.do_sample else 1,
         top_p=generation_config.top_p or 1,
         temperature=generation_config.temperature,
     )
-    tt_tokens_out = tensor.to_torch(tt_out.tokens)
-
     print(f"generation took {time.time() - start_time:.2f} seconds")
 
-    for i in range(tt_tokens_out.size(0)):
-        print(tokenizer.decode(tt_tokens_out[i]))
+    for i in range(tt_out.tokens.size(0)):
+        print(tokenizer.decode(tt_out.tokens[i]))
 
 
 @pytest.mark.parametrize(
@@ -243,9 +238,6 @@ def test_guided_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, ma
     tokens = out["input_ids"].to(torch_model.device)
     mask = out["attention_mask"].to(torch_model.device) if masked else None
 
-    tt_tokens = tensor.from_torch(tokens, device=mesh_device, dtype=ttnn.uint32)
-    tt_mask = tensor.from_torch(mask, device=mesh_device) if mask is not None else None
-
     generation_config.max_length = max_length
     generation_config.repetition_penalty = None  # repetition penalty is not implemented
     generation_config.return_dict_in_generate = True
@@ -266,9 +258,9 @@ def test_guided_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, ma
 
     print("running ttnn model...")
     tt_out = model.generate(
-        tt_tokens,
+        tokens,
         guide=tokens_out,
-        mask=tt_mask,
+        mask=mask,
         eos_tokens=generation_config.eos_token_id,
         max_length=generation_config.max_length,
         top_k=generation_config.top_k if generation_config.do_sample else 1,
@@ -277,13 +269,12 @@ def test_guided_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, ma
         return_logits=True,
     )
 
-    tt_tokens_out = tensor.to_torch(tt_out.tokens)
     tt_logits = tensor.to_torch(ttnn.stack(tt_out.logits, dim=1), mesh_axes=[..., tp_axis])
 
     # To compare generated tokens, remove `guide` in the call to `model.generate`!
-    # for i in range(tt_tokens_out.size(0)):
+    # for i in range(tt_out.tokens.size(0)):
     #     print(tokenizer.decode(tokens_out[i]))
-    #     print(tokenizer.decode(tt_tokens_out[i]))
+    #     print(tokenizer.decode(tt_out.tokens[i]))
 
     if mask is not None:
         # Masked positions on the start of the sequence contain random values from computing softmax over all -inf
@@ -295,7 +286,7 @@ def test_guided_generation(*, mesh_device: ttnn.MeshDevice, skip_layers: int, ma
 
     assert_quality(logits, tt_logits, ccc=0.9980, relative_rmse=0.063)
 
-    assert tt_tokens_out.eq(tokens_out).all()
+    assert tt_out.tokens.eq(tokens_out).all()
 
 
 @pytest.mark.parametrize(

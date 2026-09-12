@@ -34,7 +34,7 @@ WEIGHT_CACHE_DTYPE = "bf8"
 
 @dataclass
 class GenerationOutput:
-    tokens: ttnn.Tensor
+    tokens: torch.Tensor
     logits: list[ttnn.Tensor] | None
 
 
@@ -354,9 +354,9 @@ class TransformerEncoder(Module):
 
     def generate(
         self,
-        tokens: ttnn.Tensor,
+        tokens: torch.Tensor,
         *,
-        mask: ttnn.Tensor | None,
+        mask: torch.Tensor | None,
         max_length: int,
         eos_tokens: int | Sequence[int] | None,
         top_k: int | None = None,
@@ -373,14 +373,15 @@ class TransformerEncoder(Module):
         # the transformers library does.
 
         batch_size, input_length = tokens.shape
-        device = tokens.device()
+        device = self._device
 
         padded_seq_len = _padded_sequence_length(max_length - 1)
         padded_seq_len = -(-padded_seq_len // WORKAROUND_MIN_DECODE_CHUNK_SIZE) * WORKAROUND_MIN_DECODE_CHUNK_SIZE
 
         if mask is not None:
             assert mask.shape == tokens.shape
-            mask = ttnn.pad(mask, [(0, padded_seq_len - input_length)], value=1)
+            mask = torch.nn.functional.pad(mask, [0, padded_seq_len - input_length], value=1)
+            mask = tensor.from_torch(mask, device=device)
 
         if eos_tokens is not None:
             if isinstance(eos_tokens, int):
@@ -398,9 +399,11 @@ class TransformerEncoder(Module):
 
         logits = [] if return_logits else None
 
+        tt_input_tokens = tensor.from_torch(tokens, dtype=ttnn.uint32, device=device)
+
         for pos in range(input_length, max_length):
             current_logits = self.forward(
-                tokens=tokens if prev_pos == 0 else tokens[:, -1],
+                tokens=tt_input_tokens,
                 mask=mask[:, :pos] if prev_pos == 0 and mask is not None else mask,
                 pos_embeds=(cos[:, prev_pos:pos], sin[:, prev_pos:pos]),
                 cache=cache,
@@ -416,9 +419,13 @@ class TransformerEncoder(Module):
                 torch_prob = torch.softmax(torch_current_logits / temperature, 1)
                 torch_new_tokens = _sample(torch_prob, top_k=top_k, top_p=top_p)
 
-            new_tokens = tensor.from_torch(torch_new_tokens, dtype=tokens.dtype, device=device)
+            tokens = torch.cat([tokens, torch_new_tokens.to(tokens.dtype)], dim=1)
 
-            tokens = ttnn.concat([tokens, new_tokens], dim=1)
+            tt_input_tokens = tensor.from_torch(
+                tokens[:, -1] if cache is not None else tokens,
+                dtype=ttnn.uint32,
+                device=device,
+            )
 
             if logits is not None:
                 logits.append(ttnn.squeeze(current_logits, 1))

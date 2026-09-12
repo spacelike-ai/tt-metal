@@ -224,19 +224,14 @@ def _upsample_prompts(
     if isinstance(encoder, Module):
         assert device is not None
 
-        tt_tokens = tensor.from_torch(tokens, device=device, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT)
-        tt_mask = tensor.from_torch(mask, device=device)
-
-        tt_output = encoder.generate(
-            tt_tokens,
-            mask=tt_mask,
+        output_tokens = encoder.generate(
+            tokens,
+            mask=mask,
             eos_tokens=tokenizer.eos_token_id,
             max_length=max_length,
             temperature=temperature,
             traced=traced,
-        )
-
-        output_tokens = ttnn.to_torch(ttnn.get_device_tensors(tt_output.tokens)[0])
+        ).tokens
     else:
         tokens = tokens.to(device=encoder.device)
 
