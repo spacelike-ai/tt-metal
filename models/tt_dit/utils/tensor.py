@@ -275,14 +275,14 @@ def _concat_shards(x: ttnn.Tensor, *, mesh_axes: Sequence[int | None]) -> torch.
     ranges = [indices if ax in mesh_axes else indices[:1] for ax, indices in enumerate(local_indices)]
 
     local_shards_form_blocks = math.prod(len(indices) for indices in local_indices) == len(local_shards)
+    if not local_shards_form_blocks:
+        return None
+
     all_available_locally = all(
         len(indices) == (mesh_shape[ax] if ax in mesh_axes else 1) for ax, indices in enumerate(ranges)
     )
 
-    requires_fallback = not local_shards_form_blocks or not all_available_locally
-    if ttnn.distributed_context_is_initialized():
-        requires_fallback = any(ttnn.distributed_context_allgather_int(int(requires_fallback)))
-    if requires_fallback:
+    if not all_available_locally:
         return None
 
     placements = _invert_placements(mesh_axes, output_rank=len(mesh_shape))
