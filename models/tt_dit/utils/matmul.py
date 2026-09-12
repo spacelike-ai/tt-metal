@@ -713,6 +713,14 @@ def get_agmm_config(
     return ttnn.CoreCoord(grid_x, grid_y), config, math.ceil(in0_axis / num_links)
 
 
+# Measured to be optimally on Wormhole for the decode linears of the tt_dit encoders at one and two
+# tile rows.
+_MAX_1D_BLOCK_AREA_TILES = 16
+
+# The destination registers hold 4 tiles with fp32 accumulation; the kernel rejects more.
+_MAX_1D_SUBBLOCK_W = 4
+
+
 def get_1d_matmul_config(
     M: int,
     K: int,
@@ -726,9 +734,8 @@ def get_1d_matmul_config(
     2D minimal_matmul distribution, where (grid_y - 1)/grid_y cores process
     zero-padded rows when M_tiles < grid_y.
 
-    Parameters are computed as safe defaults suitable for correctness; run
-    the 1D sweep in test_sweep_mm.py to find the optimal in0_block_w /
-    per_core_N / out_subblock_w for each shape.
+    Run the 1D sweep in test_sweep_mm.py to find the optimal in0_block_w / per_core_N /
+    out_subblock_w for each shape.
     """
     num_cores = core_grid.x * core_grid.y
     M_tiles = M // 32
@@ -743,26 +750,18 @@ def get_1d_matmul_config(
         in0_block_w, per_core_N, out_subblock_w = config_tuple
     else:
         if signature not in _warned_1d_matmul_signatures:
-            logger.warning(
+            logger.info(
                 f"1D matmul: no swept config for (M, K, N) = ({M}, {K}, {N}) on "
-                f"{core_grid.x}x{core_grid.y} grid; using default blocking — "
-                f"run test_1d_matmul_sweep_bh4x8_ring to find optimal params"
+                f"{core_grid.x}x{core_grid.y} grid; using default blocking"
             )
             _warned_1d_matmul_signatures.add(signature)
 
         per_core_N = max(1, math.ceil(N_tiles / num_cores))
-
-        # in0_block_w: K-tiles per inner loop step. Must divide K_tiles.
-        # 4 tiles is a conservative default that fits all target K shapes.
-        in0_block_w = 4
-        while K_tiles % in0_block_w != 0 and in0_block_w > 1:
-            in0_block_w -= 1
+        in0_block_w = _largest_divisor(K_tiles, max(1, _MAX_1D_BLOCK_AREA_TILES // per_core_N))
 
         # out_subblock_h = 1 satisfies the 1D mcast constraint:
         #   out_subblock_w == per_core_N  OR  out_subblock_h == 1
-        out_subblock_w = min(8, per_core_N)
-        while per_core_N % out_subblock_w != 0 and out_subblock_w > 1:
-            out_subblock_w -= 1
+        out_subblock_w = _largest_divisor(per_core_N, _MAX_1D_SUBBLOCK_W)
 
     out_subblock_h = 1
 
@@ -777,6 +776,10 @@ def get_1d_matmul_config(
         fused_activation=None,
         mcast_in0=True,
     )
+
+
+def _largest_divisor(n: int, limit: int) -> int:
+    return next(d for d in range(limit, 0, -1) if n % d == 0)
 
 
 class FusedMMRSConfig(NamedTuple):
