@@ -281,8 +281,12 @@ def _concat_shards(x: ttnn.Tensor, *, mesh_axes: Sequence[int | None]) -> torch.
         raise ValueError(msg)
 
     ranges = [range(mesh_shape[ax]) if ax in mesh_axes else [anchor[ax]] for ax in range(len(mesh_shape))]
-    if any(coord not in local_shards for coord in itertools.product(*ranges)):
+    read_coords = list(itertools.product(*ranges))
+    if any(coord not in local_shards for coord in read_coords):
         return None
+
+    host_shards = {coord: local_shards[coord].cpu(blocking=False) for coord in read_coords}
+    ttnn.synchronize_device(device)
 
     placements = _invert_placements(mesh_axes, output_rank=len(mesh_shape))
 
@@ -290,7 +294,7 @@ def _concat_shards(x: ttnn.Tensor, *, mesh_axes: Sequence[int | None]) -> torch.
         """Reads the block of shards below coord, concatenated along the mesh axes it spans."""
         mesh_axis = len(coord)
         if mesh_axis == len(mesh_shape):
-            return ttnn.to_torch(local_shards[coord])
+            return ttnn.to_torch(host_shards[coord])
 
         parts = [read_block((*coord, index)) for index in ranges[mesh_axis]]
         dim = placements[mesh_axis]
