@@ -343,14 +343,15 @@ class TransformerEncoder(Module):
         # offsetting columns by query_pos (key positions 0..query_pos-1 are always visible).
         max_len = max(query_length + query_pos, kv_length)
         causal = self._get_causal_cond(max_len, device)
+
+        # ttnn.pad does not take bfloat4_b, and ttnn.slice does not at unaligned positions.
+        causal = ttnn.typecast(causal, ttnn.bfloat16)
+
         # rows q=0..query_length-1, cols k=0..kv_length-1, diagonal shifted by query_pos
         # i.e. keep k <= q + query_pos  →  use rows [query_pos : query_pos+query_length]
         causal = causal[:, :, query_pos : query_pos + query_length, :kv_length]
 
-        # The product inherits the condition's bfloat4_b, which ttnn.pad cannot pad
-        mask = ttnn.typecast(causal * mask, ttnn.bfloat16)
-
-        return (mask - 1.0) * math.inf
+        return (causal * mask - 1.0) * math.inf
 
     def generate(
         self,
