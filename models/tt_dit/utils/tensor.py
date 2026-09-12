@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 from typing import TYPE_CHECKING
 
@@ -223,6 +224,8 @@ def to_torch(
     all local, the read falls back to a mesh composer, which does transfer the redundant copies. A
     distributed host tensor always takes that fallback.
 
+    A host holding none of the shards raises.
+
     If the tensor is distributed and not on device, composer_device must be provided.
 
     mesh_axes indexes the physical device mesh, the same axes a collective's cluster_axis names.
@@ -249,7 +252,10 @@ def to_torch(
 
 
 def _concat_shards(x: ttnn.Tensor, *, mesh_axes: Sequence[int | None]) -> torch.Tensor | None:
-    """Returns one replica off this host's devices, or None if it doesn't hold a whole replica."""
+    """Returns one replica off this host's devices, or None if it doesn't hold a whole replica.
+
+    Raises if this host holds no shards at all.
+    """
     device = x.device()
 
     # get_device_tensors runs an all-gather on a host tensor, so reading its shards costs the whole
@@ -268,21 +274,14 @@ def _concat_shards(x: ttnn.Tensor, *, mesh_axes: Sequence[int | None]) -> torch.
     # A map from local coordinates to the corresponding tensor.
     local_shards = {tuple(coord): shard for coord, shard in shards if view.is_local(coord)}
 
-    # The indices this host owns along each mesh axis.
-    local_indices = [sorted({coord[ax] for coord in local_shards}) for ax in range(len(mesh_shape))]
+    # Anchor the replica on the lowest local coordinate.
+    anchor = min(local_shards, default=None)
+    if anchor is None:
+        msg = "this host holds none of the tensor's shards"
+        raise ValueError(msg)
 
-    # The indices to read along each mesh axis: all of a sharded axis, one replica of the others.
-    ranges = [indices if ax in mesh_axes else indices[:1] for ax, indices in enumerate(local_indices)]
-
-    local_shards_form_blocks = math.prod(len(indices) for indices in local_indices) == len(local_shards)
-    if not local_shards_form_blocks:
-        return None
-
-    all_available_locally = all(
-        len(indices) == (mesh_shape[ax] if ax in mesh_axes else 1) for ax, indices in enumerate(ranges)
-    )
-
-    if not all_available_locally:
+    ranges = [range(mesh_shape[ax]) if ax in mesh_axes else [anchor[ax]] for ax in range(len(mesh_shape))]
+    if any(coord not in local_shards for coord in itertools.product(*ranges)):
         return None
 
     placements = _invert_placements(mesh_axes, output_rank=len(mesh_shape))
