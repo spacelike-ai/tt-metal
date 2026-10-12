@@ -525,6 +525,17 @@ _DEFAULT_BLOCKINGS = {
     (256, 128, (1, 3, 3)): (256, 32, 1, 8, 16),
     (32, 512, (1, 3, 3)): (32, 32, 1, 8, 16),  # conv_in (z_channels 8 -> aligned 32)
     (128, 32, (1, 3, 3)): (128, 32, 1, 8, 16),  # conv_out (out_ch 2 -> aligned 32)
+    # Qwen-Image VAE, conv2d run as conv3d with T = 1. Swept on WH 2x4 at 1024²
+    # (H split 4 ways, W 2 ways), each at the largest size the channel pair runs at.
+    (32, 384, (1, 3, 3)): (32, 128, 1, 4, 16),  # decoder conv_in
+    (384, 384, (1, 3, 3)): (384, 96, 1, 8, 4),  # decoder res
+    (192, 384, (1, 3, 3)): (192, 96, 1, 8, 4),  # decoder res
+    (192, 192, (1, 3, 3)): (192, 96, 1, 16, 4),  # decoder res
+    (96, 96, (1, 3, 3)): (96, 96, 1, 8, 8),  # decoder and encoder res
+    (96, 3, (1, 3, 3)): (96, 32, 1, 4, 32),  # decoder conv_out
+    (32, 96, (1, 3, 3)): (32, 96, 1, 16, 16),  # encoder conv_in
+    (96, 192, (1, 3, 3)): (96, 96, 1, 8, 8),  # encoder res
+    (384, 16, (1, 3, 3)): (384, 32, 1, 16, 2),  # encoder conv_out
 }
 
 

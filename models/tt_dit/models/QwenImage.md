@@ -39,22 +39,22 @@ Current performance for two systems are detailed below. Performance is measured 
 export TT_DIT_CACHE_DIR=/your/cache/path
 
 # Run the pipeline test on a 4-chip box such as BH QuietBox 2 (2x2 mesh)
-pytest models/tt_dit/tests/models/qwenimage/test_pipeline_qwenimage.py -k "2x2sp1tp2 and traced and encoder_device"
+pytest models/tt_dit/tests/models/qwenimage/test_pipeline_qwenimage.py::test_qwenimage_pipeline -k 2x2
 
 # Run the pipeline test on QuietBox (2x4 mesh)
-pytest models/tt_dit/tests/models/qwenimage/test_pipeline_qwenimage.py -k "2x4sp1tp4 and traced and encoder_device"
+pytest models/tt_dit/tests/models/qwenimage/test_pipeline_qwenimage.py::test_qwenimage_pipeline -k 2x4
 
 # Run the pipeline test on Galaxy (4x8 mesh)
-pytest models/tt_dit/tests/models/qwenimage/test_pipeline_qwenimage.py -k "4x8sp4tp4 and traced and encoder_device"
+pytest models/tt_dit/tests/models/qwenimage/test_pipeline_qwenimage.py::test_qwenimage_pipeline -k 4x8
 
 # Run the performance test on a 4-chip box such as BH QuietBox 2 (2x2 mesh)
-pytest models/tt_dit/tests/models/qwenimage/test_performance_qwenimage.py -k "2x2cfg2sp1tp2"
+pytest models/tt_dit/tests/models/qwenimage/test_performance_qwenimage.py -k 2x2
 
 # Run the performance test on QuietBox (2x4 mesh)
-pytest models/tt_dit/tests/models/qwenimage/test_performance_qwenimage.py -k "2x4cfg2sp1tp4"
+pytest models/tt_dit/tests/models/qwenimage/test_performance_qwenimage.py -k 2x4
 
 # Run the performance test on Galaxy (4x8 mesh)
-pytest models/tt_dit/tests/models/qwenimage/test_performance_qwenimage.py -k "4x8cfg2sp4tp4"
+pytest models/tt_dit/tests/models/qwenimage/test_performance_qwenimage.py -k 4x8
 ```
 
 
