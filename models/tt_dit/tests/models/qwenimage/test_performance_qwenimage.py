@@ -12,11 +12,8 @@ from models.common.utility_functions import is_blackhole
 from models.perf.benchmarking_utils import BenchmarkData, BenchmarkProfiler
 from models.tt_dit.pipelines.events import profiler_event_callback
 from models.tt_dit.pipelines.qwenimage.pipeline_qwenimage import QwenImagePipeline, QwenImagePipelineConfig
-from models.tt_dit.utils.test import line_params_req_exact_devices
 
-# The warm-up traces every resolution of the preset: all of them on BH (~760 MB per chip on 2x2),
-# only 1024² on 2x4 WH (~110 MB per chip).
-TRACE_REGION_SIZE = 800_000_000 if is_blackhole() else 150_000_000
+from .device_params import MESH_DEVICE_PARAMS
 
 
 @pytest.mark.parametrize(
@@ -25,13 +22,7 @@ TRACE_REGION_SIZE = 800_000_000 if is_blackhole() else 150_000_000
         (1024, 1024, 50),
     ],
 )
-@pytest.mark.parametrize("mesh_device", [(2, 2), (2, 4), (4, 8)], ids=["2x2", "2x4", "4x8"], indirect=True)
-@pytest.mark.parametrize(
-    "device_params",
-    [{**line_params_req_exact_devices, "trace_region_size": TRACE_REGION_SIZE}],
-    ids=["line"],
-    indirect=True,
-)
+@pytest.mark.parametrize(("mesh_device", "device_params"), MESH_DEVICE_PARAMS, indirect=True)
 def test_qwenimage_pipeline_performance(
     *,
     mesh_device: ttnn.MeshDevice,
@@ -178,20 +169,21 @@ def test_qwenimage_pipeline_performance(
         "total_time": statistics.mean(total_times),
     }
     if tuple(mesh_device.shape) == (2, 2):
-        # BH QuietBox 2, calibrated from run 31845507029:
-        # encoding 0.1189s, denoising 47.1481s, vae 1.1045s, total 57.4226s.
+        # BH QuietBox 2, measured on a local QB2:
+        # encoding 0.097s, denoising 27.2s, vae 0.111s, total 27.5s.
         expected_metrics = {
-            "total_encoding_time": 0.2,
-            "denoising_steps_time": 55.0,
-            "vae_decoding_time": 1.5,
-            "total_time": 68,
+            "total_encoding_time": 0.12,
+            "denoising_steps_time": 30.0,
+            "vae_decoding_time": 0.15,
+            "total_time": 31,
         }
     elif tuple(mesh_device.shape) == (2, 4):
+        # WH T3K: encoding 0.552s, denoising 67.2s, vae 0.138s, total 68.0s.
         expected_metrics = {
-            "total_encoding_time": 0.35,
-            "denoising_steps_time": 80.0,
-            "vae_decoding_time": 3.0,
-            "total_time": 88,
+            "total_encoding_time": 0.6,
+            "denoising_steps_time": 74.0,
+            "vae_decoding_time": 0.2,
+            "total_time": 75,
         }
     elif tuple(mesh_device.shape) == (4, 8):
         expected_metrics = {
