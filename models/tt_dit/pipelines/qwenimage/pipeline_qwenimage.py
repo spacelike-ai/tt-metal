@@ -147,6 +147,8 @@ _PRESETS_WH: dict[tuple[int, ...], dict] = {
         "encoder_tp": (4, 1),
         "encoder_fsdp": (4, 0),
         "num_links": 4,
+        # As on 2x4: without it, an edit runs out of DRAM in the vision tower and the transformer.
+        "edit_dit_fsdp": True,
     },
 }
 
@@ -382,6 +384,8 @@ class QwenImagePipeline(PipelineAPIMixin):
         self._ccl_managers = [
             CCLManager(d, num_links=config.num_links, topology=config.topology) for d in self._devices
         ]
+        # Like every diffusers Qwen-Image pipeline, rescale the guided prediction to the norm of the
+        # conditional one.
         self._combiner = CFGCombiner(self._devices, rescale=True)
 
         scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(config.checkpoint_name, subfolder="scheduler")
@@ -656,7 +660,6 @@ class QwenImagePipeline(PipelineAPIMixin):
         first_step = first_step if inpaint else 0
 
         logger.info("preparing inputs...")
-        context = [tensor.from_torch(c, device=d) for c, d in zip(torch_contexts, self._devices, strict=True)]
         latents = self._prepare_latents(
             layout,
             images=images,
@@ -667,6 +670,9 @@ class QwenImagePipeline(PipelineAPIMixin):
             traced=vae_traced,
         )
         latents = tensor.from_torch_to_devices(latents, devices=self._devices, mesh_axes=[None, self._sp_axis, None])
+        # Uploaded after the image encoding, whose VAE trace replay may overwrite device tensors
+        # allocated after its capture.
+        context = [tensor.from_torch(c, device=d) for c, d in zip(torch_contexts, self._devices, strict=True)]
         ropes = [
             self._checkpoint.rope_tables(
                 latents_height=size.latents_height,

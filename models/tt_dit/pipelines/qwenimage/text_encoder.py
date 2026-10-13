@@ -49,15 +49,11 @@ class PromptFormat:
 TEXT_TO_IMAGE_FORMAT = PromptFormat(PROMPT_TEMPLATE, PROMPT_DROP_IDX)
 # Qwen-Image-Edit: one image, placed right before the prompt.
 EDIT_FORMAT = PromptFormat(
-    EDIT_PROMPT_TEMPLATE,
-    EDIT_PROMPT_DROP_IDX,
-    image_prompt="<|vision_start|><|image_pad|><|vision_end|>",
+    EDIT_PROMPT_TEMPLATE, EDIT_PROMPT_DROP_IDX, image_prompt="<|vision_start|><|image_pad|><|vision_end|>"
 )
 # Qwen-Image-Edit-2509 and 2511: numbered images.
 EDIT_PLUS_FORMAT = PromptFormat(
-    EDIT_PROMPT_TEMPLATE,
-    EDIT_PROMPT_DROP_IDX,
-    image_prompt="Picture {}: <|vision_start|><|image_pad|><|vision_end|>",
+    EDIT_PROMPT_TEMPLATE, EDIT_PROMPT_DROP_IDX, image_prompt="Picture {}: <|vision_start|><|image_pad|><|vision_end|>"
 )
 
 

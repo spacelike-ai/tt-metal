@@ -204,7 +204,7 @@ BOUNDS_2511 = (0.99, 0.35)
         pytest.param("Qwen/Qwen-Image-Edit-2511", id="2511"),
     ],
 )
-@pytest.mark.parametrize("device_params", [line_params_req_exact_devices], indirect=True)
+@pytest.mark.parametrize("device_params", [line_params_req_exact_devices], ids=["line"], indirect=True)
 def test_transformer_edit(
     *,
     mesh_device: ttnn.MeshDevice,

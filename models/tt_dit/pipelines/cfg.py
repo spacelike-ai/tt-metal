@@ -50,9 +50,19 @@ class CFGCombiner:
         return self._inner.combine(predictions, cfg_scale)
 
 
+def _combine(uncond: ttnn.Tensor, cond: ttnn.Tensor, cfg_scale: float, *, rescale: bool) -> ttnn.Tensor:
+    combined = ttnn.lerp(uncond, cond, cfg_scale)
+    if not rescale:
+        return combined
+    # The epsilon keeps all-zero rows, such as sequence padding, at zero instead of 0 / 0.
+    cond_norm = ttnn.sqrt(ttnn.sum(cond * cond, dim=-1, keepdim=True))
+    inverse_norm = ttnn.rsqrt(ttnn.sum(combined * combined, dim=-1, keepdim=True) + 1e-12)
+    return combined * (cond_norm * inverse_norm)
+
+
 class _SingleCombiner:
     def __init__(self, *, rescale: bool) -> None:
-        self._rescale = rescale
+        self.rescale = rescale
 
     def combine(self, predictions: Sequence[ttnn.Tensor], cfg_scale: float) -> tuple[ttnn.Tensor]:
         if len(predictions) != 1:
@@ -69,14 +79,14 @@ class _SingleCombiner:
         split_pos = n // 2
         uncond = prediction[0:split_pos]
         cond = prediction[split_pos:]
-        combined = _combine(uncond, cond, cfg_scale, rescale=self._rescale)
+        combined = _combine(uncond, cond, cfg_scale, rescale=self.rescale)
 
         return (combined,)
 
 
 class _HostCombiner:
     def __init__(self, uncond_device: ttnn.MeshDevice, cond_device: ttnn.MeshDevice, *, rescale: bool) -> None:
-        self._rescale = rescale
+        self.rescale = rescale
         self._uncond_device = uncond_device
         self._cond_device = cond_device
 
@@ -96,15 +106,15 @@ class _HostCombiner:
         received_uncond = received_uncond.to(self._cond_device)
         received_cond = received_cond.to(self._uncond_device)
 
-        combined0 = _combine(uncond, received_cond, cfg_scale, rescale=self._rescale)
-        combined1 = _combine(received_uncond, cond, cfg_scale, rescale=self._rescale)
+        combined0 = _combine(uncond, received_cond, cfg_scale, rescale=self.rescale)
+        combined1 = _combine(received_uncond, cond, cfg_scale, rescale=self.rescale)
 
         return combined0, combined1
 
 
 class _SocketCombiner:
     def __init__(self, uncond_device: ttnn.MeshDevice, cond_device: ttnn.MeshDevice, *, rescale: bool) -> None:
-        self._rescale = rescale
+        self.rescale = rescale
         self._devices = (uncond_device, cond_device)
         self._sockets = _create_sockets(uncond_device, cond_device)
         self._recv_buffers: tuple[ttnn.Tensor, ttnn.Tensor] | None = None
@@ -131,8 +141,8 @@ class _SocketCombiner:
         ttnn.experimental.recv_async(received_uncond, self._sockets[0].rx)
         ttnn.experimental.send_async(cond, self._sockets[1].tx)
 
-        combined0 = _combine(uncond, received_cond, cfg_scale, rescale=self._rescale)
-        combined1 = _combine(received_uncond, cond, cfg_scale, rescale=self._rescale)
+        combined0 = _combine(uncond, received_cond, cfg_scale, rescale=self.rescale)
+        combined1 = _combine(received_uncond, cond, cfg_scale, rescale=self.rescale)
 
         return combined0, combined1
 
@@ -209,13 +219,3 @@ def distribute_cfg(
         case _:
             msg = f"unsupported number of submeshes: expected 1 or 2, got {len(devices)}"
             raise ValueError(msg)
-
-
-def _combine(uncond: ttnn.Tensor, cond: ttnn.Tensor, cfg_scale: float, *, rescale: bool) -> ttnn.Tensor:
-    combined = ttnn.lerp(uncond, cond, cfg_scale)
-    if not rescale:
-        return combined
-
-    cond_norm = ttnn.sqrt(ttnn.sum(cond * cond, dim=-1, keepdim=True))
-    inverse_norm = ttnn.rsqrt(ttnn.sum(combined * combined, dim=-1, keepdim=True) + 1e-12)
-    return combined * (cond_norm * inverse_norm)
