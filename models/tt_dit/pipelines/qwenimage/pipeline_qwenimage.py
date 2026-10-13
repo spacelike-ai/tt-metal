@@ -660,7 +660,6 @@ class QwenImagePipeline(PipelineAPIMixin):
         first_step = first_step if inpaint else 0
 
         logger.info("preparing inputs...")
-        context = [tensor.from_torch(c, device=d) for c, d in zip(torch_contexts, self._devices, strict=True)]
         latents = self._prepare_latents(
             layout,
             images=images,
@@ -671,6 +670,9 @@ class QwenImagePipeline(PipelineAPIMixin):
             traced=vae_traced,
         )
         latents = tensor.from_torch_to_devices(latents, devices=self._devices, mesh_axes=[None, self._sp_axis, None])
+        # Uploaded after the image encoding, whose VAE trace replay may overwrite device tensors
+        # allocated after its capture.
+        context = [tensor.from_torch(c, device=d) for c, d in zip(torch_contexts, self._devices, strict=True)]
         ropes = [
             self._checkpoint.rope_tables(
                 latents_height=size.latents_height,
