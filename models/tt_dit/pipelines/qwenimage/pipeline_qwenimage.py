@@ -147,6 +147,8 @@ _PRESETS_WH: dict[tuple[int, ...], dict] = {
         "encoder_tp": (4, 1),
         "encoder_fsdp": (4, 0),
         "num_links": 4,
+        # As on 2x4: without it, an edit runs out of DRAM in the vision tower and the transformer.
+        "edit_dit_fsdp": True,
     },
 }
 
