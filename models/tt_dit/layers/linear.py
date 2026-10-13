@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+import os
 
 import torch
 
@@ -774,7 +775,8 @@ def _linear(
     if total_rows <= MAX_1D_MATMUL_ROWS and fused_activation is None and not fuse_swiglu and default_block_size is None:
         # On a WH Galaxy's 8x9 grid this matmul intermittently deadlocks under Qwen-Image; on 8x8 it
         # does not.
-        if not is_blackhole():
+        clamp_rows = os.environ.get("TT_DIT_WH_1D_CLAMP_ROWS")
+        if not is_blackhole() and (clamp_rows is None or str(total_rows) in clamp_rows.split(",")):
             core_grid = ttnn.CoreCoord(core_grid.x, min(core_grid.y, 8))
         return ttnn.linear(
             x,
