@@ -772,6 +772,10 @@ def _linear(
     total_rows = math.prod(list(x.padded_shape)[:-1])
 
     if total_rows <= MAX_1D_MATMUL_ROWS and fused_activation is None and not fuse_swiglu and default_block_size is None:
+        # On a WH Galaxy's 8x9 grid this matmul intermittently deadlocks under Qwen-Image; on 8x8 it
+        # does not.
+        if not is_blackhole():
+            core_grid = ttnn.CoreCoord(core_grid.x, min(core_grid.y, 8))
         return ttnn.linear(
             x,
             weight,
