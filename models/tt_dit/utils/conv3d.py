@@ -738,17 +738,7 @@ _HALO_LAST_KEYS = {
 
 
 def get_conv3d_config(
-    in_channels,
-    out_channels,
-    kernel_size,
-    weights_dtype,
-    grid_size,
-    *,
-    h_factor=1,
-    w_factor=1,
-    T=0,
-    H=0,
-    W=0,
+    in_channels, out_channels, kernel_size, weights_dtype, grid_size, *, h_factor=1, w_factor=1, T=0, H=0, W=0
 ):
     """Get optimized Conv3dConfig for a conv3d layer.
 

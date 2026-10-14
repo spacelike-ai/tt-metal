@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, NamedTuple
@@ -136,9 +137,7 @@ _PRESETS_WH: dict[tuple[int, ...], dict] = {
         "encoder_fsdp": (2, 0),
         "num_links": 1,
         "resolutions": ((1024, 1024),),
-        # The transformer's weights, replicated across the SP axis, leave too little DRAM for an
-        # edit's activations next to the text encoder.
-        "edit_dit_fsdp": True,
+        "offload_vision_tower": True,
     },
     (4, 8): {
         "cfg": (2, 1),
@@ -147,8 +146,6 @@ _PRESETS_WH: dict[tuple[int, ...], dict] = {
         "encoder_tp": (4, 1),
         "encoder_fsdp": (4, 0),
         "num_links": 4,
-        # As on 2x4: without it, an edit runs out of DRAM in the vision tower and the transformer.
-        "edit_dit_fsdp": True,
     },
 }
 
@@ -174,7 +171,7 @@ _PRESETS_BH: dict[tuple[int, ...], dict] = {
         "sp": (4, 0),
         "tp": (4, 1),
         "encoder_tp": (4, 1),
-        "encoder_fsdp": (4, 0),
+        "encoder_fsdp": None,
         "num_links": 2,
     },
 }
@@ -194,8 +191,8 @@ class QwenImagePipelineConfig:
     use_torch_vae_encoder: bool
     # Load the text encoder's device weights only while encoding.
     offload_text_encoder: bool
-    # Shard the transformer's weights across the sequence parallel axis as well.
-    dit_fsdp: bool
+    # Load the vision tower's device weights only while encoding the input images.
+    offload_vision_tower: bool
 
     resolutions: tuple[tuple[int, int], ...]
     spatial_sequence_length_buckets: tuple[int, ...]
@@ -220,7 +217,7 @@ class QwenImagePipelineConfig:
         use_torch_vae_decoder: bool = False,
         use_torch_vae_encoder: bool = False,
         offload_text_encoder: bool | None = None,
-        dit_fsdp: bool | None = None,
+        offload_vision_tower: bool | None = None,
         resolutions: Sequence[tuple[int, int]] | None = None,
         spatial_sequence_length_buckets: Sequence[int] | None = None,
         cfg_enabled: bool = True,
@@ -236,6 +233,15 @@ class QwenImagePipelineConfig:
         preset_dict = _PRESETS_BH if ttnn.device.is_blackhole() else _PRESETS_WH
         preset = preset_dict.get(tuple(mesh_shape), {})
         mode = _mode(checkpoint_name)
+
+        # Scratch (QI-9): QWENIMAGE_LAYOUT="cfg,axis;sp,axis;tp,axis" overrides the DiT layout, runs the
+        # text encoder with the DiT's TP, and only generates 1024².
+        layout = os.environ.get("QWENIMAGE_LAYOUT")
+        if layout:
+            cfg, sp, tp = (tuple(int(x) for x in part.split(",")) for part in layout.split(";"))
+            preset = {**preset, "cfg": cfg, "sp": sp, "tp": tp, "encoder_tp": tp, "encoder_fsdp": None}
+            resolutions = ((1024, 1024),)
+            spatial_sequence_length_buckets = (4096,)
 
         if dit_parallel_config is None:
             dit_parallel_config = DiTParallelConfig.from_tuples(cfg=preset["cfg"], sp=preset["sp"], tp=preset["tp"])
@@ -268,8 +274,8 @@ class QwenImagePipelineConfig:
             sequence_length_buckets = mode.sequence_length_buckets
         if offload_text_encoder is None:
             offload_text_encoder = max_images > 0 and preset.get("edit_offload_text_encoder", False)
-        if dit_fsdp is None:
-            dit_fsdp = max_images > 0 and preset.get("edit_dit_fsdp", False)
+        if offload_vision_tower is None:
+            offload_vision_tower = preset.get("offload_vision_tower", False)
 
         return cls(
             topology=topology,
@@ -281,7 +287,7 @@ class QwenImagePipelineConfig:
             use_torch_vae_decoder=use_torch_vae_decoder,
             use_torch_vae_encoder=use_torch_vae_encoder,
             offload_text_encoder=offload_text_encoder,
-            dit_fsdp=dit_fsdp,
+            offload_vision_tower=offload_vision_tower,
             resolutions=tuple(resolutions),
             spatial_sequence_length_buckets=tuple(spatial_sequence_length_buckets),
             cfg_enabled=cfg_enabled,
@@ -384,8 +390,6 @@ class QwenImagePipeline(PipelineAPIMixin):
         self._ccl_managers = [
             CCLManager(d, num_links=config.num_links, topology=config.topology) for d in self._devices
         ]
-        # Like every diffusers Qwen-Image pipeline, rescale the guided prediction to the norm of the
-        # conditional one.
         self._combiner = CFGCombiner(self._devices, rescale=True)
 
         scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(config.checkpoint_name, subfolder="scheduler")
@@ -416,11 +420,12 @@ class QwenImagePipeline(PipelineAPIMixin):
             use_torch=config.use_torch_text_encoder,
             prompt_format=self._mode.prompt_format,
             offload=config.offload_text_encoder,
+            offload_vision=config.offload_vision_tower,
         )
 
         logger.info("creating transformers...")
         self._transformers = [
-            self._checkpoint.build(ccl_manager=m, parallel_config=config.dit_parallel_config, is_fsdp=config.dit_fsdp)
+            self._checkpoint.build(ccl_manager=m, parallel_config=config.dit_parallel_config, is_fsdp=False)
             for m in self._ccl_managers
         ]
 
@@ -565,7 +570,8 @@ class QwenImagePipeline(PipelineAPIMixin):
         """Generates an image from the prompt.
 
         ``width`` and ``height`` must be one of the configured resolutions. They default to
-        1024 x 1024, and when editing to the size of the last input image.
+        1024 x 1024, when inpainting to the configured resolution closest to the image in aspect
+        ratio, and when editing to the size of the last input image.
 
         Inpainting: pass ``image`` and ``mask_image``. The white part of the mask is regenerated,
         the rest is kept. ``strength`` sets how much the white part may change: 1 ignores what was
@@ -608,7 +614,12 @@ class QwenImagePipeline(PipelineAPIMixin):
             msg = "pass both width and height, or neither"
             raise ValueError(msg)
         if width is None or height is None:
-            size = conditions[-1] if conditions else self._image_sizes.get((1024, 1024))
+            if conditions:
+                size = conditions[-1]
+            elif inpaint:
+                size = self._nearest_size(images[0])
+            else:
+                size = self._image_sizes.get((1024, 1024))
         else:
             size = self._image_sizes.get((width, height))
         if size is None:
@@ -669,10 +680,8 @@ class QwenImagePipeline(PipelineAPIMixin):
             first_step=first_step if inpaint else None,
             traced=vae_traced,
         )
-        latents = tensor.from_torch_to_devices(latents, devices=self._devices, mesh_axes=[None, self._sp_axis, None])
-        # Uploaded after the image encoding, whose VAE trace replay may overwrite device tensors
-        # allocated after its capture.
         context = [tensor.from_torch(c, device=d) for c, d in zip(torch_contexts, self._devices, strict=True)]
+        latents = tensor.from_torch_to_devices(latents, devices=self._devices, mesh_axes=[None, self._sp_axis, None])
         ropes = [
             self._checkpoint.rope_tables(
                 latents_height=size.latents_height,

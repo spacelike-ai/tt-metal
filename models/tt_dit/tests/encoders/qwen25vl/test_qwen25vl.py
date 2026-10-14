@@ -310,7 +310,7 @@ def test_qwen25vl_encoder_pair(*, mesh_device: ttnn.MeshDevice, submesh_shape: t
     ],
     indirect=["mesh_device"],
 )
-@pytest.mark.parametrize("device_params", [line_params_req_exact_devices], ids=["line"], indirect=True)
+@pytest.mark.parametrize("device_params", [line_params_req_exact_devices], indirect=True)
 @pytest.mark.parametrize(
     ("checkpoint", "prompt_format", "image_sizes", "buckets", "pcc"),
     [
