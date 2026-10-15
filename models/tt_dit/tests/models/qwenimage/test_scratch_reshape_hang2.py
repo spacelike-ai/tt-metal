@@ -44,7 +44,9 @@ def _sync(device: ttnn.MeshDevice, label: str) -> None:
 
 
 @pytest.mark.parametrize(("mesh_device", "device_params"), EDIT_MESH_DEVICE_PARAMS, indirect=True)
-@pytest.mark.parametrize("mode", ["calls", "vision", "merger", "merger_only_reshape", "no_call"])
+@pytest.mark.parametrize(
+    "mode", ["calls", "vision", "merger", "merger_only_reshape", "no_call", "server", "server_same"]
+)
 def test_reshape_hang2(
     *, mesh_device: ttnn.MeshDevice, mode: str, is_ci_env: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -67,6 +69,18 @@ def test_reshape_hang2(
         logger.info(f"{label}: vision tower")
         encoder._encode_images([image])
         _sync(device, label)
+
+    if mode in ("server", "server_same"):
+        # The server's sequence: a warm-up call on a blank image, then the real request. "server"
+        # gives the real request a 16:9 image, so the vision tower sees a new patch count.
+        logger.info("first: warm-up edit call on a blank 1024x1024 image")
+        pipeline(prompts=["Sunrise on a beach"], num_inference_steps=2, seed=0, image=Image.new("RGB", (1024, 1024)))
+        logger.info("first: done")
+        real = image.resize((1280, 720)) if mode == "server" else image
+        logger.info(f"second: edit call on a {real.size} image")
+        pipeline(prompts=[PROMPT], num_inference_steps=30, seed=0, image=real)
+        logger.info("second: done")
+        return
 
     if mode == "no_call":
         vision("first")
