@@ -139,14 +139,12 @@ def test_tower(
     indirect=["mesh_device", "device_params"],
 )
 @pytest.mark.parametrize(("size", "pcc"), [(384, 0.997), (1024, 0.988)], ids=["384", "1024"])
-@pytest.mark.parametrize("extra_patches", [0, 500], ids=["unpadded", "padded"])
 def test_tower_photo(
     *,
     mesh_device: ttnn.MeshDevice,
     tp: int,
     size: int,
     pcc: float,
-    extra_patches: int,
     hf_config: Qwen2_5_VLVisionConfig,
     state_dict: dict[str, torch.Tensor],
     reference: torch.nn.Module,
@@ -163,14 +161,8 @@ def test_tower_photo(
         expected = reference(inputs.pixel_values, grid_thw=inputs.image_grid_thw).pooler_output
 
     tower = _tower(hf_config, state_dict, mesh_device=mesh_device, tp=tp)
-    min_patches = inputs.pixel_values.shape[0] + extra_patches if extra_patches else 0
-    actual = _run(tower, inputs.pixel_values, inputs.image_grid_thw, mesh_device=mesh_device, min_patches=min_patches)
+    actual = _run(tower, inputs.pixel_values, inputs.image_grid_thw, mesh_device=mesh_device)
 
-    # Padded, the output keeps the padding tokens after the image's.
-    tokens = expected.shape[0]
-    if extra_patches:
-        assert actual.shape[0] >= min_patches // tower.spatial_merge_size**2
-        actual = actual[:tokens]
     assert actual.shape == expected.shape
     assert_quality(expected, actual, pcc=pcc)
 
@@ -199,14 +191,9 @@ def _tower(
 
 
 def _run(
-    tower: Qwen25VlVisionModel,
-    pixel_values: torch.Tensor,
-    grid_thw: torch.Tensor,
-    *,
-    mesh_device: ttnn.MeshDevice,
-    min_patches: int = 0,
+    tower: Qwen25VlVisionModel, pixel_values: torch.Tensor, grid_thw: torch.Tensor, *, mesh_device: ttnn.MeshDevice
 ) -> torch.Tensor:
-    inputs = tower.prepare_inputs(pixel_values, grid_thw, min_patches=min_patches)
+    inputs = tower.prepare_inputs(pixel_values, grid_thw)
     output = tower.forward(
         tensor.from_torch(inputs.patches, device=mesh_device),
         rope=(tensor.from_torch(inputs.cos, device=mesh_device), tensor.from_torch(inputs.sin, device=mesh_device)),

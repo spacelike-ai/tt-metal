@@ -119,19 +119,16 @@ def prepare_vision_inputs(
     spatial_merge_size: int,
     window_size: int,
     patch_size: int,
-    min_patches: int = 0,
 ) -> VisionInputs:
     """Reorders the processor's patches into windows and builds the rotary and block tensors.
 
-    The patch count is padded to at least `min_patches`, and to a multiple of
-    `TILE * spatial_merge_size ** 2`, so that both the patches and the merged tokens fill whole
-    tiles. With `min_patches`, `reverse_index` keeps the padding tokens at its end, so that the
-    tower's output shape depends only on the padded count.
+    The patch count is padded to a multiple of `TILE * spatial_merge_size ** 2`, so that both the
+    patches and the merged tokens fill whole tiles.
     """
     merge_unit = spatial_merge_size**2
     num_patches = pixel_values.shape[0]
     multiple = _TILE * merge_unit
-    padded_patches = -(-max(num_patches, min_patches) // multiple) * multiple
+    padded_patches = -(-num_patches // multiple) * multiple
 
     window_index, cu_window_seqlens = vision_window_index(
         grid_thw, spatial_merge_size=spatial_merge_size, window_size=window_size, patch_size=patch_size
@@ -157,18 +154,13 @@ def prepare_vision_inputs(
         msg = f"{len(cu_window_seqlens) - 1} attention windows exceed the {_MAX_WINDOWS} SDPA supports"
         raise ValueError(msg)
 
-    reverse_index = torch.argsort(window_index)
-    if min_patches:
-        padding_index = torch.arange(num_patches // merge_unit, padded_patches // merge_unit)
-        reverse_index = torch.cat([reverse_index, padding_index])
-
     return VisionInputs(
         patches=patches,
         cos=cos,
         sin=sin,
         cu_seqlens=cu_seqlens,
         cu_window_seqlens=cu_window_seqlens,
-        reverse_index=reverse_index,
+        reverse_index=torch.argsort(window_index),
     )
 
 
@@ -323,11 +315,7 @@ class Qwen25VlVisionPatchMerger(Module):
 
     def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
         """`(patches, hidden_size)` -> `(patches // merge ** 2, out_hidden_size)`."""
-        x = ttnn.typecast(self.norm.forward(x), ttnn.bfloat16)
-        # Reshaped in row-major. TODO: add link to issue
-        x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
-        x = ttnn.reshape(x, (-1, self.merged_size))
-        x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
+        x = ttnn.reshape(ttnn.typecast(self.norm.forward(x), ttnn.bfloat16), (-1, self.merged_size))
         return row_parallel_forward(self.linear_fc2, ttnn.gelu(self.linear_fc1.forward(x)), self._p)
 
 
@@ -436,9 +424,7 @@ class Qwen25VlVisionModel(Module):
             ccl_manager=ccl_manager,
         )
 
-    def prepare_inputs(
-        self, pixel_values: torch.Tensor, grid_thw: torch.Tensor, *, min_patches: int = 0
-    ) -> VisionInputs:
+    def prepare_inputs(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor) -> VisionInputs:
         return prepare_vision_inputs(
             pixel_values,
             grid_thw,
@@ -446,7 +432,6 @@ class Qwen25VlVisionModel(Module):
             spatial_merge_size=self.spatial_merge_size,
             window_size=self.window_size,
             patch_size=self.patch_size,
-            min_patches=min_patches,
         )
 
     def forward(
@@ -461,8 +446,7 @@ class Qwen25VlVisionModel(Module):
         """Runs the tower on the inputs [`prepare_vision_inputs`] made, uploaded to the device.
 
         `reverse_index` is a `(1, tokens)` uint32 row-major tensor. Returns the `(tokens,
-        out_hidden_size)` merged tokens in the reference's order, followed by the padding tokens
-        when the inputs were made with `min_patches`.
+        out_hidden_size)` merged tokens in the reference's order.
         """
         hidden_states = ttnn.typecast(self.patch_embed.forward(patches), ttnn.float32)
         for i, block in enumerate(self.blocks):
