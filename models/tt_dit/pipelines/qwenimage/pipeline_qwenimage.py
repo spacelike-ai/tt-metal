@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import math
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, NamedTuple
@@ -234,15 +233,6 @@ class QwenImagePipelineConfig:
         preset = preset_dict.get(tuple(mesh_shape), {})
         mode = _mode(checkpoint_name)
 
-        # Scratch (QI-9): QWENIMAGE_LAYOUT="cfg,axis;sp,axis;tp,axis" overrides the DiT layout, runs the
-        # text encoder with the DiT's TP, and only generates 1024².
-        layout = os.environ.get("QWENIMAGE_LAYOUT")
-        if layout:
-            cfg, sp, tp = (tuple(int(x) for x in part.split(",")) for part in layout.split(";"))
-            preset = {**preset, "cfg": cfg, "sp": sp, "tp": tp, "encoder_tp": tp, "encoder_fsdp": None}
-            resolutions = ((1024, 1024),)
-            spatial_sequence_length_buckets = (4096,)
-
         if dit_parallel_config is None:
             dit_parallel_config = DiTParallelConfig.from_tuples(cfg=preset["cfg"], sp=preset["sp"], tp=preset["tp"])
 
@@ -421,6 +411,8 @@ class QwenImagePipeline(PipelineAPIMixin):
             prompt_format=self._mode.prompt_format,
             offload=config.offload_text_encoder,
             offload_vision=config.offload_vision_tower,
+            vision_image_sizes=[self._vision_size(s.width / s.height, s) for s in self._image_sizes.values()],
+            max_images=self._max_images,
         )
 
         logger.info("creating transformers...")
@@ -513,40 +505,51 @@ class QwenImagePipeline(PipelineAPIMixin):
             self._vae_encoder.encode(torch.zeros(1, 3, size.height, size.width), traced=traced)
 
     def _warm_up_edit(self, *, traced: bool) -> None:
-        """Runs every prompt bucket with each number of input images, at the largest resolution."""
-        size = max(self._image_sizes.values(), key=lambda s: s.sequence_length)
-        image = Image.new("RGB", (size.width, size.height))
+        """Runs every prompt bucket with each number of input images.
+
+        The vision tower pads its input to one length per image count, so any resolution warms it
+        up. How many prompt tokens the images take depends on their resolution, though, so each
+        prompt bucket runs at the largest resolution that reaches it.
+        """
+        sizes = sorted(self._image_sizes.values(), key=lambda s: s.sequence_length, reverse=True)
 
         for image_count in range(1, self._max_images + 1):
-            images = [image] * image_count
-            vision_images = self._vision_images(images, [size] * image_count)
-            # The prompt bucket of the image announcements alone, and the ones above it.
-            empty_length = self._text_encoder.prompt_length("", images=vision_images)
-            buckets = sorted(b for b in self._sequence_length_buckets if b >= empty_length)
+            done_buckets = set()
+            for size in sizes:
+                image = Image.new("RGB", (size.width, size.height))
+                images = [image] * image_count
+                vision_images = self._vision_images(images, [size] * image_count)
+                # The prompt bucket of the image announcements alone, and the ones above it.
+                empty_length = self._text_encoder.prompt_length("", images=vision_images)
+                buckets = sorted(b for b in self._sequence_length_buckets if b >= empty_length)
 
-            for bucket in reversed(buckets):
-                # Fill the bucket up to two tokens, staying above the next-smaller bucket.
-                word_count = bucket - empty_length - 2
-                prompt = "a " * word_count
-                while word_count > 0 and self._text_encoder.prompt_length(prompt, images=vision_images) > bucket:
-                    word_count -= 1
+                for bucket in reversed(buckets):
+                    if bucket in done_buckets:
+                        continue
+                    done_buckets.add(bucket)
+
+                    # Fill the bucket up to two tokens, staying above the next-smaller bucket.
+                    word_count = bucket - empty_length - 2
                     prompt = "a " * word_count
+                    while word_count > 0 and self._text_encoder.prompt_length(prompt, images=vision_images) > bucket:
+                        word_count -= 1
+                        prompt = "a " * word_count
 
-                self(
-                    prompts=[prompt],
-                    negative_prompts=[prompt],
-                    num_inference_steps=2,
-                    cfg_scale=2 if self._cfg_enabled else 1,
-                    width=size.width,
-                    height=size.height,
-                    traced=traced,
-                    encoder_traced=traced,
-                    vae_traced=traced,
-                    image=images,
-                    # Edit inpainting takes a single image.
-                    mask_image=Image.new("L", (size.width, size.height), 255) if image_count == 1 else None,
-                    strength=1.0,
-                )
+                    self(
+                        prompts=[prompt],
+                        negative_prompts=[prompt],
+                        num_inference_steps=2,
+                        cfg_scale=2 if self._cfg_enabled else 1,
+                        width=size.width,
+                        height=size.height,
+                        traced=traced,
+                        encoder_traced=traced,
+                        vae_traced=traced,
+                        image=images,
+                        # Edit inpainting takes a single image.
+                        mask_image=Image.new("L", (size.width, size.height), 255) if image_count == 1 else None,
+                        strength=1.0,
+                    )
 
     def __call__(
         self,
@@ -834,12 +837,17 @@ class QwenImagePipeline(PipelineAPIMixin):
 
         That is at the size of their latents, or for Edit-2509 and 2511 at about 384² pixels.
         """
-        area = self._mode.vision_area
         resized = []
         for image, size in zip(images, sizes, strict=True):
-            width, height = (size.width, size.height) if area is None else edit_size(area, image.width / image.height)
+            width, height = self._vision_size(image.width / image.height, size)
             resized.append(self._image_processor.resize(image, height, width))
         return resized
+
+    def _vision_size(self, aspect_ratio: float, size: _ImageSize) -> tuple[int, int]:
+        """The (width, height) the text encoder sees an input image of ``aspect_ratio`` in, which is
+        resized to ``size`` for the transformer."""
+        area = self._mode.vision_area
+        return (size.width, size.height) if area is None else edit_size(area, aspect_ratio)
 
     @staticmethod
     def _sequence_length_tensor(length: int, *, device: ttnn.MeshDevice, on_host: bool = False) -> ttnn.Tensor:
