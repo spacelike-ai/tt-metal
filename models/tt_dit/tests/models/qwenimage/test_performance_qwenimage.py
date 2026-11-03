@@ -81,6 +81,8 @@ EDIT_PROMPT = (
 
 # Input aspect ratios for editing, (width, height); the edit output takes the last input's.
 EDIT_ASPECT_RATIOS = {"1:1": (1, 1), "16:9": (16, 9)}
+# Input image counts timed beyond one; Edit-2509 and 2511 take up to three.
+EDIT_IMAGE_COUNTS = (2, 3)
 
 
 @dataclass
@@ -339,7 +341,8 @@ def test_qwenimage_edit_pipeline_performance(
     is_ci_env: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Times Qwen-Image-Edit-2511 with one square and one 16:9 input image, and edit inpainting.
+    """Times Qwen-Image-Edit-2511 with one square and one 16:9 input image, edit inpainting, and two
+    and three square input images.
 
     Edit and Edit-2509 run the same transformer and text encoder, so they take the same time.
     """
@@ -356,6 +359,9 @@ def test_qwenimage_edit_pipeline_performance(
         for name, aspect in EDIT_ASPECT_RATIOS.items()
     ]
     cases.append(Case("edit inpaint 1:1", EDIT_NUM_INFERENCE_STEPS, inpaint_inputs()))
+    # The time depends on the number of input images, not their content.
+    for count in EDIT_IMAGE_COUNTS:
+        cases.append(Case(f"edit {count} images 1:1", EDIT_NUM_INFERENCE_STEPS, {"image": [dog] * count}))
 
     benchmark_profiler, iterations = run_cases(
         pipeline,
