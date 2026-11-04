@@ -22,7 +22,12 @@ from models.tt_dit.pipelines.qwenimage.pipeline_qwenimage import (
 )
 from models.tt_dit.utils.dbcache import DBCacheConfig
 
-from .device_params import DBCACHE_MESH_DEVICE_PARAMS, EDIT_MESH_DEVICE_PARAMS, MESH_DEVICE_PARAMS
+from .device_params import (
+    DBCACHE_MESH_DEVICE_PARAMS,
+    EDIT_DBCACHE_MESH_DEVICE_PARAMS,
+    EDIT_MESH_DEVICE_PARAMS,
+    MESH_DEVICE_PARAMS,
+)
 
 DOG_IMAGE_PATH = Path(__file__).resolve().parents[4] / "demos" / "multimodal" / "gemma3" / "dog.jpg"
 
@@ -177,6 +182,80 @@ def test_qwenimage_dbcache(*, mesh_device: ttnn.MeshDevice, is_ci_env: bool, mon
     # measured with it (with threshold 0.08, 4 warm-up steps and 2 cached in a row: 28.7 dB, 1.66x).
     assert psnr >= 25
     assert full_times["denoising"] / cached_times["denoising"] >= 1.4
+
+
+@pytest.mark.parametrize(("mesh_device", "device_params"), EDIT_DBCACHE_MESH_DEVICE_PARAMS, indirect=True)
+def test_qwenimage_edit_dbcache(
+    *, mesh_device: ttnn.MeshDevice, is_ci_env: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compares DBCache edits with full ones for one to three input images, with Edit-2511 at 40 steps."""
+    if is_ci_env:
+        monkeypatch.setenv("TT_DIT_CACHE_DIR", "/tmp/TT_DIT_CACHE")
+
+    num_inference_steps = 40
+    config = QwenImagePipelineConfig.default(
+        mesh_shape=mesh_device.shape, checkpoint_name="Qwen/Qwen-Image-Edit-2511", dbcache=DEFAULT_DBCACHE
+    )
+    pipeline = QwenImagePipeline(device=mesh_device, config=config)
+    # The Qwen-Image-Edit-2511 model card's prompt.
+    prompt = (
+        "The magician bear is on the left, the alchemist bear is on the right, facing each other in the central "
+        "park square."
+    )
+    dog = Image.open(DOG_IMAGE_PATH).convert("RGB")
+
+    def run(images: list[Image.Image], dbcache: DBCacheConfig | None) -> tuple[np.ndarray, dict[str, float]]:
+        starts: dict[str, float] = {}
+        durations: dict[str, float] = {}
+
+        def on_event(event: object) -> None:
+            if isinstance(event, SectionStart):
+                starts[event.name] = time.perf_counter()
+            elif isinstance(event, SectionEnd):
+                durations[event.name] = time.perf_counter() - starts[event.name]
+
+        (edited,) = pipeline(
+            prompts=[prompt],
+            num_inference_steps=num_inference_steps,
+            seed=0,
+            image=images,
+            dbcache=dbcache,
+            on_event=on_event,
+        )
+        name = "full" if dbcache is not None else "cached"
+        edited.save(f"qwenimage_edit_2511_{len(images)}_images_dbcache_{name}.png")
+        return np.asarray(edited, dtype=np.float64), durations
+
+    failures = []
+    for count in (1, 2, 3):
+        # The time depends on the number of input images, not their content.
+        images = [dog] * count
+        full, full_times = run(images, DBCacheConfig(residual_diff_threshold=0))
+        cached, cached_times = run(images, None)
+        assert pipeline._dbcache is not None
+        cached_steps = pipeline._dbcache.cached_steps
+
+        mse = np.mean((full - cached) ** 2)
+        psnr = 10 * np.log10(255**2 / mse) if mse > 0 else float("inf")
+        pcc = np.corrcoef(full.ravel(), cached.ravel())[0, 1]
+        logger.info(
+            f"{count} images: DBCache skipped {len(cached_steps)} of {num_inference_steps} steps: {cached_steps}"
+        )
+        logger.info(f"{count} images: DBCache vs. full: PSNR {psnr:.1f} dB, PCC {pcc:.4f}")
+        for section in ("total", "denoising"):
+            speedup = full_times[section] / cached_times[section]
+            logger.info(
+                f"{count} images: {section}: full {full_times[section]:.1f} s, DBCache "
+                f"{cached_times[section]:.1f} s, {speedup:.2f}x"
+            )
+        if psnr < 25:
+            failures.append(f"{count} images: PSNR {psnr:.1f} dB")
+        if full_times["denoising"] / cached_times["denoising"] < 1.4:
+            failures.append(
+                f"{count} images: denoising speedup {full_times['denoising'] / cached_times['denoising']:.2f}x"
+            )
+
+    assert not failures, "; ".join(failures)
 
 
 @pytest.mark.parametrize(("mesh_device", "device_params"), MESH_DEVICE_PARAMS, indirect=True)

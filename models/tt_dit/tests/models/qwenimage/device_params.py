@@ -58,3 +58,12 @@ EDIT_MESH_DEVICE_PARAMS = [
     )
     for shape in [(2, 2), (2, 4), (4, 8)]
 ]
+
+EDIT_DBCACHE_MESH_DEVICE_PARAMS = [
+    pytest.param(
+        shape,
+        {**line_params_req_exact_devices, "trace_region_size": int(_edit_trace_region_size(shape) * 1.1)},
+        id=f"{shape[0]}x{shape[1]}",
+    )
+    for shape in [(2, 2), (2, 4), (4, 8)]
+]
