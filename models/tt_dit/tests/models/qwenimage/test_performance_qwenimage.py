@@ -108,13 +108,40 @@ def inpaint_inputs() -> dict[str, Any]:
     return {"image": image, "mask_image": mask, "strength": 1.0}
 
 
+def benchmark_cases(config: QwenImagePipelineConfig) -> list[Case]:
+    """The opt-in benchmark's cases: the benchmark resolutions the config has, and inpainting."""
+    cases = [
+        Case(f"{width}x{height}", NUM_INFERENCE_STEPS, {"width": width, "height": height})
+        for width, height in BENCHMARK_RESOLUTIONS
+        if (width, height) in config.resolutions
+    ]
+    # The dog image is square, so this inpaints at 1024².
+    cases.append(Case("inpaint 1024x1024", NUM_INFERENCE_STEPS, inpaint_inputs()))
+    return cases
+
+
+def edit_cases() -> list[Case]:
+    """One square and one 16:9 input image, edit inpainting, and two and three square input images."""
+    dog = Image.open(DOG_IMAGE_PATH).convert("RGB")
+    cases = [
+        Case(f"edit {name}", EDIT_NUM_INFERENCE_STEPS, {"image": crop_to_aspect_ratio(dog, aspect)})
+        for name, aspect in EDIT_ASPECT_RATIOS.items()
+    ]
+    cases.append(Case("edit inpaint 1:1", EDIT_NUM_INFERENCE_STEPS, inpaint_inputs()))
+    # The time depends on the number of input images, not their content.
+    for count in EDIT_IMAGE_COUNTS:
+        cases.append(Case(f"edit {count} images 1:1", EDIT_NUM_INFERENCE_STEPS, {"image": [dog] * count}))
+    return cases
+
+
 def run_cases(
     pipeline: QwenImagePipeline, cases: list[Case], *, prompt: str, file_prefix: str, runs_per_case: int
-) -> tuple[BenchmarkProfiler, dict[str, list[int]]]:
-    """Runs each case once unmeasured, then ``runs_per_case`` times, and returns the profiler and each
-    case's iterations."""
+) -> tuple[BenchmarkProfiler, dict[str, list[int]], dict[str, Image.Image]]:
+    """Runs each case once unmeasured, then ``runs_per_case`` times, and returns the profiler, each
+    case's iterations and each case's last image."""
     benchmark_profiler = BenchmarkProfiler()
     iterations = {}
+    last_images = {}
     for c, case in enumerate(cases):
         # The pipeline's warm-up does not cover every case (the first measured edit run was 2-6%
         # slower on BH Galaxy), so each case first runs once unmeasured.
@@ -137,7 +164,8 @@ def run_cases(
             log_section_durations(benchmark_profiler, iteration, per_step={"denoising": case.num_inference_steps})
             tag = case.label.replace(" ", "_").replace(":", "x")
             images[0].save(f"{file_prefix}_{tag}_perf_run{i}.png")
-    return benchmark_profiler, iterations
+            last_images[case.label] = images[0]
+    return benchmark_profiler, iterations, last_images
 
 
 def durations(profiler: BenchmarkProfiler, name: str, its: list[int]) -> list[float]:
@@ -248,16 +276,13 @@ def test_qwenimage_pipeline_performance(
     )
     pipeline = QwenImagePipeline(device=mesh_device, config=config)
 
-    resolutions = [r for r in BENCHMARK_RESOLUTIONS if r in config.resolutions] if all_resolutions else [(1024, 1024)]
-    cases = [
-        Case(f"{width}x{height}", NUM_INFERENCE_STEPS, {"width": width, "height": height})
-        for width, height in resolutions
-    ]
-    if all_resolutions:
-        # The dog image is square, so this inpaints at 1024².
-        cases.append(Case("inpaint 1024x1024", NUM_INFERENCE_STEPS, inpaint_inputs()))
+    cases = (
+        benchmark_cases(config)
+        if all_resolutions
+        else [Case("1024x1024", NUM_INFERENCE_STEPS, {"width": 1024, "height": 1024})]
+    )
 
-    benchmark_profiler, iterations = run_cases(
+    benchmark_profiler, iterations, _ = run_cases(
         pipeline,
         cases,
         prompt=PROMPT,
@@ -357,17 +382,9 @@ def test_qwenimage_edit_pipeline_performance(
     pipeline = QwenImagePipeline.create_pipeline(mesh_device=mesh_device, checkpoint_name=checkpoint_name)
     config = QwenImagePipelineConfig.default(mesh_shape=mesh_device.shape, checkpoint_name=checkpoint_name)
 
-    dog = Image.open(DOG_IMAGE_PATH).convert("RGB")
-    cases = [
-        Case(f"edit {name}", EDIT_NUM_INFERENCE_STEPS, {"image": crop_to_aspect_ratio(dog, aspect)})
-        for name, aspect in EDIT_ASPECT_RATIOS.items()
-    ]
-    cases.append(Case("edit inpaint 1:1", EDIT_NUM_INFERENCE_STEPS, inpaint_inputs()))
-    # The time depends on the number of input images, not their content.
-    for count in EDIT_IMAGE_COUNTS:
-        cases.append(Case(f"edit {count} images 1:1", EDIT_NUM_INFERENCE_STEPS, {"image": [dog] * count}))
+    cases = edit_cases()
 
-    benchmark_profiler, iterations = run_cases(
+    benchmark_profiler, iterations, _ = run_cases(
         pipeline,
         cases,
         prompt=EDIT_PROMPT,
