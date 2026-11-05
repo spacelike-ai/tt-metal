@@ -111,10 +111,14 @@ def inpaint_inputs() -> dict[str, Any]:
 def run_cases(
     pipeline: QwenImagePipeline, cases: list[Case], *, prompt: str, file_prefix: str, runs_per_case: int
 ) -> tuple[BenchmarkProfiler, dict[str, list[int]]]:
-    """Runs each case ``runs_per_case`` times and returns the profiler and each case's iterations."""
+    """Runs each case once unmeasured, then ``runs_per_case`` times, and returns the profiler and each
+    case's iterations."""
     benchmark_profiler = BenchmarkProfiler()
     iterations = {}
     for c, case in enumerate(cases):
+        # The pipeline's warm-up does not cover every case (the first measured edit run was 2-6%
+        # slower on BH Galaxy), so each case first runs once unmeasured.
+        pipeline(prompts=[prompt], num_inference_steps=case.num_inference_steps, traced=True, **case.kwargs)
         iterations[case.label] = []
         for i in range(runs_per_case):
             iteration = c * runs_per_case + i

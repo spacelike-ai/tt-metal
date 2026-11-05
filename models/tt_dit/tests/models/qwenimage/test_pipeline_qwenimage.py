@@ -4,8 +4,9 @@
 
 import itertools
 import os
+import statistics
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import numpy as np
@@ -30,6 +31,32 @@ from .device_params import (
 )
 
 DOG_IMAGE_PATH = Path(__file__).resolve().parents[4] / "demos" / "multimodal" / "gemma3" / "dog.jpg"
+
+# Timed runs per configuration in the DBCache tests, after one unmeasured run.
+DBCACHE_TIMED_RUNS = 3
+
+
+def run_timed(
+    generate: Callable[[Callable[[object], None]], Image.Image], label: str
+) -> tuple[Image.Image, dict[str, float]]:
+    """Calls ``generate(on_event)`` once unmeasured, then ``DBCACHE_TIMED_RUNS`` times, and returns the
+    last image and each section's mean duration over the timed runs."""
+    generate(lambda event: None)
+    runs: list[dict[str, float]] = []
+    for _ in range(DBCACHE_TIMED_RUNS):
+        starts: dict[str, float] = {}
+        durations: dict[str, float] = {}
+
+        def on_event(event: object, starts: dict[str, float] = starts, durations: dict[str, float] = durations) -> None:
+            if isinstance(event, SectionStart):
+                starts[event.name] = time.perf_counter()
+            elif isinstance(event, SectionEnd):
+                durations[event.name] = time.perf_counter() - starts[event.name]
+
+        image = generate(on_event)
+        runs.append(durations)
+    logger.info(f"{label}: total per run " + ", ".join(f"{run['total']:.2f} s" for run in runs))
+    return image, {name: statistics.mean(run[name] for run in runs) for name in runs[0]}
 
 
 def create_1024_pipeline(mesh_device: ttnn.MeshDevice) -> QwenImagePipeline:
@@ -138,19 +165,15 @@ def test_qwenimage_dbcache(*, mesh_device: ttnn.MeshDevice, is_ci_env: bool, mon
     prompt = 'A coffee shop entrance with a chalkboard sign reading "Qwen Coffee $2 per cup".'
 
     def run(dbcache: DBCacheConfig | None) -> tuple[np.ndarray, dict[str, float]]:
-        starts: dict[str, float] = {}
-        durations: dict[str, float] = {}
-
-        def on_event(event: object) -> None:
-            if isinstance(event, SectionStart):
-                starts[event.name] = time.perf_counter()
-            elif isinstance(event, SectionEnd):
-                durations[event.name] = time.perf_counter() - starts[event.name]
-
-        images = pipeline(prompts=[prompt], num_inference_steps=50, seed=0, dbcache=dbcache, on_event=on_event)
         name = "full" if dbcache is not None else "cached"
-        images[0].save(f"qwenimage_dbcache_{name}.png")
-        return np.asarray(images[0], dtype=np.float64), durations
+        image, durations = run_timed(
+            lambda on_event: pipeline(
+                prompts=[prompt], num_inference_steps=50, seed=0, dbcache=dbcache, on_event=on_event
+            )[0],
+            name,
+        )
+        image.save(f"qwenimage_dbcache_{name}.png")
+        return np.asarray(image, dtype=np.float64), durations
 
     full, full_times = run(DBCacheConfig(residual_diff_threshold=0))
     cached, cached_times = run(None)
@@ -205,24 +228,18 @@ def test_qwenimage_edit_dbcache(
     dog = Image.open(DOG_IMAGE_PATH).convert("RGB")
 
     def run(images: list[Image.Image], dbcache: DBCacheConfig | None) -> tuple[np.ndarray, dict[str, float]]:
-        starts: dict[str, float] = {}
-        durations: dict[str, float] = {}
-
-        def on_event(event: object) -> None:
-            if isinstance(event, SectionStart):
-                starts[event.name] = time.perf_counter()
-            elif isinstance(event, SectionEnd):
-                durations[event.name] = time.perf_counter() - starts[event.name]
-
-        (edited,) = pipeline(
-            prompts=[prompt],
-            num_inference_steps=num_inference_steps,
-            seed=0,
-            image=images,
-            dbcache=dbcache,
-            on_event=on_event,
-        )
         name = "full" if dbcache is not None else "cached"
+        edited, durations = run_timed(
+            lambda on_event: pipeline(
+                prompts=[prompt],
+                num_inference_steps=num_inference_steps,
+                seed=0,
+                image=images,
+                dbcache=dbcache,
+                on_event=on_event,
+            )[0],
+            f"{len(images)} images, {name}",
+        )
         edited.save(f"qwenimage_edit_2511_{len(images)}_images_dbcache_{name}.png")
         return np.asarray(edited, dtype=np.float64), durations
 
