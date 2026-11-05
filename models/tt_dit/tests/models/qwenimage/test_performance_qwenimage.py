@@ -5,6 +5,7 @@
 import os
 import statistics
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -79,6 +80,16 @@ EDIT_PROMPT = (
     "square."
 )
 
+# The seeds of our NVIDIA benchmark's inputs/qwen-image.json and qwen-image-edit.json. DBCache's
+# skipped steps, and so its time, depend on the seed, prompt and input images.
+SEED = 1
+EDIT_SEED = 123
+# Its edit photos, of which an edit with n input images takes the first n.
+GPU_BENCHMARK_IMAGES = [
+    Path(__file__).resolve().parent.parent / "gpu_benchmark_inputs" / name
+    for name in ("farmers-market.jpg", "mount-hood.jpg", "city-street.jpg")
+]
+
 # Input aspect ratios for editing, (width, height); the edit output takes the last input's.
 EDIT_ASPECT_RATIOS = {"1:1": (1, 1), "16:9": (16, 9)}
 # Input image counts timed beyond one; Edit-2509 and 2511 take up to three.
@@ -121,31 +132,43 @@ def benchmark_cases(config: QwenImagePipelineConfig) -> list[Case]:
 
 
 def edit_cases() -> list[Case]:
-    """One square and one 16:9 input image, edit inpainting, and two and three square input images."""
-    dog = Image.open(DOG_IMAGE_PATH).convert("RGB")
+    """One square and one 16:9 input image, edit inpainting, and two and three square input images.
+
+    The edits take the NVIDIA benchmark's photos, center-cropped to the aspect ratio as there.
+    Inpainting has no counterpart there and repaints the dog.
+    """
+    photos = [Image.open(path).convert("RGB") for path in GPU_BENCHMARK_IMAGES]
     cases = [
-        Case(f"edit {name}", EDIT_NUM_INFERENCE_STEPS, {"image": crop_to_aspect_ratio(dog, aspect)})
+        Case(f"edit {name}", EDIT_NUM_INFERENCE_STEPS, {"image": crop_to_aspect_ratio(photos[0], aspect)})
         for name, aspect in EDIT_ASPECT_RATIOS.items()
     ]
     cases.append(Case("edit inpaint 1:1", EDIT_NUM_INFERENCE_STEPS, inpaint_inputs()))
-    # The time depends on the number of input images, not their content.
     for count in EDIT_IMAGE_COUNTS:
-        cases.append(Case(f"edit {count} images 1:1", EDIT_NUM_INFERENCE_STEPS, {"image": [dog] * count}))
+        images = [crop_to_aspect_ratio(photo, (1, 1)) for photo in photos[:count]]
+        cases.append(Case(f"edit {count} images 1:1", EDIT_NUM_INFERENCE_STEPS, {"image": images}))
     return cases
 
 
 def run_cases(
-    pipeline: QwenImagePipeline, cases: list[Case], *, prompt: str, file_prefix: str, runs_per_case: int
+    pipeline: QwenImagePipeline,
+    cases: list[Case],
+    *,
+    prompt: str,
+    seed: int,
+    file_prefix: str,
+    runs_per_case: int,
 ) -> tuple[BenchmarkProfiler, dict[str, list[int]], dict[str, Image.Image]]:
     """Runs each case once unmeasured, then ``runs_per_case`` times, and returns the profiler, each
-    case's iterations and each case's last image."""
+    case's iterations and each case's last image. The negative prompt is empty, as in the NVIDIA
+    benchmark."""
     benchmark_profiler = BenchmarkProfiler()
     iterations = {}
     last_images = {}
+    inputs = {"prompts": [prompt], "negative_prompts": [""], "seed": seed, "traced": True}
     for c, case in enumerate(cases):
         # The pipeline's warm-up does not cover every case (the first measured edit run was 2-6%
         # slower on BH Galaxy), so each case first runs once unmeasured.
-        pipeline(prompts=[prompt], num_inference_steps=case.num_inference_steps, traced=True, **case.kwargs)
+        pipeline(num_inference_steps=case.num_inference_steps, **inputs, **case.kwargs)
         iterations[case.label] = []
         for i in range(runs_per_case):
             iteration = c * runs_per_case + i
@@ -153,10 +176,9 @@ def run_cases(
 
             with benchmark_profiler("run", iteration=iteration):
                 images = pipeline(
-                    prompts=[prompt],
                     num_inference_steps=case.num_inference_steps,
-                    traced=True,
                     on_event=profiler_event_callback(benchmark_profiler, iteration),
+                    **inputs,
                     **case.kwargs,
                 )
 
@@ -286,6 +308,7 @@ def test_qwenimage_pipeline_performance(
         pipeline,
         cases,
         prompt=PROMPT,
+        seed=SEED,
         file_prefix="qwenimage",
         runs_per_case=BENCHMARK_RUNS_PER_CASE if all_resolutions else CI_RUNS_PER_CASE,
     )
@@ -388,6 +411,7 @@ def test_qwenimage_edit_pipeline_performance(
         pipeline,
         cases,
         prompt=EDIT_PROMPT,
+        seed=EDIT_SEED,
         file_prefix="qwenimage_edit_2511",
         runs_per_case=BENCHMARK_RUNS_PER_CASE,
     )

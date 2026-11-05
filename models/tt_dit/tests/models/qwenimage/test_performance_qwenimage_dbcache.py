@@ -6,7 +6,8 @@
 
 Each test runs once per variant: ``plain`` builds the pipeline without DBCache, ``dbcache`` with
 ``DEFAULT_DBCACHE``. Each variant opens its own device and builds its own pipeline, with the same
-device parameters, cases, prompts, seed, unmeasured run and timed runs. Select both variants in one
+device parameters, cases, unmeasured run and timed runs, and the prompts, seeds and photos of our
+NVIDIA benchmark, on which DBCache's skipped steps depend. Select both variants in one
 pytest call (``-k <mesh>``) so they run on the same machine; the second prints the speedups and the
 PSNR of each case's DBCache image against the plain one.
 """
@@ -28,7 +29,9 @@ from .device_params import DBCACHE_MESH_DEVICE_PARAMS, EDIT_DBCACHE_MESH_DEVICE_
 from .test_performance_qwenimage import (
     BENCHMARK_RUNS_PER_CASE,
     EDIT_PROMPT,
+    EDIT_SEED,
     PROMPT,
+    SEED,
     Case,
     benchmark_cases,
     durations,
@@ -57,6 +60,7 @@ def benchmark(
     config: QwenImagePipelineConfig,
     cases: list[Case],
     prompt: str,
+    seed: int,
     use_dbcache: bool,
 ) -> None:
     pipeline = QwenImagePipeline(device=mesh_device, config=config)
@@ -65,6 +69,7 @@ def benchmark(
         pipeline,
         cases,
         prompt=prompt,
+        seed=seed,
         file_prefix=f"{test}_{variant}",
         runs_per_case=BENCHMARK_RUNS_PER_CASE,
     )
@@ -126,6 +131,7 @@ def test_qwenimage_dbcache_performance(
         config=config,
         cases=benchmark_cases(config),
         prompt=PROMPT,
+        seed=SEED,
         use_dbcache=use_dbcache,
     )
 
@@ -150,5 +156,6 @@ def test_qwenimage_edit_dbcache_performance(
         config=config,
         cases=edit_cases(),
         prompt=EDIT_PROMPT,
+        seed=EDIT_SEED,
         use_dbcache=use_dbcache,
     )
